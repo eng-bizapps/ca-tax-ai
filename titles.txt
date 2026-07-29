@@ -1,0 +1,97 @@
+1500	Foreword
+1501	Service Enterprises Generally
+1502	Computers, Programs, and Data Processing
+1503	Hospitals and other Medical Service Facilities, Institutions and Homes for the Care of Persons
+1504	Mailing Lists and Services
+1505	Funeral Directors
+1506	Miscellaneous Service Enterprises
+1507	Technology Transfer Agreements
+1521	Construction Contractors
+1524	Manufacturers of Personal Property
+1525	Property Used in Manufacturing
+1526	Producing, Fabricating and Processing Property Furnished by Consumers—General Rules
+1527	Sound Recording
+1528	Photographers, Photocopiers, Photo Finishers and X-Ray Laboratories
+1529	Motion Pictures
+1530	Foundries
+1531	Fur Dressers and Dyers
+1532	Teleproduction or Other Postproduction Service Equipment
+1533	Liquefied Petroleum Gas
+1534	Timber Harvesting Equipment and Machinery
+1535	Racehorse Breeding Stock
+1540	Advertising Agencies and Commercial Artists
+1541	Printing and Related Arts
+1543	Publishers
+1546	Installing, Repairing, Reconditioning in General
+1548	Retreading and Recapping Tires
+1549	Fur Repairers, Alterers and Remodelers
+1550	Reupholsterers
+1551	Repainting and Refinishing
+1553	Miscellaneous Repair Operations
+1565	Auctioneers
+1566	Automobile Dealers and Sales Representatives
+1567	Banks and Insurance Companies
+1568	Beer, Wine and Liquor Dealers
+1569	Consignees and Lienors of Tangible Personal Property for Sale
+1570	Charitable Organizations
+1571	Florists
+1572	Memorial Dealers
+1573	Court Ordered Sales, Foreclosures and Repossessions
+1574	Vending Machine Operators
+1583	Modular Systems Furniture
+1584	Membership Fees
+1585	Cellular Telephones, Pagers, and Other Wireless Telecommunication Devices
+1586	Works of Art and Museum Pieces for Public Display
+1587	Animal Life, Feed, Drugs and Medicines
+1588	Seeds, Plants and Fertilizer
+1589	Containers and Labels
+1590	Newspapers and Periodicals
+1591	Medicines and Medical Devices
+1592	Eyeglasses and Other Ophthalmic Materials
+1593	Aircraft and Aircraft Parts
+1594	Watercraft
+1595	Occasional Sales—Sale of a Business—Business Reorganization
+1596	Buildings and Other Property Affixed to Realty
+1597	Property Transferred or Sold by Certain Nonprofit Organizations Reference: Sections 6018
+1598	Motor Vehicle and Aircraft Fuels
+1599	Coins and Bullion
+1602	Food Products
+1603	Taxable Sales of Food Products
+1610	Vehicles, Vessels, and Aircraft
+1614	Sales to the United States and Its Instrumentalities
+1616	Federal Areas
+1617	Federal Taxes
+1618	United States Government Supply Contracts
+1619	Foreign Missions and Consuls
+1620	Interstate and Foreign Commerce
+1621	Sales to Common Carriers
+1628	Transportation Charges
+1629	Goods Damaged in Transit
+1630	Packers, Loaders, and Shippers
+1632	C
+1641	Credit Sales and Repossessions
+1642	Bad Debts
+1643	Debit Card Charges
+1654	Barter, Exchange, "Trade-ins" and Foreign Currency Transaction
+1655	Returns, Defects and Replacements
+1660	Leases of Tangible Personal Property—in General
+1661	Leases of Mobile Transportation Equipment
+1667	Exemption Certificates
+1668	Sales for Resale
+1669	Demonstration, Display and Use of Property Held for Resale—General
+1670	Gifts, Marketing Aids, Premiums and Prizes
+1671	Trading Stamps and Related Promotional Plans
+1684	Collection of Use Tax by Retailers
+1685	Payment of Tax by Purchasers
+1686	Receipts for Tax Paid to Retailers
+1687	Information Returns
+1698	Records
+1699	Permits
+1700	Reimbursement for Sales Tax
+1701	"Tax-paid Purchases Resold
+1702	Successor's Liability
+1703	Interest and Penalties
+1704	Whole Dollar Reporting—Computations on Returns or Other Documents
+1705	Relief from Liability
+1706	Drop Shipments
+1707	Electronic Funds Transfer

@@ -1,0 +1,14 @@
+[
+  {"reg":"1525.2","tier":"administrative","product_key":"sut_reg1525_2_manufacturing_equipment_repealed",
+   "product_label":"Regulation 1525.2. Manufacturing Equipment [Repealed]","taxable":false,"rate":0,
+   "condition":"Former manufacturing-equipment provision; no longer operative.",
+   "summary":"Regulation 1525.2 (Manufacturing Equipment) was repealed January 1, 2004 (repeal effective June 5, 2014). No operative provision remains; captured for corpus completeness.",
+   "citation":"Sales and Use Tax Reg 1525.2 (Manufacturing Equipment) [Repealed]",
+   "source_url":"https://www.cdtfa.ca.gov/lawguides/vol1/sutr/1525-2.html"},
+  {"reg":"1525.3","tier":"administrative","product_key":"sut_reg1525_3_manufacturing_equipment_leases_repealed",
+   "product_label":"Regulation 1525.3. Manufacturing Equipment—Leases of Tangible Personal Property [Repealed]","taxable":false,"rate":0,
+   "condition":"Former manufacturing-equipment lease provision; no longer operative.",
+   "summary":"Regulation 1525.3 (Manufacturing Equipment—Leases of Tangible Personal Property) was repealed January 1, 2004 (repeal effective June 5, 2014). No operative provision remains; captured for corpus completeness.",
+   "citation":"Sales and Use Tax Reg 1525.3 (Manufacturing Equipment—Leases) [Repealed]",
+   "source_url":"https://www.cdtfa.ca.gov/lawguides/vol1/sutr/1525-3.html"}
+]

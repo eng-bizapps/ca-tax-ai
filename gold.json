@@ -1,0 +1,16 @@
+[
+  {"question": "Are groceries taxable in California?",                          "expected_status": "answered", "expected_category": "food_products"},
+  {"question": "How much tax on a $50 restaurant meal in California?",           "expected_status": "answered", "expected_category": "prepared_food"},
+  {"question": "Is separately stated shipping taxable in California?",           "expected_status": "answered", "expected_category": "transportation"},
+  {"question": "Is prescription medicine taxable in California?",                "expected_status": "answered", "expected_category": "medicines"},
+  {"question": "Is renting equipment subject to California sales tax?",          "expected_status": "answered", "expected_category": "leases_rentals"},
+  {"question": "Do I owe sales tax on goods I buy for resale with a resale certificate?", "expected_status": "answered", "expected_category": "sales_for_resale"},
+  {"question": "Are sales to the US government taxable in California?",          "expected_status": "answered", "expected_category": "sales_to_us_government"},
+  {"question": "Is a one-time sale of my used furniture taxable in California?", "expected_status": "answered", "expected_category": "occasional_sales"},
+  {"question": "Is SaaS taxable in California?",                                 "expected_status": "answered", "expected_category": "electronically_delivered_software"},
+  {"question": "Is repair labor taxable in California?",                         "expected_status": "answered", "expected_category": "repair_labor"},
+  {"question": "Is a cell phone taxable in California?",                         "expected_status": "answered", "expected_category": "cellular_telephones"},
+  {"question": "Is cannabis taxable in California?",                             "expected_status": "needs_review"},
+  {"question": "What is the property tax rate in Los Angeles?",                  "expected_status": "needs_review"},
+  {"question": "Do I owe income tax on my freelance work?",                     "expected_status": "needs_review"}
+]

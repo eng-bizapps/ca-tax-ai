@@ -1,0 +1,42 @@
+.env
+__pycache__/
+*.pyc
+rules_draft.json
+rules_approved.json
+
+# --- one-time crawl/ingestion artifacts -------------------------------
+# Source data already loaded into Neon (product_rules, doc_chunks, etc).
+# Not read by the running app -- excluded to keep the deploy repo clean.
+# (caleitc_table_2025.json is the one exception: load_income_content.py
+# reads it directly, so it's intentionally NOT matched by these patterns.)
+*_full.txt
+*_rules.json
+*_phase*.json
+tmp_*
+dft_*.txt
+ersr_*.txt
+hstr_*.txt
+mvft_*.txt
+osrpr_*.txt
+out_uftr_*.txt
+pmtsr_*.txt
+tut_*.txt
+uls_*.txt
+lpar*.txt
+medium_batch*
+small_batch*
+cannabis_batch*.json
+*_txt/
+dcc_retailers_raw.json
+local_rates_raw.json
+docs_dump.txt
+banning_survey.txt
+berkeley_pdf.txt
+*.html
+*.pdf
+*.log
+
+# --- regenerable sweep/eval result caches -----------------------------
+# Rebuilt automatically by their own scripts (item_sweep.py, etc.) --
+# committing them just creates permanent-history diff noise.
+*_results.json
