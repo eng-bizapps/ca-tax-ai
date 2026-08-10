@@ -28,7 +28,9 @@ from income_brackets import DEFAULT_TAX_YEAR, detect_filing_status
 CREDIT_COMPLEXITY_EXCLUDE = {
     "self-employ", "self employ", "1099", "business", "s-corp", "s corp",
     "llc", "partnership", "sole proprietor", "schedule c", "k-1",
-    "investment income", "capital gain", "dividend", "rental",
+    "freelance", "freelancer", "freelancing", "contractor", "contracting",
+    "contracted", "gig work", "gig economy",
+    "investment income", "capital gain", "dividend", "rental", "renting", "rented",
 }
 
 CALEITC_TRIGGERS = {"caleitc", "cal eitc", "earned income tax credit",
@@ -94,6 +96,78 @@ def lookup_eitc_table(conn, income: float, children: int, tax_year: int = DEFAUL
     if not row:
         return None
     return {"credit": float(row[0]), "citation": row[1], "source_url": row[2]}
+
+
+# --- CalEITC investment-income disqualification (FTB 3514 Step 2) -------
+# Verified against the actual 2025 FTB 3514 Booklet
+# (https://www.ftb.ca.gov/forms/2025/2025-3514-booklet.html), Step 2 /
+# Worksheet 1, Line 13: "Is the amount on line 12 more than $4,814? Yes --
+# Stop here, you cannot take the credit." IMPORTANT: this is NOT the same
+# number as the federal EITC's investment-income limit (which is roughly
+# $11,950 for 2025) -- CalEITC has its OWN, much lower threshold. A prior
+# placeholder note in project memory guessed ~$11,950 by analogy to the
+# federal figure; checking the actual current CA form (not assuming the
+# federal number transfers) caught that the real CA figure is $4,814,
+# the same "verify the primary source, don't extrapolate" discipline that
+# caught the alimony date-window issue earlier this session.
+# Scope: only the LITERAL "investment income" phrasing is handled here
+# (mirrors CREDIT_COMPLEXITY_EXCLUDE's existing term) -- "capital gain"/
+# "dividend" mentioned bare still defer via the unchanged exclude list,
+# since disambiguating which stated dollar figure is which investment-
+# income component would add real ambiguity for a first pass.
+CALEITC_INVESTMENT_INCOME_LIMIT = 4814.0
+CALEITC_INVESTMENT_INCOME_CITATION = "2025 FTB 3514 Booklet -- Step 2, Worksheet 1, Line 13"
+CALEITC_INVESTMENT_INCOME_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3514-booklet.html"
+INVESTMENT_INCOME_TERMS = {"investment income"}
+
+
+def _caleitc_investment_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in INVESTMENT_INCOME_TERMS):
+        return False
+    other_exclude = CREDIT_COMPLEXITY_EXCLUDE - INVESTMENT_INCOME_TERMS
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(t in q for t in CALEITC_TRIGGERS):
+        return False
+    return True
+
+
+def detect_caleitc_investment_signal(question: str):
+    """Returns a children-count (0-3) iff this looks like a genuine
+    'CalEITC with stated earned income AND investment income' question --
+    same narrower-exclude-set pattern as detect_itemized_signal
+    (investment-income phrasing is the TRIGGER here, not a disqualifier)."""
+    q = question.lower()
+    if not _caleitc_investment_base_signal_ok(q):
+        return None
+    return detect_children_count(question)
+
+
+def detect_caleitc_investment_missing_children(question: str) -> bool:
+    q = question.lower()
+    if not _caleitc_investment_base_signal_ok(q):
+        return False
+    return detect_children_count(question) is None
+
+
+def compute_caleitc_with_investment_income(conn, earned_income: float, investment_income: float,
+                                             children: int, tax_year: int = DEFAULT_TAX_YEAR):
+    """Investment income above the limit disqualifies CalEITC ENTIRELY,
+    regardless of earned income or child count (FTB 3514 Step 2) -- the
+    earned-income table lookup is never even reached in that case. Below
+    the limit, the investment income amount itself plays no further role
+    (CalEITC's credit AMOUNT is a function of earned income and children
+    only, not investment income) -- it only gates eligibility."""
+    if earned_income is None or investment_income is None or earned_income < 0 or investment_income < 0:
+        return None
+    if investment_income > CALEITC_INVESTMENT_INCOME_LIMIT:
+        return {"disqualified": True, "investment_income": investment_income,
+                "citation": CALEITC_INVESTMENT_INCOME_CITATION,
+                "source_url": CALEITC_INVESTMENT_INCOME_SOURCE_URL}
+    hit = lookup_eitc_table(conn, earned_income, children, tax_year)
+    if not hit:
+        return None
+    return {**hit, "disqualified": False, "investment_income": investment_income}
 
 
 def detect_ycta_signal(question: str) -> bool:

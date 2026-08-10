@@ -37,6 +37,53 @@ def _amount(question: str):
         return None
 
 
+def _amounts(question: str):
+    """Returns ALL dollar amounts in the question, in order of appearance,
+    as (amount, start_char, end_char) -- unlike _amount() (first only).
+    Purely additive: every existing single-amount compute path keeps using
+    _amount() unchanged. This exists for the mixed-income-source paths that
+    genuinely need to distinguish MULTIPLE figures in one question (e.g.
+    "$50,000 in wages and $30,000 in self-employment income")."""
+    out = []
+    for m in re.finditer(r"\$?\s*([0-9][0-9,]*\.?[0-9]+)", question):
+        try:
+            out.append((float(m.group(1).replace(",", "")), m.start(), m.end()))
+        except ValueError:
+            continue
+    return out
+
+
+def _amount_near(question: str, keywords, window: int = 60):
+    """Returns the dollar amount CLOSEST (by character distance) to the
+    nearest occurrence of any of `keywords`, or None. Distance-based
+    (finds the NEAREST amount to each keyword hit) rather than a fixed
+    per-amount radius -- a fixed radius silently mis-tags questions where
+    two dollar amounts sit close together in one sentence (e.g. "$50,000
+    in wages and $30,000 in self-employment income": a naive fixed window
+    around $50,000 also reaches "self-employment" a few words later,
+    wrongly matching the WAGE amount to the SE keyword too). Found via
+    direct testing -- the same question reordered gave two different tax
+    totals before this fix, which should be impossible since the
+    underlying facts didn't change."""
+    ql = question.lower()
+    amounts = _amounts(question)
+    if not amounts:
+        return None
+    best = None
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = ql.find(kw, start)
+            if idx == -1:
+                break
+            for amount, a_start, a_end in amounts:
+                dist = abs((a_start + a_end) / 2 - idx)
+                if dist <= window and (best is None or dist < best[1]):
+                    best = (amount, dist)
+            start = idx + len(kw)
+    return best[0] if best else None
+
+
 def _catalog(conn):
     """Combined catalog: fine product rules (preferred) + coarse rules (breadth)."""
     items, seen = [], set()
@@ -162,6 +209,26 @@ DISAMBIG = [
     # extinguisher/office-desk incident earlier this session).
     ([{"groceries", "grocery"}], set(), "food_products_general"),
     ([{"clothing", "clothes", "apparel"}], set(), "general_tangible_personal_property"),
+    # found via adversarial hunt (2026-08-08): "I sold my airplane privately"
+    # (singular) already correctly routes to aircraft_retail_sale (taxable)
+    # via the embedding router alone, no DISAMBIG needed -- but "I sold my
+    # airplanES privately" (plural, no other qualifying word) landed on a
+    # completely unrelated rule (export delivery to a US government agency,
+    # taxable=FALSE) -- a genuine embedding-space miss, not a term-list gap
+    # (the existing private-party DISAMBIG entry never even fires here,
+    # since it requires an "individual/party/person" word this phrasing
+    # doesn't have). Deliberately narrow to the literal adverb "privately"
+    # only (not "private") so this can NEVER overlap with "...in a private
+    # sale" phrasing, which already correctly finds the MORE SPECIFIC
+    # private_party_vessel_or_aircraft_sale rule unaided -- widening to
+    # "private" would have shadowed that better, already-working answer
+    # with this more generic one. Excludes rental/lease/charter contexts,
+    # a different taxable event entirely.
+    ([{"airplane", "airplanes", "aircraft"}, {"privately"}],
+     {"rent", "rents", "rented", "renting", "rental",
+      "lease", "leases", "leased", "leasing",
+      "charter", "charters", "chartered", "chartering"},
+     "aircraft_retail_sale"),
 ]
 
 
@@ -661,14 +728,16 @@ def _income_compute_answer(conn, question: str, amount, base: dict):
     if calc["surtax"]:
         surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
                        f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    income_label, income_caveat = income_brackets.detect_income_description(question)
     result["answer_text"] = (
-        f"Assuming ${amount:,.2f} in gross wage income, filing status {label}, and the "
+        f"Assuming ${amount:,.2f} in {income_label}, filing status {label}, and the "
         f"standard deduction (${dedu['amount']:,.0f}), your California taxable income is "
         f"about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
         f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
         f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
-        f"{surtax_note} This assumes wage income only, with no other adjustments, credits, "
-        "or itemized deductions -- your actual liability may differ."
+        f"{surtax_note} This assumes {income_label} is your ONLY income source, with no "
+        f"other adjustments, credits, or itemized deductions{income_caveat} -- your actual "
+        "liability may differ."
     )
     return result
 
@@ -694,6 +763,347 @@ def _income_missing_filing_status_answer(question: str, amount, base: dict):
         "household, or qualifying surviving spouse. Please ask again and "
         "include it (for example, \"...filing single\" or \"...as head of "
         "household\").")
+    return result
+
+
+def _income_self_employment_answer(conn, question: str, amount, base: dict):
+    """Sole-proprietor Schedule C self-employment tax computation -- see
+    income_brackets.compute_self_employment_ca_tax's docstring for the R&TC
+    17072(a)/IRC 62 conformity basis. The SIMPLEST self-employment case only
+    (income_brackets.SE_COMPLEXITY_EXCLUDE): one sole proprietorship, no
+    other income mixed in, no itemizing -- everything more complex still
+    defers, same discipline as _income_compute_answer. `amount` is treated
+    as net profit (revenue minus business expenses), not gross revenue or
+    federal AGI -- deliberately, since computing from net profit directly
+    sidesteps California's QBI non-conformity entirely (see the compute
+    function's docstring) rather than requiring an addback."""
+    fs = income_brackets.detect_self_employment_signal(question)
+    if not fs or amount is None:
+        return None
+    calc = income_brackets.compute_self_employment_ca_tax(conn, amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "self_employment_income_tax",
+              "amount": amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in net self-employment profit (after business "
+        f"expenses), filing status {label}, and the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}): your self-employment tax is about "
+        f"${calc['se_tax']:,.2f}, half of which (${calc['half_se_deduction']:,.2f}) is "
+        f"deductible when computing California adjusted gross income "
+        f"({income_brackets.SE_CITATION}). Your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}, your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes self-employment income is your ONLY income source, "
+        "with no other adjustments, credits, or itemized deductions -- your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_self_employment_missing_filing_status_answer(question: str, amount, base: dict):
+    """Mirrors _income_missing_filing_status_answer for the self-employment
+    path -- same reasoning: filing status changes which bracket table
+    applies, so it's still not safe to guess."""
+    if amount is None or not income_brackets.detect_self_employment_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California self-employment income tax, I need your "
+        "filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse. "
+        "Please ask again and include it (for example, \"...filing single\" "
+        "or \"...as head of household\").")
+    return result
+
+
+def _income_mixed_wage_se_answer(conn, question: str, base: dict):
+    """First multi-amount compute path: 'wages AND self-employment income'
+    in one question. Uses _amount_near (not the single-shot _amount) to
+    pull out the wage-tagged and SE-tagged dollar figures SEPARATELY --
+    see income_brackets.detect_mixed_wage_se_signal's docstring for why
+    this can never collide with either single-source path."""
+    fs = income_brackets.detect_mixed_wage_se_signal(question)
+    if not fs:
+        return None
+    wage_amount = _amount_near(question, income_brackets.WAGE_CONTEXT_TERMS)
+    se_amount = _amount_near(question, income_brackets.SE_TRIGGERS)
+    if wage_amount is None or se_amount is None:
+        return None
+    calc = income_brackets.compute_mixed_wage_se_ca_tax(conn, wage_amount, se_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "self_employment_income_tax",
+              "amount": wage_amount + se_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${wage_amount:,.2f} in wage income, ${se_amount:,.2f} in net "
+        f"self-employment profit (after business expenses), filing status {label}, "
+        f"and the standard deduction (${calc['standard_deduction']:,.0f}): your "
+        f"self-employment tax is about ${calc['se_tax']:,.2f} (only on the "
+        f"self-employment portion), half of which (${calc['half_se_deduction']:,.2f}) "
+        f"is deductible when computing California adjusted gross income "
+        f"({income_brackets.SE_CITATION}). Your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}, your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes wages and self-employment income are your ONLY "
+        "income sources, with no other adjustments, credits, or itemized deductions "
+        "-- your actual liability may differ."
+    )
+    return result
+
+
+def _income_mixed_wage_se_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_missing_filing_status_answer for the mixed
+    wages+self-employment path."""
+    if not income_brackets.detect_mixed_wage_se_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax on wages plus self-employment "
+        "income, I need your filing status: single, married filing jointly, "
+        "married filing separately, head of household, or qualifying surviving "
+        "spouse. Please ask again and include it (for example, \"...filing "
+        "single\" or \"...as head of household\").")
+    return result
+
+
+def _income_itemized_answer(conn, question: str, base: dict):
+    """Wage income + a stated CA itemized-deduction total -- see
+    income_brackets.compute_itemized_ca_tax's docstring for the Line 29/30
+    conformity basis (greater-of comparison, AGI-limitation threshold, MFS
+    exclusion). Uses _amount_near (not _amount) to pull the itemized-tagged
+    figure out separately from the income figure, same distance-based
+    approach as the mixed wage+SE path; if more than one non-itemized
+    amount remains, the question is ambiguous and this defers rather than
+    guessing which one is income."""
+    fs = income_brackets.detect_itemized_signal(question)
+    if not fs:
+        return None
+    itemized_amount = _amount_near(question, income_brackets.ITEMIZED_TERMS)
+    if itemized_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != itemized_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_itemized_ca_tax(conn, income_amount, itemized_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["used_itemized"]:
+        dedu_note = (f"your stated itemized deductions (${itemized_amount:,.2f}), which are "
+                     f"larger than the {income_brackets.DEFAULT_TAX_YEAR} standard deduction "
+                     f"(${calc['standard_deduction']:,.0f})")
+    else:
+        dedu_note = (f"the standard deduction (${calc['standard_deduction']:,.0f}), since your "
+                     f"stated itemized deductions (${itemized_amount:,.2f}) are smaller and "
+                     "California uses whichever is larger")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in gross wage income (also your California AGI, "
+        f"with no other adjustments), filing status {label}, and {dedu_note}: your California "
+        f"taxable income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket "
+        f"is {calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated itemized-deduction total already reflects "
+        "California's rules (for example, state and local income taxes are not deductible on "
+        "your California return, unlike the federal return) and that your income is below the "
+        "level where California begins reducing itemized deductions for high earners -- your "
+        "actual liability may differ."
+    )
+    return result
+
+
+def _income_itemized_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_missing_filing_status_answer for the itemized-
+    deduction path."""
+    if not income_brackets.detect_itemized_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with itemized deductions, I need your "
+        "filing status: single, married filing jointly, head of household, or qualifying "
+        "surviving spouse. (Married/RDP filing separately has an additional rule this "
+        "assistant doesn't yet handle -- see below.) Please ask again and include your "
+        "filing status.")
+    return result
+
+
+def _income_itemized_mfs_answer(question: str, base: dict):
+    """California requires both spouses/RDPs to itemize (or both to take
+    the standard deduction) when filing separately -- if one spouse
+    itemizes, the OTHER must too, even if their own itemized total is
+    smaller than the standard deduction. This assistant has no way to know
+    the other spouse's choice, so it defers with a specific explanation
+    rather than silently assuming the greater-of rule that applies to
+    every other filing status."""
+    if not income_brackets.detect_itemized_mfs_unsupported(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California has a special rule for married/RDP filing separately: if either "
+        "spouse itemizes deductions, both spouses must itemize -- even if one spouse's "
+        "itemized total is smaller than the standard deduction. Because this depends on "
+        "your spouse's/RDP's own return, this assistant doesn't estimate itemized-"
+        "deduction tax for married filing separately. Please consult the FTB Schedule CA "
+        "(540) instructions or a tax professional."
+    )
+    return result
+
+
+def _income_capital_loss_answer(conn, question: str, base: dict):
+    """Income + a stated CURRENT-YEAR capital loss -- see
+    income_brackets.compute_capital_loss_ca_tax's docstring for the Line 9
+    conformity basis ($3,000/$1,500-MFS annual offset limit, same as
+    federal IRC Section 1211). Uses _amount_near/the 'one other amount'
+    pattern exactly like the itemized-deduction path; deliberately does
+    NOT attempt a prior-year carryover (Schedule D (540) Line 6) -- only a
+    single current-year loss figure."""
+    fs = income_brackets.detect_capital_loss_signal(question)
+    if not fs:
+        return None
+    loss_amount = _amount_near(question, income_brackets.CAPITAL_LOSS_TERMS)
+    if loss_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_capital_loss_ca_tax(conn, income_amount, loss_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["carryover"]:
+        loss_note = (f"${calc['deductible_loss']:,.2f} of your ${loss_amount:,.2f} capital loss "
+                     f"(the annual limit for {label}), with the remaining "
+                     f"${calc['carryover']:,.2f} carrying forward to next year's California "
+                     "return (not reflected in this estimate)")
+    else:
+        loss_note = f"your full ${loss_amount:,.2f} capital loss (under the annual limit)"
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in gross income (also your California AGI before the "
+        f"loss offset, with no other adjustments), filing status {label}, and deducting "
+        f"{loss_note} ({income_brackets.CAPITAL_LOSS_CITATION}), plus the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}): your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated loss is a CURRENT-YEAR loss with no capital "
+        "loss carryover from a prior year -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_capital_loss_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_missing_filing_status_answer for the capital-loss
+    path."""
+    if not income_brackets.detect_capital_loss_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a capital loss, I need your filing "
+        "status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse (the annual loss-offset limit is smaller "
+        "for married filing separately). Please ask again and include your filing status.")
+    return result
+
+
+def _income_caleitc_investment_answer(conn, question: str, base: dict):
+    """CalEITC + a stated investment-income figure -- see
+    income_credits.compute_caleitc_with_investment_income's docstring for
+    the FTB 3514 Step 2 conformity basis ($4,814 2025 investment-income
+    disqualification limit -- NOT the same as the federal EITC's ~$11,950
+    limit, verified against the actual current CA form rather than assumed
+    by analogy). Uses _amount_near/the 'one other amount' pattern exactly
+    like the itemized-deduction and capital-loss paths."""
+    children = income_credits.detect_caleitc_investment_signal(question)
+    if children is None:
+        return None
+    investment_amount = _amount_near(question, income_credits.INVESTMENT_INCOME_TERMS)
+    if investment_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != investment_amount]
+    if len(others) != 1:
+        return None
+    earned_income = others[0]
+    calc = income_credits.compute_caleitc_with_investment_income(conn, earned_income, investment_amount, children)
+    if not calc:
+        return None
+    child_label = "no qualifying children" if children == 0 else (
+        "1 qualifying child" if children == 1 else f"{children} qualifying children"
+        + (" (3 or more)" if children == 3 else ""))
+    limit = income_credits.CALEITC_INVESTMENT_INCOME_LIMIT
+    if calc["disqualified"]:
+        result = {**base, "status": "answered", "category": "caleitc",
+                  "amount": earned_income, "tax": 0.0, "citation": calc["citation"],
+                  "source_url": calc["source_url"]}
+        result["answer_text"] = (
+            f"Because your stated investment income (${investment_amount:,.2f}) is more than "
+            f"the {income_brackets.DEFAULT_TAX_YEAR} CalEITC investment-income limit "
+            f"(${limit:,.0f}), you do not qualify for CalEITC this year -- regardless of your "
+            f"earned income or number of qualifying children ({calc['citation']})."
+        )
+        return result
+    result = {**base, "status": "answered", "category": "caleitc",
+              "amount": earned_income, "tax": calc["credit"], "citation": calc["citation"],
+              "source_url": calc["source_url"]}
+    result["answer_text"] = (
+        f"Assuming ${earned_income:,.2f} in California earned income with {child_label}, and "
+        f"${investment_amount:,.2f} in investment income (under the "
+        f"{income_brackets.DEFAULT_TAX_YEAR} CalEITC investment-income limit of ${limit:,.0f}, "
+        "so it does not disqualify you), and that your federal AGI equals your earned income "
+        f"(no other adjustments), your estimated California Earned Income Tax Credit (CalEITC) "
+        f"is ${calc['credit']:,.2f} ({calc['citation']}). This is an estimate only -- your "
+        "actual credit depends on filing a complete return."
+    )
+    return result
+
+
+def _income_caleitc_investment_missing_children_answer(question: str, base: dict):
+    """Mirrors _income_missing_children_answer for the investment-income-
+    aware CalEITC path."""
+    if not income_credits.detect_caleitc_investment_missing_children(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your CalEITC, I need to know your number of qualifying children "
+        "(0, 1, 2, or 3 or more). Please ask again and include it (for example, "
+        "\"...with 2 qualifying children\" or \"...with no children\").")
     return result
 
 
@@ -900,6 +1310,50 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_fs_result = _income_missing_filing_status_answer(question, amount, base)
     if missing_fs_result:
         return missing_fs_result
+
+    se_result = _income_self_employment_answer(conn, question, amount, base)
+    if se_result:
+        return se_result
+
+    missing_se_fs_result = _income_self_employment_missing_filing_status_answer(question, amount, base)
+    if missing_se_fs_result:
+        return missing_se_fs_result
+
+    mixed_result = _income_mixed_wage_se_answer(conn, question, base)
+    if mixed_result:
+        return mixed_result
+
+    missing_mixed_fs_result = _income_mixed_wage_se_missing_filing_status_answer(question, base)
+    if missing_mixed_fs_result:
+        return missing_mixed_fs_result
+
+    itemized_result = _income_itemized_answer(conn, question, base)
+    if itemized_result:
+        return itemized_result
+
+    missing_itemized_fs_result = _income_itemized_missing_filing_status_answer(question, base)
+    if missing_itemized_fs_result:
+        return missing_itemized_fs_result
+
+    itemized_mfs_result = _income_itemized_mfs_answer(question, base)
+    if itemized_mfs_result:
+        return itemized_mfs_result
+
+    capital_loss_result = _income_capital_loss_answer(conn, question, base)
+    if capital_loss_result:
+        return capital_loss_result
+
+    missing_capital_loss_fs_result = _income_capital_loss_missing_filing_status_answer(question, base)
+    if missing_capital_loss_fs_result:
+        return missing_capital_loss_fs_result
+
+    caleitc_investment_result = _income_caleitc_investment_answer(conn, question, base)
+    if caleitc_investment_result:
+        return caleitc_investment_result
+
+    missing_caleitc_investment_children_result = _income_caleitc_investment_missing_children_answer(question, base)
+    if missing_caleitc_investment_children_result:
+        return missing_caleitc_investment_children_result
 
     caleitc_result = _income_caleitc_answer(conn, question, amount, base)
     if caleitc_result:

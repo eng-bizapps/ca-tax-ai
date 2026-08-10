@@ -288,6 +288,88 @@ INCOME_TOPICS = [
         "citation": "FTB Filing Status -- Head of Household",
         "source_url": "https://www.ftb.ca.gov/file/personal/filing-status/head-of-household.html",
     },
+    # --- workers' comp / SDI: the 2 topics deferred earlier this session for
+    # lacking a clean citable page (ftb.ca.gov has no dedicated adjustment
+    # page for either -- they're excluded from FEDERAL AGI in the first
+    # place under IRC 104(a)(1), so there's never a Schedule CA adjustment
+    # LINE for them the way there is for unemployment/PFL). Resolved by going
+    # to the actual STATUTE instead of an FTB summary page -- verified
+    # directly against leginfo.legislature.ca.gov, the official California
+    # Legislative Information site (a stronger primary source than an FTB
+    # webpage, not a weaker one).
+    {
+        "topic_key": "workers_compensation",
+        "topic_label": "Workers' compensation benefits",
+        "taxable": False,
+        "summary": ("Workers' compensation benefits (temporary disability, permanent "
+                     "disability, and death benefits paid for a work-related injury or "
+                     "illness) are excluded from both federal and California taxable "
+                     "income. California Revenue and Taxation Code Section 17131 "
+                     "incorporates the federal exclusion for injury/sickness "
+                     "compensation (Internal Revenue Code Section 104(a)(1)) -- "
+                     "California simply follows federal treatment here, which is why "
+                     "there is no separate Schedule CA adjustment line for it."),
+        "citation": "California R&TC Section 17131 (incorporating IRC Section 104(a)(1))",
+        "source_url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=17131.&lawCode=RTC",
+    },
+    {
+        "topic_key": "state_disability_insurance",
+        "topic_label": "California State Disability Insurance (SDI) benefits",
+        "taxable": False,
+        "summary": ("California State Disability Insurance (SDI) benefits are not "
+                     "taxable for California purposes. Even in the one case where SDI "
+                     "IS taxable federally -- when paid as a substitute for "
+                     "unemployment insurance benefits, under Internal Revenue Code "
+                     "Section 85 -- California does not tax it, because California "
+                     "Revenue and Taxation Code Section 17083 rejects IRC Section 85 "
+                     "entirely for California purposes (the same statute that makes "
+                     "ordinary unemployment compensation nontaxable in California)."),
+        "citation": "California R&TC Section 17083 (California does not adopt IRC Section 85)",
+        "source_url": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?sectionNum=17083.&lawCode=RTC",
+    },
+    # A genuine trap, caught by checking the ACTUAL current FTB text rather
+    # than trusting secondary sources (which described only the ORIGINAL
+    # TCJA non-conformity and missed a subsequent change): this is NOT a
+    # simple boolean -- it depends on WHEN the divorce/separation agreement
+    # was executed, across THREE windows, verified directly against FTB's
+    # 2025 Schedule CA (540) instructions, Line 2a "Alimony Received":
+    #   (1) On or before 12/31/2018: pre-TCJA: taxable to recipient /
+    #       deductible to payer under BOTH federal and CA (they never
+    #       diverged for these).
+    #   (2) After 12/31/2018 through 12/31/2025 (the "gap" window):
+    #       federal (TCJA) says NOT taxable to recipient / NOT deductible
+    #       to payer -- but California does NOT conform and kept the OLD
+    #       rule: STILL taxable to recipient / STILL deductible to payer,
+    #       needing a California-specific Schedule CA addition/subtraction.
+    #   (3) After 12/31/2025 (today's date is 2026-08-08 -- this window is
+    #       NOW the current one for any new agreement): FTB's own text --
+    #       "California treatment is the same as federal and no adjustment
+    #       is needed" -- California has since conformed going forward.
+    # taxable=None deliberately (like head_of_household_eligibility) -- a
+    # single verdict would be actively wrong for 2 of the 3 windows;
+    # the summary states all three explicitly rather than picking one.
+    {
+        "topic_key": "alimony_spousal_support",
+        "topic_label": "Alimony / spousal support",
+        "taxable": None,
+        "summary": ("Whether alimony (spousal support) is taxable in California depends "
+                     "on WHEN the divorce or separation agreement was executed -- it is "
+                     "not the same answer in every case. (1) Agreements executed on or "
+                     "before December 31, 2018: taxable to the recipient and deductible "
+                     "by the payer, matching federal law. (2) Agreements executed after "
+                     "December 31, 2018 through December 31, 2025: California does NOT "
+                     "conform to the federal TCJA change -- alimony is STILL taxable to "
+                     "the recipient and STILL deductible by the payer for California "
+                     "purposes, even though it is federally tax-free for this window (a "
+                     "California-specific Schedule CA adjustment is required). (3) "
+                     "Agreements executed after December 31, 2025: California has since "
+                     "conformed to federal law -- alimony is NOT taxable to the recipient "
+                     "and NOT deductible by the payer, same as federal, no adjustment "
+                     "needed. Please specify when the agreement was executed for an exact "
+                     "answer."),
+        "citation": "FTB 2025 Instructions for Schedule CA (540) -- Line 2a, Alimony Received",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
 ]
 
 

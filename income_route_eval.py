@@ -55,6 +55,12 @@ PROBES = [
     ("am I eligible for head of household filing status", None, "head_of_household_eligibility"),
     ("what are the requirements to file head of household", None, "head_of_household_eligibility"),
     ("do I qualify for hoh filing status", None, "head_of_household_eligibility"),
+    ("is workers compensation taxable in california", False, "workers_compensation"),
+    ("do I pay tax on my workers comp benefits", False, "workers_compensation"),
+    ("is california state disability insurance taxable", False, "state_disability_insurance"),
+    ("do I owe tax on my sdi benefits", False, "state_disability_insurance"),
+    ("is alimony taxable in california", None, "alimony_spousal_support"),
+    ("do I pay tax on spousal support I received", None, "alimony_spousal_support"),
 
     # --- out-of-scope: must defer (sales-tax-flavored, unrelated, or generic) ---
     ("is furniture taxable in california", None, None),
