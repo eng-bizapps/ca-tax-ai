@@ -45,6 +45,17 @@ COMPLEXITY_EXCLUDE = {
     "contracted", "sole proprietor", "k-1",
     "schedule c", "schedule e", "gambling", "gambled", "betting", "wagering",
     "alimony",
+    # added alongside the IRA-deduction feature: without this, "how much
+    # california tax do I owe on $80,000 in wages with a $6,000 IRA
+    # deduction, single" would be intercepted by the plain wage-only path
+    # (no OTHER complexity term present), silently IGNORING the stated
+    # IRA deduction and computing tax on the full $80,000 -- overstating
+    # the tax owed. Now correctly defers to the dedicated IRA-deduction
+    # path instead (see income_brackets' IRA_DEDUCTION_TERMS's module
+    # note -- that path uses COMPLEXITY_EXCLUDE minus these same terms,
+    # so it isn't excluded from itself).
+    "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
+    "deductible ira",
 }
 COMPUTE_TRIGGERS = {
     "tax bracket", "how much tax", "how much california tax",
@@ -181,6 +192,17 @@ SE_COMPLEXITY_EXCLUDE = {
     # not a gap to guard against.
     "licensed cannabis", "cannabis license", "maucrsa", "dcc-licensed",
     "dcc license",
+    # added alongside the IRA-deduction feature: an IRA deduction is a
+    # general above-the-line adjustment that can accompany ANY income
+    # type, including self-employment -- without this, "$80,000 net
+    # profit self-employed with a $6,000 IRA deduction, single" would
+    # compute SE tax while silently ignoring the stated IRA deduction.
+    # Unlike business-loss/NOL/cannabis, this ALSO needs to guard
+    # K1_COMPLEXITY_EXCLUDE below, since an IRA deduction can just as
+    # easily accompany K-1 income (no entity-level absorption applies to
+    # a purely personal deduction like this one).
+    "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
+    "deductible ira",
 }
 
 # Federal Schedule SE mechanics (California has no separate self-employment
@@ -387,6 +409,14 @@ K1_COMPLEXITY_EXCLUDE = {
     # about, overstating the tax owed. Now correctly defers to the
     # dedicated NOL path instead.
     "net operating loss", "nol carryover", "nol deduction",
+    # added alongside the IRA-deduction feature: an IRA deduction can
+    # accompany K-1 income just as easily as wages or self-employment --
+    # no entity-level absorption applies here (unlike cannabis 280E,
+    # which IS fully absorbed before the K-1 is issued), so without this
+    # exclusion a K-1 amount stated alongside an IRA deduction would be
+    # taxed in full, silently ignoring the deduction.
+    "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
+    "deductible ira",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -1316,6 +1346,145 @@ def detect_cannabis_280e_missing_filing_status(question: str) -> bool:
     if not _cannabis_280e_base_signal_ok(q):
         return False
     return detect_filing_status(question) is None
+
+
+# --- traditional IRA deduction pass-through (Ring 3 extension, Schedule CA
+# (540) Part I Section C Line 20, IRC Section 408 election) -- verified
+# against FTB's 2025 AND 2024 Instructions for Schedule CA (540)
+# (https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html,
+# .../2024/2024-540-ca-instructions.html), diffed year-over-year.
+#
+# COLUMN A vs B/C: "To take the election, the federal deduction is taken
+# on line 20, column A. The election for California will be on line 20,
+# column B or C." I.e. column A = the federal deduction as-is; B/C only
+# get used when a REAL divergence exists.
+#
+# THE BIG FINDING THIS FEATURE WAS BUILT AROUND: SB 711 (the "Conformity
+# Act of 2025", enacted Oct 1, 2025) moved California's general IRC
+# conformity date from January 1, 2015 to January 1, 2025. Confirmed by
+# diffing the instructions' own header text ("References... are to the
+# [IRC] as of January 1, 2015" in the 2024 instructions vs "...January 1,
+# 2025" in the 2025 instructions) AND by the Line 20 section itself: the
+# 2024 instructions listed TWO concrete divergence triggers verbatim --
+#   "IRA age -- If you report an IRA deduction on line 20, column A at
+#   age 70 1/2 or older, include that amount... in... column B" (California
+#   didn't conform to the SECURE Act's repeal of the age-70.5 cap), and
+#   "Catch-up contributions for certain individuals -- If the amount...
+#   is more than the amount allowed for California, enter the difference
+#   ... on line 20, column B" (California didn't conform to CAA 2023's
+#   IRA catch-up-contribution indexing).
+# BOTH bullets are ABSENT from the 2025 instructions' Line 20 section,
+# which now contains only the generic "408 election... column B or C,
+# get FTB Pub. 1005" text -- consistent with California now conforming
+# to both (SECURE Act 2019, CAA 2023) under the new Jan 1, 2025 date,
+# since both predate that cutoff. So for TY2025 specifically, THESE TWO
+# PREVIOUSLY-LIVE TRIGGERS NO LONGER APPLY.
+#
+# THE ONE CONFIRMED REMAINING TRIGGER: Line 4a/4b's instructions (IRA
+# Distributions) cross-reference that "differences also occur if your
+# California IRA deductions were different from your federal deductions
+# because of differences between California and federal self-employment
+# income" -- a worker-classification (Prop 22) mismatch between CA and
+# federal earned income can change the contribution/deduction figure
+# differently in each jurisdiction. Genuinely open-ended (requires
+# knowing whether CA and federal earned income actually differ for this
+# taxpayer), so self-employment/contractor income is EXCLUDED from this
+# path's trigger entirely (via COMPLEXITY_EXCLUDE, which already lists
+# self-employ/1099/contractor/freelance/sole-proprietor terms) rather
+# than guessed at.
+#
+# NOT MODELED, disclosed: FTB Publication 1005 (Pension and Annuity
+# Guidelines) -- the document FTB's OWN instructions point to three times
+# for Line 20 detail -- exists ONLY as a PDF (no HTML version found for
+# any year 2015-2025; a direct WebFetch also 403'd) and was not verified.
+# If it documents additional divergence triggers beyond the two confirmed
+# -repealed ones above, this path doesn't know about them. This module
+# also does NOT independently derive federal IRA-deduction ELIGIBILITY
+# from raw facts -- the $7,000/$8,000(age 50+) 2025 contribution limit,
+# or the employer-plan MAGI phase-out -- it TRUSTS the taxpayer's stated
+# federal deduction amount as already correct, same "trust the input"
+# precedent as net_profit/itemized_amount/loss_amount elsewhere in this
+# codebase. Roth IRA contributions are NEVER deductible (federal or CA)
+# -- handled as a dedicated informational redirect (see
+# detect_roth_ira_mention), not silently computed as if deductible.
+IRA_DEDUCTION_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section C, Line 20"
+IRA_DEDUCTION_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+IRA_DEDUCTION_TERMS = {
+    "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
+    "deductible ira",
+}
+ROTH_IRA_TERMS = {"roth ira", "roth"}
+
+
+def _ira_deduction_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in IRA_DEDUCTION_TERMS):
+        return False
+    if any(t in q for t in ROTH_IRA_TERMS):
+        return False   # dedicated redirect (detect_roth_ira_mention), not this path
+    other_exclude = COMPLEXITY_EXCLUDE - IRA_DEDUCTION_TERMS
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_ira_deduction_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'income with a
+    stated traditional-IRA deduction' question. Mirrors
+    detect_capital_loss_signal's shape (income + a deduction/offset figure
+    -- structurally general-purpose, unlike the self-employment-specific
+    paths, since an IRA deduction can accompany ANY income type)."""
+    q = question.lower()
+    if not _ira_deduction_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_ira_deduction_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _ira_deduction_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_roth_ira_mention(question: str) -> bool:
+    """True iff the question asks about deducting a ROTH IRA contribution
+    specifically -- Roth contributions are NEVER deductible (contributed
+    with after-tax dollars; the benefit is tax-free qualified withdrawals
+    later, not an upfront deduction), for either federal or California
+    purposes. Checked as its OWN signal, same "specific redirect instead
+    of a generic defer or a silently-wrong computation" precedent as
+    detect_grantor_trust_mention."""
+    q = question.lower()
+    return any(t in q for t in ROTH_IRA_TERMS) and any(trig in q for trig in COMPUTE_TRIGGERS)
+
+
+def compute_ira_deduction_ca_tax(conn, income_amount: float, ira_deduction_amount: float,
+                                   filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as gross income and California AGI before
+    the IRA deduction (no other adjustments -- same simple-case assumption
+    as every other compute path). ira_deduction_amount is the taxpayer's
+    stated FEDERAL traditional-IRA deduction (Line 20 column A) -- see the
+    module note above for what is and isn't modeled. For TY2025, subtracts
+    the stated amount UNCHANGED (no CA-specific adjustment applied) per
+    the confirmed repeal of both previously-live Line 20 divergence
+    triggers under SB 711's conformity-date change."""
+    if income_amount is None or income_amount < 0:
+        return None
+    if ira_deduction_amount is None or ira_deduction_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = max(0.0, income_amount - ira_deduction_amount)
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "income_amount": income_amount, "ira_deduction_amount": ira_deduction_amount,
+            "agi": agi, "standard_deduction": dedu["amount"]}
 
 
 def detect_filing_status(question: str):

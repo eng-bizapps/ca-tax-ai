@@ -812,6 +812,52 @@ ITEMS = [
     ("how much tax do I owe on $50,000 self-employed single",
      {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 994.39}),
 
+    # --- traditional IRA deduction pass-through (Ring 3 extension,
+    # Schedule CA (540) Part I Section C Line 20) -- verified against the
+    # 2025 vs 2024 FTB Schedule CA (540) instructions diffed year-over-
+    # year: SB 711 (Conformity Act of 2025) moved California's general
+    # IRC conformity date from 1/1/2015 to 1/1/2025, which repealed the
+    # two previously-live Line 20 divergence triggers (age-70.5 addback,
+    # catch-up-contribution-indexing addback) for TY2025 -- so for TY2025
+    # the stated federal IRA deduction is allowed for California
+    # UNCHANGED. All tax figures verified directly against the live
+    # engine. Also confirmed via the full engine.answer() pipeline (not
+    # just the income-domain function directly) that this feature has NO
+    # sales-tax routing collision, unlike cannabis 280E.
+    #
+    # Basic pass-through: $80,000 wages, $6,000 IRA deduction, single ->
+    # AGI $74,000 -> taxable $68,294 -> $2,847.57.
+    ("how much california tax do I owe on $80,000 in wages with a $6,000 IRA deduction single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2847.57}),
+    # same figures, IRA deduction stated before income -- order
+    # independence, same pattern as capital-loss/EBL/NOL reordering tests.
+    ("how much california tax do I owe on a $6,000 IRA deduction and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2847.57}),
+    # MFJ coverage: $120,000 wages, $12,000 IRA deduction -> AGI
+    # $108,000 -> taxable $96,588 -> $2,865.06.
+    ("how much california tax do I owe on $120,000 in wages with a $12,000 IRA deduction married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2865.06}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $6,000 IRA deduction",
+     {"status": "needs_review", "domain": "income"}),
+    # ROTH IRA REDIRECT: Roth contributions are never deductible --
+    # "roth ira contribution" also contains "ira contribution" as a
+    # substring, so this specifically tests that the Roth check
+    # intercepts BEFORE the main IRA-deduction path could wrongly try to
+    # compute a deduction for something that was never eligible.
+    ("how much california tax do I owe on $80,000 in wages with a $6,000 roth ira contribution single",
+     {"status": "answered", "domain": "income", "category": "roth_ira_not_deductible"}),
+    # SELF-EMPLOYMENT COLLISION: an IRA deduction is a general above-the-
+    # line adjustment that can accompany ANY income type, including
+    # self-employment -- before the SE_COMPLEXITY_EXCLUDE fix, this would
+    # have been intercepted by the plain self-employment path, silently
+    # ignoring the stated IRA deduction. Now correctly defers (the
+    # self-employment/worker-classification mismatch is the one
+    # confirmed remaining CA/federal divergence trigger for this line,
+    # genuinely out of scope for this single-question model).
+    ("how much california tax do I owe on $80,000 self-employed with a $6,000 IRA deduction single",
+     {"status": "needs_review"}),
+
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given
      {"status": "needs_review"}),

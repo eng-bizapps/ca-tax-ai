@@ -1496,6 +1496,94 @@ def _income_cannabis_280e_ambiguous_amount_answer(question: str, base: dict):
     return result
 
 
+def _income_roth_ira_answer(question: str, base: dict):
+    """Dedicated informational redirect for a Roth IRA deduction question
+    -- Roth contributions are NEVER deductible (federal or CA). Checked
+    BEFORE _income_ira_deduction_answer in the dispatcher: "roth ira" and
+    "roth" both fail IRA_DEDUCTION_TERMS's own roth exclusion, but a
+    phrasing like "can I deduct my roth ira contribution" also contains
+    "ira contribution" as a substring, so this needs to intercept first
+    rather than rely on the other path simply not firing."""
+    if not income_brackets.detect_roth_ira_mention(question):
+        return None
+    result = {**base, "status": "answered", "category": "roth_ira_not_deductible"}
+    result["answer_text"] = (
+        "Contributions to a Roth IRA are never tax-deductible, for either federal or "
+        "California purposes -- Roth contributions are made with after-tax dollars, and the "
+        "tax benefit is tax-free qualified withdrawals in retirement instead of an upfront "
+        "deduction. If you meant a TRADITIONAL IRA deduction instead, ask again specifying "
+        "that."
+    )
+    return result
+
+
+def _income_ira_deduction_answer(conn, question: str, base: dict):
+    """Income + a stated traditional-IRA deduction -- see
+    income_brackets.compute_ira_deduction_ca_tax's docstring for the
+    Schedule CA Line 20 conformity basis (SB 711 conformity-date change,
+    TY2025 no-adjustment finding). Uses _amount_near/the 'one other
+    amount' pattern exactly like the capital-loss/excess-business-loss
+    paths."""
+    fs = income_brackets.detect_ira_deduction_signal(question)
+    if not fs:
+        return None
+    ira_amount = _amount_near(question, income_brackets.IRA_DEDUCTION_TERMS)
+    if ira_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != ira_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_ira_deduction_ca_tax(conn, income_amount, ira_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in income (treated as your California AGI before the "
+        f"IRA deduction, with no other adjustments), filing status {label}, and your "
+        f"${ira_amount:,.2f} traditional IRA deduction: for {income_brackets.DEFAULT_TAX_YEAR}, "
+        f"California allows this deduction UNCHANGED from your federal amount "
+        f"({income_brackets.IRA_DEDUCTION_CITATION}) -- the two previously-live CA/federal "
+        "divergence triggers for this line (the pre-SECURE-Act age-70½ limit, the CAA "
+        "2023 catch-up-contribution indexing) no longer apply under California's 2025 IRC "
+        f"conformity-date update. Your California AGI is about ${calc['agi']:,.2f}; after the "
+        f"standard deduction (${calc['standard_deduction']:,.0f}), your California taxable "
+        f"income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated IRA deduction is already a valid federal "
+        "deduction (this doesn't re-derive the contribution limit or employer-plan income "
+        "phase-out from your age/coverage facts) and that your CA and federal earned income "
+        "match (a self-employment/worker-classification mismatch is the one confirmed "
+        "remaining case where California and federal amounts could still differ) -- your "
+        "actual liability may differ."
+    )
+    return result
+
+
+def _income_ira_deduction_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_capital_loss_missing_filing_status_answer for the
+    IRA-deduction path."""
+    if not income_brackets.detect_ira_deduction_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a traditional IRA deduction, I need your "
+        "filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include your filing "
+        "status.")
+    return result
+
+
 def _income_caleitc_investment_answer(conn, question: str, base: dict):
     """CalEITC + a stated investment-income figure -- see
     income_credits.compute_caleitc_with_investment_income's docstring for
@@ -3039,6 +3127,18 @@ def _answer_income(conn, question: str, compose: bool, qv):
     ambiguous_cannabis_280e_result = _income_cannabis_280e_ambiguous_amount_answer(question, base)
     if ambiguous_cannabis_280e_result:
         return ambiguous_cannabis_280e_result
+
+    roth_ira_result = _income_roth_ira_answer(question, base)
+    if roth_ira_result:
+        return roth_ira_result
+
+    ira_deduction_result = _income_ira_deduction_answer(conn, question, base)
+    if ira_deduction_result:
+        return ira_deduction_result
+
+    missing_ira_fs_result = _income_ira_deduction_missing_filing_status_answer(question, base)
+    if missing_ira_fs_result:
+        return missing_ira_fs_result
 
     caleitc_investment_result = _income_caleitc_investment_answer(conn, question, base)
     if caleitc_investment_result:

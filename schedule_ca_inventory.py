@@ -330,7 +330,15 @@ ITEMS = [
      "built", "alimony_spousal_support", "Transitional population tied to the 2025-12-31 conformity cutoff"),
     ("I", "C", "20", "IRA deduction (IRC 408 election)",
      "both", "narrow", "Sched CA (540) Pt I Sec C line 20",
-     "deferred_new_engine", None, None),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: compute_ira_deduction_ca_tax in income_brackets.py, pass-through "
+     "(trusts the stated federal deduction). For TY2025, SB 711's conformity-date change "
+     "(1/1/2015 -> 1/1/2025) repealed both previously-live Line 20 divergence triggers "
+     "(age-70.5 addback, catch-up-indexing addback), confirmed by diffing the 2024 vs 2025 "
+     "FTB instructions -- so no CA adjustment applies for the common case. Self-employment/"
+     "worker-classification income mismatch remains the one open trigger, deferred. FTB Pub. "
+     "1005 (PDF-only) not independently verified. Roth IRA mentions get a dedicated "
+     "not-deductible redirect rather than a silent wrong computation."),
     ("I", "C", "21", "Student loan interest deduction (military spouse/RDP domicile)",
      "addition", "narrow", "Sched CA (540) Pt I Sec C line 21",
      "not_applicable", None, None),
