@@ -1205,6 +1205,297 @@ def _income_capital_loss_missing_filing_status_answer(question: str, base: dict)
     return result
 
 
+def _income_excess_business_loss_answer(conn, question: str, base: dict):
+    """Other income (e.g. wages) + a stated AGGREGATE net business loss --
+    see income_brackets.compute_excess_business_loss_ca_tax's docstring for
+    the Form 3461 conformity basis (CA's own continuous $313k/$626k
+    threshold, not the current federal version). Uses _amount_near/the
+    'one other amount' pattern exactly like the capital-loss path."""
+    fs = income_brackets.detect_excess_business_loss_signal(question)
+    if not fs:
+        return None
+    loss_amount = _amount_near(question, income_brackets.EXCESS_BUSINESS_LOSS_TERMS)
+    if loss_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_excess_business_loss_ca_tax(conn, income_amount, loss_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["excess_business_loss"]:
+        loss_note = (f"${calc['allowed_loss']:,.2f} of your ${loss_amount:,.2f} business loss "
+                     f"(the {income_brackets.DEFAULT_TAX_YEAR} excess business loss threshold for "
+                     f"{label} is ${calc['threshold']:,.0f}), with the remaining "
+                     f"${calc['excess_business_loss']:,.2f} carrying forward as an excess "
+                     "business loss carryover to next year's California return (not reflected "
+                     "in this estimate)")
+    else:
+        loss_note = (f"your full ${loss_amount:,.2f} business loss (under the "
+                     f"${calc['threshold']:,.0f} excess business loss threshold for {label}, so "
+                     "the limitation does not apply)")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in other income (also your California AGI before the "
+        f"loss offset, with no other adjustments), filing status {label}, and deducting "
+        f"{loss_note} ({income_brackets.EXCESS_BUSINESS_LOSS_CITATION}), plus the standard "
+        f"deduction (${calc['standard_deduction']:,.0f}): your California taxable income is "
+        f"about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated business loss is the correct AGGREGATE net "
+        "figure across all your trades/businesses (Schedule C, rental/K-1, farm, etc. combined) "
+        "-- your actual liability may differ."
+    )
+    return result
+
+
+def _income_excess_business_loss_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_capital_loss_missing_filing_status_answer for the
+    excess-business-loss path."""
+    if not income_brackets.detect_excess_business_loss_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a business loss, I need your filing "
+        "status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse (the excess business loss threshold is "
+        "higher for married filing jointly / qualifying surviving spouse). Please ask again "
+        "and include your filing status.")
+    return result
+
+
+def _income_nol_answer(conn, question: str, base: dict):
+    """Business income + a stated NOL carryover deduction -- see
+    income_brackets.compute_nol_ca_tax's docstring for the Form 3805V
+    suspension-test basis (CA's own 2024-2026 suspension when net business
+    income AND modified AGI are both >=$1,000,000, collapsed to a single
+    stated business-income figure under this path's sole-income-source
+    assumption). Uses _amount_near/the 'one other amount' pattern exactly
+    like the excess-business-loss path."""
+    fs = income_brackets.detect_nol_signal(question)
+    if not fs:
+        return None
+    nol_amount = _amount_near(question, income_brackets.NOL_TERMS)
+    if nol_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != nol_amount]
+    if len(others) != 1:
+        return None
+    business_income = others[0]
+    calc = income_brackets.compute_nol_ca_tax(conn, business_income, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": business_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["suspended"]:
+        nol_note = (f"your NOL carryover deduction is SUSPENDED this year because your "
+                    f"business income (${business_income:,.2f}) is at or above the "
+                    f"{income_brackets.DEFAULT_TAX_YEAR} $1,000,000 suspension threshold -- "
+                    f"none of your ${nol_amount:,.2f} carryover is deductible this year, and "
+                    "the full amount carries forward (with an extended carryforward period) "
+                    "to a later year")
+    elif calc["remaining_carryover"]:
+        nol_note = (f"${calc['nol_deduction']:,.2f} of your ${nol_amount:,.2f} NOL carryover "
+                    "is deductible this year (capped at your Modified Taxable Income of "
+                    f"${calc['mti']:,.2f}, not a percentage -- California has no 80%-of-income "
+                    "cap like current federal law), with the remaining "
+                    f"${calc['remaining_carryover']:,.2f} continuing to carry forward")
+    else:
+        nol_note = (f"your full ${nol_amount:,.2f} NOL carryover is deductible this year "
+                    "(the suspension does not apply, and it's within your Modified Taxable "
+                    "Income)")
+    result["answer_text"] = (
+        f"Assuming ${business_income:,.2f} in business income (treated as your ONLY income "
+        f"and both your net business income and modified AGI for the suspension test), filing "
+        f"status {label}: {nol_note} ({income_brackets.NOL_CITATION}). After the standard "
+        f"deduction (${calc['standard_deduction']:,.0f}), your California taxable income is "
+        f"about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes an ordinary business NOL (not a disaster-loss carryover, "
+        "which is exempt from suspension regardless of income) and that you have no other "
+        "income or adjustments beyond the stated business income -- your actual liability may "
+        "differ."
+    )
+    return result
+
+
+def _income_nol_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_excess_business_loss_missing_filing_status_answer
+    for the NOL-suspension path."""
+    if not income_brackets.detect_nol_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an NOL carryover deduction, I need your "
+        "filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include your filing "
+        "status.")
+    return result
+
+
+def _cannabis_strip_280e_phantom_amounts(question: str, amounts):
+    """_amounts()'s shared regex (an optional dollar sign, then digits)
+    has no letter-suffix guard -- by design, so it still cleanly matches
+    plain figures like "50000" with no dollar sign -- but that means
+    literal "280E" in
+    question text (this feature's OWN natural vocabulary, since it's the
+    IRC section this whole feature is about) gets parsed as a phantom
+    $280.00 amount, which then wins the nearest-amount search against
+    itself (distance ~0), corrupting both the expense-amount extraction
+    and the 'exactly one other amount' check. Filters out any amount
+    matching exactly 280.0 immediately followed by 'e'/'E' with no
+    decimal/digit continuation in the ORIGINAL question text -- narrow
+    enough that a genuine "$280" business expense (space before the next
+    word, or an explicit ".00") is never caught by this filter. Scoped
+    locally to this one feature rather than changing the shared
+    _amounts()/_amount_near() regex that 20+ other compute paths and
+    200+ passing regression cases already depend on unchanged."""
+    out = []
+    for amount, start, end in amounts:
+        if amount == 280.0 and question[end:end + 1].lower() == "e":
+            continue
+        out.append((amount, start, end))
+    return out
+
+
+def _cannabis_amount_near(question: str, keywords, amounts, window: int = 60):
+    """Same nearest-keyword-distance logic as _amount_near, but operating
+    on a caller-supplied (already phantom-filtered) amounts list instead
+    of calling _amounts() internally -- see
+    _cannabis_strip_280e_phantom_amounts's docstring for why this
+    feature specifically can't reuse _amount_near as-is."""
+    ql = question.lower()
+    if not amounts:
+        return None
+    best = None
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = ql.find(kw, start)
+            if idx == -1:
+                break
+            for amount, a_start, a_end in amounts:
+                dist = abs((a_start + a_end) / 2 - idx)
+                if dist <= window and (best is None or dist < best[1]):
+                    best = (amount, dist)
+            start = idx + len(kw)
+    return best[0] if best else None
+
+
+def _income_cannabis_280e_answer(conn, question: str, base: dict):
+    """Licensed commercial cannabis business net profit + a stated 280E-
+    disallowed-expense restoration -- see income_brackets.
+    compute_self_employment_ca_tax's cannabis_280e_expenses docstring for
+    the R&TC 17209 conformity basis (reuses the self-employment compute
+    path, not a parallel one). Uses the 'one other amount' pattern exactly
+    like the excess-business-loss/NOL paths, but via the phantom-filtered
+    amount helpers above instead of _amounts()/_amount_near() directly."""
+    fs = income_brackets.detect_cannabis_280e_signal(question)
+    if not fs:
+        return None
+    amounts = _cannabis_strip_280e_phantom_amounts(question, _amounts(question))
+    expense_amount = _cannabis_amount_near(question, income_brackets.CANNABIS_280E_EXPENSE_TERMS, amounts)
+    if expense_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != expense_amount]
+    if len(others) != 1:
+        return None
+    net_profit = others[0]
+    calc = income_brackets.compute_self_employment_ca_tax(
+        conn, net_profit, fs, cannabis_280e_expenses=expense_amount)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "self_employment_income_tax",
+              "amount": net_profit, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${net_profit:,.2f} in federal Schedule C net profit from a LICENSED "
+        f"commercial cannabis business (MAUCRSA/DCC), filing status {label}: federal self-"
+        f"employment tax is ${calc['se_tax']:,.2f} (${calc['half_se_deduction']:,.2f} "
+        f"deductible). California does not conform to federal IRC Section 280E for licensed "
+        f"cannabis businesses, so your ${expense_amount:,.2f} in federally-disallowed ordinary "
+        f"business expenses is restored as a deduction against California income "
+        f"({income_brackets.CANNABIS_280E_CITATION}), giving California AGI of "
+        f"${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your business is genuinely MAUCRSA/DCC-licensed (an "
+        "unlicensed cannabis business gets no restoration -- federal 280E would fully apply "
+        "for California too) and that self-employment income is your only income -- your "
+        "actual liability may differ."
+    )
+    return result
+
+
+def _income_cannabis_280e_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_self_employment_missing_filing_status_answer for
+    the cannabis-280E path."""
+    if not income_brackets.detect_cannabis_280e_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax for a licensed cannabis business, I need your "
+        "filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include your filing "
+        "status.")
+    return result
+
+
+def _income_cannabis_280e_ambiguous_amount_answer(question: str, base: dict):
+    """Catches the remaining gap between _income_cannabis_280e_answer and
+    _income_cannabis_280e_missing_filing_status_answer: a filing status
+    IS present (so the missing-fs message above doesn't fire) but the
+    280E-disallowed-expense figure couldn't be extracted as a SEPARATE
+    amount from net profit (e.g. only one dollar figure stated at all) --
+    _income_cannabis_280e_answer already tried and returned None by the
+    time this runs. Without this, the question falls through the income
+    dispatcher entirely and back to sales-tax routing, which (per the
+    cross-domain collision this feature exposed -- see _answer()'s
+    cannabis-280E intercept) confidently misreads "$500,000 net profit
+    from a cannabis business" as a $500,000 RETAIL PURCHASE of cannabis
+    product and computes excise/sales tax on it -- exactly the
+    "confidently wrong" failure this project exists to prevent."""
+    if not income_brackets.detect_cannabis_280e_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax for a licensed cannabis business under R&TC "
+        "Section 17209, I need the dollar amount of ordinary business expenses disallowed "
+        "federally under IRC Section 280E that you're restoring as a California deduction, "
+        "stated separately from your net profit (for example, \"$500,000 net profit with "
+        "$150,000 in disallowed 280E expenses\"). Please ask again and include both figures.")
+    return result
+
+
 def _income_caleitc_investment_answer(conn, question: str, base: dict):
     """CalEITC + a stated investment-income figure -- see
     income_credits.compute_caleitc_with_investment_income's docstring for
@@ -2721,6 +3012,34 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_capital_loss_fs_result:
         return missing_capital_loss_fs_result
 
+    excess_business_loss_result = _income_excess_business_loss_answer(conn, question, base)
+    if excess_business_loss_result:
+        return excess_business_loss_result
+
+    missing_ebl_fs_result = _income_excess_business_loss_missing_filing_status_answer(question, base)
+    if missing_ebl_fs_result:
+        return missing_ebl_fs_result
+
+    nol_result = _income_nol_answer(conn, question, base)
+    if nol_result:
+        return nol_result
+
+    missing_nol_fs_result = _income_nol_missing_filing_status_answer(question, base)
+    if missing_nol_fs_result:
+        return missing_nol_fs_result
+
+    cannabis_280e_result = _income_cannabis_280e_answer(conn, question, base)
+    if cannabis_280e_result:
+        return cannabis_280e_result
+
+    missing_cannabis_280e_fs_result = _income_cannabis_280e_missing_filing_status_answer(question, base)
+    if missing_cannabis_280e_fs_result:
+        return missing_cannabis_280e_fs_result
+
+    ambiguous_cannabis_280e_result = _income_cannabis_280e_ambiguous_amount_answer(question, base)
+    if ambiguous_cannabis_280e_result:
+        return ambiguous_cannabis_280e_result
+
     caleitc_investment_result = _income_caleitc_investment_answer(conn, question, base)
     if caleitc_investment_result:
         return caleitc_investment_result
@@ -2918,6 +3237,30 @@ def _answer(question: str, compose: bool = True, location: str = None,
                 military_result = _answer_income(iconn, question, compose, qv_military)
             if military_result:
                 return military_result
+
+        # Cannabis 280E business-expense decoupling: the SAME collision
+        # class as the military-retirement guard above, found live via
+        # income_item_sweep.py while building this feature. Sales tries
+        # first by default, and this project's OWN sales-tax cannabis
+        # excise rule (cannabis_retail_adult_use -- "retail sale of
+        # cannabis or cannabis products ... for adult (recreational) use")
+        # sits close enough to ANY cannabis-flavored question that a
+        # question entirely about a LICENSED BUSINESS's net PROFIT and
+        # 280E-disallowed expenses (nothing to do with a retail purchase)
+        # was confidently answered as sales/excise tax on the stated
+        # dollar figure. Without this intercept the income-domain 280E
+        # restoration would never even be tried. Checks BOTH the full
+        # signal and the missing-filing-status variant (unlike military
+        # retirement, this path needs a filing status, so a question
+        # missing one must still be intercepted here rather than falling
+        # through to sales).
+        if (income_brackets.detect_cannabis_280e_signal(question)
+                or income_brackets.detect_cannabis_280e_missing_filing_status(question)):
+            qv_cannabis = _embed(question)
+            with income_db.get_conn() as iconn:
+                cannabis_result = _answer_income(iconn, question, compose, qv_cannabis)
+            if cannabis_result:
+                return cannabis_result
 
         branches, qv = [], None
         route_dist = None

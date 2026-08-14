@@ -123,7 +123,13 @@ ITEMS = [
      "not_applicable", None, "Pandemic-era, aging out"),
     ("I", "B", "3", "Commercial cannabis activity business-expense deduction (IRC 280E)",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 3",
-     "deferred_new_engine", None, "Business-owner shape"),
+     "built", "self_employment_income_tax",
+     "Built 2026-08-14: cannabis_280e_expenses param on compute_self_employment_ca_tax in "
+     "income_brackets.py (reuses the self-employment path, sole-proprietor/SMLLC scope per "
+     "R&TC 17209; K-1 recipients need no adjustment, entity already absorbs it). Required an "
+     "early-intercept guard in _answer() (mirrors the pre-existing military-retirement "
+     "collision fix) since this project's own sales-tax cannabis_retail_adult_use rule was "
+     "shadowing the income-domain answer for any cannabis-flavored question."),
     ("I", "B", "3", "Limitation on employer fringe benefit expense deduction",
      "both", "narrow", "Sched CA (540) Pt I Sec B line 3",
      "deferred_new_engine", None, "Business-owner shape"),
@@ -186,7 +192,12 @@ ITEMS = [
      "deferred_new_engine", None, "CFC-owner population"),
     ("I", "B", "8p", "Excess business loss limitation (FTB 3461)",
      "both", "moderate", "Sched CA (540) Pt I Sec B line 8p; FTB 3461",
-     "deferred_new_engine", None, "Business-owner shape, thresholds $313k/$626k for 2025"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: compute_excess_business_loss_ca_tax in income_brackets.py. "
+     "Thresholds $313k (single/MFS/HOH) / $626k (MFJ/QSS) for 2025 -- QSS paired with MFJ "
+     "per this codebase's own precedent (Form 3461 doesn't name QSS explicitly). Trusts a "
+     "single stated aggregate business-loss figure (Form 3461 Parts I/II netting not "
+     "derived from components); excess carryforward disclosed, not tracked into future years."),
     ("I", "B", "8z-wildfire-general", "Wildfire disaster settlement exclusion (general)",
      "subtraction", "moderate", "R&TC 17138.7; Sched CA (540) Pt I Sec B line 8z",
      "built", "wildfire_disaster_settlement_exclusion", "TY2021-2029; folded into the generic wildfire_disaster_settlement_exclusion topic"),
@@ -285,7 +296,12 @@ ITEMS = [
      "deferred_new_engine", None, "Requires declared-disaster-county + loss facts"),
     ("I", "B", "9b2", "NOL deduction (FTB 3805V)",
      "subtraction", "moderate", "Sched CA (540) Pt I Sec B line 9b2; FTB 3805V",
-     "deferred_new_engine", None, "CA NOL suspended TY2024-2026 except <$1M net business/AGI or disaster carryovers"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: compute_nol_ca_tax in income_brackets.py. TY2024-2026 suspension when "
+     "net business income AND modified AGI are both >=$1M, collapsed to one stated business-"
+     "income figure under a disclosed sole-income-source assumption. No % cap when not "
+     "suspended (unlike federal), capped at Modified Taxable Income instead. Disaster-loss "
+     "carveout and pre-2008 NOLs remain out of scope."),
     ("I", "B", "9b3", "NOL deduction -- Enterprise Zone/LAMBRA/Targeted Tax Area (FTB 3805Z/3807/3809)",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 9b3",
      "not_applicable", None, "Legacy economic-incentive-zone programs, largely phased out"),

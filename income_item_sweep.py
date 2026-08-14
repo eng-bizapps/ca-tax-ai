@@ -612,6 +612,206 @@ ITEMS = [
     ("how much california tax do I owe on $80,000 self-employed with $10,000 in capital losses filing single",
      {"status": "needs_review"}),
 
+    # --- excess business loss limitation (Ring 3 extension, IRC 461(l) /
+    # FTB Form 3461) -- verified against the 2025 Form 3461 instructions:
+    # CA runs its OWN continuous limitation (does not conform to the
+    # current federal version), 2025 threshold $313,000 (single/MFS/HOH),
+    # $626,000 (MFJ/RDP joint). All tax figures below verified directly
+    # against the live engine (compute_excess_business_loss_ca_tax), same
+    # practice as every other compute path in this file.
+    #
+    # MFJ, $800,000 wages, $700,000 business loss (EXCEEDS $626,000
+    # threshold): allowed loss capped at $626,000, $74,000 excess carries
+    # forward (not applied) -> AGI $174,000 -> taxable $162,588 -> $7,997.96.
+    ("how much california tax do I owe on $800,000 in wages with $700,000 in business loss married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.96}),
+    # same figures, loss stated before income -- order independence, same
+    # pattern as the capital-loss reordering test.
+    ("how much california tax do I owe on $700,000 in business loss and $800,000 in wages married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.96}),
+    # QSS THRESHOLD DETERMINATION, locked in behaviorally: Form 3461's
+    # definitions section doesn't name "Qualifying Surviving Spouse/RDP"
+    # explicitly (only single/HOH/MFS and MFJ) -- resolved from this
+    # codebase's own precedent that QSS always pairs with MFJ at every
+    # other filing-status dollar threshold (standard deduction, Schedule Y
+    # bracket table, itemized AGI phase-out). This is the exact question
+    # that was being fact-checked via a risky direct-PDF browser navigation
+    # when the prior Claude Desktop session crashed (see project memory) --
+    # resolved instead via in-codebase precedent, no PDF fetch needed. Same
+    # dollar figures as the MFJ case immediately above -> IDENTICAL result
+    # confirms the $626,000 threshold applies to QSS too.
+    ("how much california tax do I owe on $800,000 in wages with $700,000 in business loss qualifying surviving spouse",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.96}),
+    # HOH shares the $313,000 threshold with single/MFS (not the higher
+    # MFJ/QSS figure): $500,000 wages, $400,000 loss (EXCEEDS $313,000) ->
+    # allowed loss $313,000, $87,000 excess carries forward -> AGI
+    # $187,000 -> taxable $175,588 -> $10,740.06.
+    ("how much california tax do I owe on $500,000 in wages with $400,000 in business loss head of household",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 10740.06}),
+    # MFS also uses the $313,000 threshold (same as single/HOH, NOT a
+    # halved figure the way the capital-loss annual limit works) -- same
+    # $500,000/$400,000 facts as the HOH case above, different (smaller)
+    # standard deduction -> taxable $181,294 -> $13,298.98.
+    ("how much california tax do I owe on $500,000 in wages with $400,000 in business loss married filing separately",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 13298.98}),
+    # UNDER the threshold ($100,000 loss < $313,000 single threshold) --
+    # the limitation does NOT apply at all, full loss is deductible, no
+    # carryforward: $200,000 wages - $100,000 loss = AGI $100,000 -> minus
+    # $5,706 std deduction -> taxable $94,294 -> $5,207.98.
+    ("how much california tax do I owe on $200,000 in wages with $100,000 in business loss filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5207.98}),
+    # loss exactly AT the threshold ($313,000) -- boundary case, still
+    # fully deductible (excess is 0, not a rounding-off-by-one): $400,000
+    # wages - $313,000 loss = AGI $87,000 -> taxable $81,294 -> $3,998.98.
+    ("how much california tax do I owe on $400,000 in wages with $313,000 in business loss filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3998.98}),
+    # missing filing status -> specific clarifying message, same pattern
+    # as every other compute path.
+    ("how much california tax do I owe on $200,000 in wages with $400,000 in business loss",
+     {"status": "needs_review", "domain": "income"}),
+    # business loss + capital loss together is out of scope (two different
+    # loss mechanisms with different limits/carryforward rules) --
+    # correctly defers rather than picking one arbitrarily.
+    ("how much california tax do I owe on $200,000 in wages with $400,000 in business loss and $10,000 in capital losses filing single",
+     {"status": "needs_review"}),
+    # SELF-EMPLOYMENT COLLISION GUARD: before this feature, "self-employed"
+    # + a stated dollar figure would have been intercepted by the
+    # self-employment path and treated as POSITIVE net profit even though
+    # the question describes a LOSS (compute_se_tax has no way to know the
+    # figure was meant as negative) -- the same "wrong number silently
+    # used" bug class as the contracted/salaried stemming gaps found
+    # earlier this project. Added "business loss" etc. to
+    # SE_COMPLEXITY_EXCLUDE/K1_COMPLEXITY_EXCLUDE alongside this feature so
+    # the self-employment/K-1 paths correctly step aside instead. This
+    # exact phrasing doesn't cleanly match the excess-business-loss path
+    # either (no separately-stated "other income" figure, self-employment
+    # IS the business loss here) -- correctly defers rather than guessing
+    # which path should own it.
+    ("how much california tax do I owe on $700,000 self-employed with a $700,000 business loss filing single",
+     {"status": "needs_review"}),
+
+    # --- CA NOL (net operating loss) carryover deduction suspension (Ring
+    # 3 extension, R&TC 17276.24 / FTB Form 3805V) -- verified against the
+    # 2025 Form 3805V instructions: suspended for TY2024-2026 when net
+    # business income AND modified AGI are both >=$1,000,000 (an AND test
+    # for suspension = an OR test for the exemption); no percentage cap
+    # when not suspended (unlike federal law's 80%-of-income cap), just
+    # capped at Modified Taxable Income (MTI). This path collapses "net
+    # business income" and "modified AGI" into ONE stated business-income
+    # figure under a disclosed sole-income-source assumption. All tax
+    # figures verified directly against the live engine.
+    #
+    # SUSPENDED: $1,200,000 business income (>=$1,000,000 threshold),
+    # $200,000 NOL carryover -> ENTIRE carryover disallowed this year
+    # (deduction $0, full $200,000 preserved) -> taxable income is just
+    # business income minus std deduction: $1,194,294 -- crosses the $1M
+    # Behavioral Health Services Tax surtax threshold too -> $129,677.72.
+    ("how much california tax do I owe on $1,200,000 in business income with a $200,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 129677.72}),
+    # exact $1,000,000 BOUNDARY -- FTB's "or more" means suspended AT the
+    # threshold, not just strictly above it: $1,000,000 business income,
+    # $50,000 NOL carryover -> still suspended -> taxable $994,294 ->
+    # $103,134.78.
+    ("how much california tax do I owe on $1,000,000 in business income with a $50,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 103134.78}),
+    # NOT suspended, carryover fully usable (under MTI): $500,000 business
+    # income (<$1M), $100,000 NOL carryover -> MTI = $494,294, full
+    # $100,000 deductible -> taxable $394,294 -> $33,336.13.
+    ("how much california tax do I owe on $500,000 in business income with a $100,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 33336.13}),
+    # NOT suspended, but carryover EXCEEDS MTI -- capped at MTI (not the
+    # full stated carryover), remainder still carries forward: $50,000
+    # business income, MTI = $44,294, $60,000 NOL carryover -> only
+    # $44,294 deductible, $15,706 remains carrying forward -> taxable
+    # income drops to exactly $0 -> tax $0.00.
+    ("how much california tax do I owe on $50,000 in business income with a $60,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.00}),
+    # MFJ coverage, not suspended: $700,000 business income, $150,000 NOL
+    # carryover -> MTI = $688,588, full $150,000 deductible -> taxable
+    # $538,588 -> $42,965.96.
+    ("how much california tax do I owe on $700,000 in business income with a $150,000 nol carryover married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 42965.96}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $500,000 in business income with a $100,000 nol carryover",
+     {"status": "needs_review", "domain": "income"}),
+    # wage income mixed in -- real complexity this MVP doesn't attempt
+    # (the sole-income-source assumption behind collapsing "net business
+    # income" and "modified AGI" into one figure would no longer hold) --
+    # correctly defers.
+    ("how much california tax do I owe on $60,000 in wages and $500,000 in business income with a $100,000 nol carryover single",
+     {"status": "needs_review"}),
+    # SELF-EMPLOYMENT COLLISION, TWO amounts stated: before the
+    # SE_COMPLEXITY_EXCLUDE fix, "self-employed" + a business-income
+    # figure would have been intercepted by the self-employment path,
+    # which would compute SE tax on the profit while silently IGNORING
+    # the NOL carryover the question explicitly asked about -- a
+    # confidently-computed answer omitting a deduction the user asked
+    # for. Now the self-employment path correctly steps aside and the
+    # dedicated NOL path picks it up instead, giving the SAME correct
+    # (suspended) answer as the plain $1,200,000/$200,000-carryover case
+    # above but with a different (smaller) carryover amount that doesn't
+    # change the outcome (still suspended either way): tax $129,677.72.
+    ("how much california tax do I owe on $1,200,000 self-employed with a $50,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 129677.72}),
+    # SELF-EMPLOYMENT COLLISION, ONE amount only (genuinely ambiguous --
+    # no separately-stated NOL carryover dollar figure to extract):
+    # correctly defers rather than guessing which figure means what.
+    ("how much california tax do I owe if I am self-employed and made $1,200,000, considering my nol carryover single",
+     {"status": "needs_review"}),
+
+    # --- cannabis 280E business-expense decoupling (Ring 3 extension,
+    # R&TC Section 17209) -- verified against the statute and the 2025
+    # Schedule CA (540) instructions' Line 3 cannabis paragraph: LICENSED
+    # (MAUCRSA/DCC) commercial cannabis businesses may deduct ordinary
+    # business expenses federal IRC 280E disallows, restored as a
+    # subtraction against California income. Reuses
+    # compute_self_employment_ca_tax's cannabis_280e_expenses parameter
+    # (a self-employment computation with one extra CA-specific fact, not
+    # a new mechanism). All tax figures verified directly against the
+    # live engine.
+    #
+    # LICENSED, restoration applies: $500,000 federal net profit, $150,000
+    # in disallowed 280E expenses restored -> SE tax $35,227.15 (half
+    # deductible $17,613.58, computed on the FULL federal figure --
+    # unaffected by CA's own conformity choice), AGI = 500,000 -
+    # 17,613.58 - 150,000 = 332,386.42 -> taxable $326,680.42 ->
+    # $26,819.92.
+    ("how much california tax do I owe on $500,000 net profit from a licensed cannabis business with $150,000 in disallowed 280e expenses single",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 26819.92}),
+    # MFJ coverage, different figures: $300,000 net profit, $80,000
+    # disallowed expenses restored -> $10,886.97.
+    ("how much california tax do I owe on $300,000 net profit from a licensed cannabis business with $80,000 in disallowed 280e expenses married filing jointly",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 10886.97}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $500,000 net profit from a licensed cannabis business with $150,000 in disallowed 280e expenses",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COLLISION, TWO amounts stated: before the
+    # SE_COMPLEXITY_EXCLUDE fix, "self-employed" + a licensed-cannabis
+    # net-profit figure would have been intercepted by the plain
+    # self-employment path, computing SE tax on the FEDERAL (280E-
+    # inflated) net profit while silently IGNORING the CA-specific
+    # restoration the question explicitly stated -- understating the
+    # deduction, overstating the tax owed. Now the self-employment path
+    # correctly steps aside and the dedicated cannabis-280E path answers
+    # instead, giving the SAME result as the plain $500,000/$150,000 case
+    # above: $26,819.92.
+    ("how much california tax do I owe if I am self-employed running a licensed cannabis business with $500,000 net profit and $150,000 in disallowed 280e expenses single",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 26819.92}),
+    # SELF-EMPLOYMENT COLLISION, ONE amount only (genuinely ambiguous --
+    # no separately-stated 280E restoration figure to extract): correctly
+    # defers rather than guessing which figure means what.
+    ("how much california tax do I owe if I am self-employed running a licensed cannabis business that made $500,000 single",
+     {"status": "needs_review"}),
+    # UNLICENSED cannabis business -- deliberately NOT a cannabis-280E
+    # trigger (no CANNABIS_LICENSE_TERMS match), so this correctly falls
+    # through to the PLAIN self-employment path unmodified -- federal
+    # 280E fully applies for California too when unlicensed, so no
+    # restoration is the CORRECT answer here, not a gap. $50,000 net
+    # profit, single -- matches the plain SE $50k/single figure exactly
+    # (same math as any ordinary sole-proprietor question).
+    ("how much tax do I owe on $50,000 self-employed single",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 994.39}),
+
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given
      {"status": "needs_review"}),

@@ -146,6 +146,41 @@ SE_COMPLEXITY_EXCLUDE = {
     "trust", "estate", "k-1", "schedule e", "gambling", "gambled", "betting",
     "wagering", "alimony", "pension",
     "w-2", "w2", "wage", "wages", "salary", "salaried",
+    # added alongside the excess-business-loss feature: this path assumes
+    # the stated dollar figure is POSITIVE net profit (compute_se_tax has
+    # no sign check of its own beyond net_profit<=0 -> None, which only
+    # catches an EXPLICITLY negative number, not a positive figure the
+    # user described in words as a LOSS) -- without this exclusion, "I'm
+    # self-employed with a $700,000 business loss" would silently treat
+    # $700,000 as PROFIT and compute SE tax on it, the same "wrong number
+    # silently used" bug class as the contracted/salaried stemming gaps
+    # found earlier this project. Business-loss questions now correctly
+    # defer to the dedicated excess-business-loss path instead.
+    "business loss", "net business loss", "aggregate business loss",
+    "excess business loss",
+    # added alongside the NOL-suspension feature: without this, a question
+    # combining this path's trigger with an NOL carryover mention would
+    # compute a profit/K-1 figure while silently IGNORING the NOL
+    # carryover the user explicitly asked to deduct -- a confidently-
+    # computed answer that omits a deduction the question was actually
+    # about, overstating the tax owed. Now correctly defers to the
+    # dedicated NOL path instead.
+    "net operating loss", "nol carryover", "nol deduction",
+    # added alongside the cannabis-280E feature: without this, "I'm
+    # self-employed running a licensed cannabis business, $500,000 net
+    # profit, $150,000 in disallowed 280E expenses" would compute plain SE
+    # tax on the FEDERAL (280E-inflated) net profit, silently IGNORING the
+    # CA-specific restoration the taxpayer is entitled to under R&TC
+    # 17209 -- understating the deduction, overstating the tax owed. Now
+    # correctly defers to the dedicated cannabis-280E path instead (which
+    # reuses this same self-employment math via compute_self_employment_
+    # ca_tax's cannabis_280e_expenses parameter). NOT added to
+    # K1_COMPLEXITY_EXCLUDE -- a K-1 recipient needs no adjustment here at
+    # all (see CANNABIS_LICENSE_TERMS's module note), so the K-1 path
+    # computing normally on a licensed-cannabis K-1 is already correct,
+    # not a gap to guard against.
+    "licensed cannabis", "cannabis license", "maucrsa", "dcc-licensed",
+    "dcc license",
 }
 
 # Federal Schedule SE mechanics (California has no separate self-employment
@@ -213,13 +248,32 @@ def compute_se_tax(net_profit: float):
 
 
 def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
-                                     tax_year: int = DEFAULT_TAX_YEAR):
+                                     tax_year: int = DEFAULT_TAX_YEAR,
+                                     cannabis_280e_expenses: float = None):
     """net_profit is Schedule C NET PROFIT (revenue minus business expenses),
     not federal AGI or taxable income -- computing directly from net profit
     (rather than from an already-computed federal figure) means the federal
     Qualified Business Income deduction (IRC Section 199A, which California
     does NOT conform to) never enters the calculation at all, sidestepping
-    that non-conformity entirely rather than requiring an addback."""
+    that non-conformity entirely rather than requiring an addback.
+
+    `cannabis_280e_expenses`, if given, is the amount of ordinary business
+    expenses disallowed FEDERALLY under IRC Section 280E for a LICENSED
+    commercial cannabis business, which California restores via R&TC
+    Section 17209 -- see CANNABIS_LICENSE_TERMS's module note below. Since
+    net_profit as stated is the federal (post-280E-disallowance) figure,
+    California allowing the deduction federal law denies means CA taxable
+    income is LOWER than the federal-conforming figure by this amount --
+    SUBTRACTED from AGI, same "trust the input" precedent as every other
+    add-on figure in this codebase. Deliberately does NOT touch se_tax
+    (Federal Schedule SE is unaffected by CA's own conformity choices --
+    real federal self-employment tax is still computed on the FULL,
+    un-restored net_profit, exactly as compute_se_tax already does above).
+    Only meaningful for a LICENSED (MAUCRSA/DCC) cannabis business --
+    unlicensed cannabis businesses get NO restoration (federal 280E fully
+    applies for CA purposes too in that case), so the plain path with this
+    parameter omitted is already correct for them, same as before this
+    parameter existed."""
     if net_profit is None or net_profit <= 0:
         return None
     se = compute_se_tax(net_profit)
@@ -227,11 +281,16 @@ def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
     if not dedu:
         return None
     agi = net_profit - se["half_deduction"]
+    if cannabis_280e_expenses is not None:
+        if cannabis_280e_expenses < 0:
+            return None
+        agi = agi - cannabis_280e_expenses
     taxable_income = max(0.0, agi - dedu["amount"])
     calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
     if not calc:
         return None
     return {**calc, "net_profit": net_profit, "se_tax": se["se_tax"],
+            "cannabis_280e_expenses": cannabis_280e_expenses,
             "half_se_deduction": se["half_deduction"], "agi": agi,
             "standard_deduction": dedu["amount"]}
 
@@ -314,6 +373,20 @@ K1_COMPLEXITY_EXCLUDE = {
     "gambling", "gambled", "betting", "wagering",
     "alimony", "pension", "self-employ", "self employ", "1099",
     "schedule c", "schedule e", "w-2", "w2", "wage", "wages", "salary", "salaried",
+    # same reasoning as SE_COMPLEXITY_EXCLUDE's business-loss addition:
+    # compute_k1_ca_tax has no sign check at all beyond None, so a K-1
+    # amount described in words as a LOSS would otherwise be silently
+    # treated as taxable K-1 income.
+    "business loss", "net business loss", "aggregate business loss",
+    "excess business loss",
+    # added alongside the NOL-suspension feature: without this, a question
+    # combining this path's trigger with an NOL carryover mention would
+    # compute a profit/K-1 figure while silently IGNORING the NOL
+    # carryover the user explicitly asked to deduct -- a confidently-
+    # computed answer that omits a deduction the question was actually
+    # about, overstating the tax owed. Now correctly defers to the
+    # dedicated NOL path instead.
+    "net operating loss", "nol carryover", "nol deduction",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -870,6 +943,379 @@ def compute_capital_loss_ca_tax(conn, income_amount: float, loss_amount: float,
     return {**calc, "income_amount": income_amount, "loss_amount": loss_amount,
             "deductible_loss": deductible_loss, "carryover": carryover,
             "standard_deduction": dedu["amount"]}
+
+
+# --- excess business loss limitation (Ring 3 extension, IRC Section 461(l)
+# / FTB Form 3461) -- verified against FTB's 2025 Form 3461 Instructions
+# (https://www.ftb.ca.gov/forms/2025/2025-3461-instructions.pdf) and the
+# 2025 Schedule CA (540) instructions. California does NOT conform to the
+# CURRENT federal version of this limitation (federal 461(l) was off for
+# 2018-2020, then reinstated/extended by ARPA/the Inflation Reduction Act
+# through 2028; FTB's instructions state directly that California does not
+# conform to those federal extensions) -- CA has run its OWN continuous
+# version since TCJA, with its own state-set (not federally-indexed) dollar
+# threshold each year: 2025 is $313,000 (single/MFS/HOH), $626,000
+# (MFJ/RDP joint).
+#
+# QSS THRESHOLD: Form 3461's own definitions section states only "single,
+# head of household, or married/RDP filing separately" ($313,000) and
+# "married/RDP taxpayers filing a joint return" ($626,000) -- it does not
+# enumerate "Qualifying Surviving Spouse/RDP" by name. Resolved from THIS
+# codebase's own established precedent rather than re-deriving from
+# scratch: EVERY other CA filing-status dollar threshold already built here
+# groups QSS with MFJ at the higher figure -- the standard deduction and
+# the Schedule Y bracket table itself (both load_income_content.py), the
+# itemized-deduction AGI phase-out threshold (ITEMIZED_AGI_LIMIT_THRESHOLD
+# above, "$504,411 MFJ/QSS"), and a credit threshold in income_credits.py
+# all treat qss identically to mfj. This matches general tax-law structure
+# too: a QSS filer already computes tax using the MFJ/joint rate schedule
+# (Schedule Y), so a rate-schedule-linked dollar threshold following the
+# same pairing is the well-supported reading, not a guess -- but it IS a
+# documented inference from a source that doesn't spell QSS out by name,
+# unlike the other four figures, so it stays flagged here rather than
+# presented as independently re-verified.
+EXCESS_BUSINESS_LOSS_THRESHOLD = {
+    "single": 313000.0, "mfs": 313000.0, "hoh": 313000.0,
+    "mfj": 626000.0, "qss": 626000.0,
+}
+EXCESS_BUSINESS_LOSS_CITATION = "FTB 2025 Form 3461 Instructions -- Section C, Definitions"
+EXCESS_BUSINESS_LOSS_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3461-instructions.pdf"
+
+# Trust the taxpayer's stated AGGREGATE net business loss as a single
+# figure (same "trust the input, don't derive it" precedent as SE net
+# profit / itemized_amount / k1_amount) -- the real Form 3461 Part I/Part
+# II worksheet nets MANY separate income/loss lines together (Schedule C,
+# Schedule D business-portion gains/losses, Form 4797, Schedule E rental/
+# royalty/K-1, Schedule F farm income) to reach this one number; this path
+# does not attempt to derive that net from separately-stated components.
+# Deliberately does NOT exclude business-type vocabulary the way the plain
+# wage-only path does (s-corp/LLC/partnership/K-1/Schedule C/Schedule E are
+# all legitimate SOURCES of the one aggregate figure here, not
+# disqualifiers) -- a narrower, TARGETED exclude list instead, same
+# discipline as itemized/capital-loss's own "other_exclude minus the
+# trigger term" pattern.
+EXCESS_BUSINESS_LOSS_TERMS = {
+    "excess business loss", "aggregate business loss", "net business loss",
+    "business loss",
+}
+EXCESS_BUSINESS_LOSS_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "alimony",
+    "gambling", "gambled", "betting", "wagering",
+    "capital gain", "capital loss", "stock", "rsu",
+}
+
+
+def _excess_business_loss_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in EXCESS_BUSINESS_LOSS_TERMS):
+        return False
+    if any(t in q for t in EXCESS_BUSINESS_LOSS_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_excess_business_loss_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated aggregate business loss' question -- same narrower-
+    exclude-set pattern as detect_capital_loss_signal (business-loss terms
+    are the TRIGGER here, not a disqualifier)."""
+    q = question.lower()
+    if not _excess_business_loss_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_excess_business_loss_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _excess_business_loss_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_excess_business_loss(business_loss_amount: float, filing_status: str):
+    """Form 3461 Parts I-III collapsed to their end result: the aggregate
+    net business loss (trusted as one stated figure -- see module note
+    above) is capped at the filing-status threshold. Loss AT OR UNDER the
+    threshold is not limited at all (fully deductible against other
+    income, same as any other loss) -- Form 3461 itself only produces a
+    nonzero "excess" once the loss EXCEEDS the threshold. The excess
+    becomes a carryover EBL for next year (Schedule CA (540) Line 8z when
+    later absorbed) -- NOT an NOL carryover (FTB: "any disallowed loss is
+    treated as a carryover excess business loss instead of an NOL
+    carryover"), so it stays unaffected by the separate 2024-2026 NOL
+    suspension rule if/when that gets built. This module does not track
+    the carryover into a future year's computation (same "current year
+    only" scope as compute_capital_loss_ca_tax's own carryover note)."""
+    if business_loss_amount is None or business_loss_amount <= 0:
+        return None
+    threshold = EXCESS_BUSINESS_LOSS_THRESHOLD.get(filing_status)
+    if threshold is None:
+        return None
+    allowed_loss = min(business_loss_amount, threshold)
+    excess = max(0.0, business_loss_amount - threshold)
+    return {"threshold": threshold, "allowed_loss": allowed_loss, "excess_business_loss": excess}
+
+
+def compute_excess_business_loss_ca_tax(conn, income_amount: float, business_loss_amount: float,
+                                          filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is OTHER (non-business-loss) income -- e.g. wages --
+    treated as gross income and California AGI before the loss offset, no
+    other adjustments (same simple-case assumption as every other compute
+    path). Only the EBL-limited allowed_loss offsets this year; any excess
+    is disclosed as a carryforward, not applied."""
+    if income_amount is None or income_amount < 0:
+        return None
+    ebl = compute_excess_business_loss(business_loss_amount, filing_status)
+    if not ebl:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = max(0.0, income_amount - ebl["allowed_loss"])
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "income_amount": income_amount, "business_loss_amount": business_loss_amount,
+            "threshold": ebl["threshold"], "allowed_loss": ebl["allowed_loss"],
+            "excess_business_loss": ebl["excess_business_loss"],
+            "standard_deduction": dedu["amount"]}
+
+
+# --- CA NOL (net operating loss) carryover deduction SUSPENSION (Ring 3
+# extension, R&TC Section 17276.24 / FTB Form 3805V) -- verified against
+# FTB's 2025 Instructions for Form 3805V
+# (https://www.ftb.ca.gov/forms/2025/2025-3805v-instructions.html) and the
+# 2025 Schedule CA (540) instructions' identical NOL Suspension paragraph.
+#
+# THE RULE (an OR test for the EXEMPTION, equivalently an AND test for
+# suspension): "The NOL carryover deduction is suspended for the 2024,
+# 2025, and 2026 taxable years, if your net business income is $1,000,000
+# or more AND modified AGI is $1,000,000 or more." "However, taxpayers
+# with net business income OR modified AGI of less than $1,000,000 ... are
+# not affected by the NOL suspension rules." Suspended means the ENTIRE
+# carryover deduction is disallowed THIS year (not partially reduced) --
+# the full amount simply carries forward (with its carryover period
+# extended by 1-3 years depending on when the loss was incurred, to make
+# up for the suspended year -- disclosed, not computed, see below).
+#
+# SCOPE SIMPLIFICATION (disclosed in the answer text, not assumed away
+# silently): FTB tests "net business income" and "modified AGI" as two
+# SEPARATE figures -- net business income is normally only a COMPONENT of
+# AGI, not identical to it (AGI also nets in other income sources and
+# above-the-line adjustments like the deductible half of self-employment
+# tax). This path assumes the taxpayer's ONLY income is their stated
+# business income figure, with no other income or adjustments -- same
+# "sole income source" scope discipline as the self-employment-only and
+# K-1-only paths -- which makes that ONE stated figure stand in for BOTH
+# halves of FTB's test. This is exact when the assumption holds; if the
+# taxpayer actually has other income or adjustments this path doesn't know
+# about, true modified AGI could differ from the figure used here, which
+# could change the suspension outcome in either direction.
+#
+# NO PERCENTAGE CAP when not suspended (genuinely different from federal
+# post-2017 law's 80%-of-taxable-income cap): "This is the maximum NOL
+# carryover deduction you are allowed" is MTI (Modified Taxable Income)
+# itself -- California allows 100% of MTI, dollar for dollar, for general
+# NOLs (losses incurred 2008+, the only vintage this path models).
+#
+# NOT MODELED, disclosed: (1) the disaster-loss-carryover carveout (R&TC
+# 17207.14) -- taxpayers with disaster loss carryovers are exempt from
+# suspension regardless of income, a narrow population this path doesn't
+# ask about, so it assumes an ORDINARY business NOL, not a disaster loss;
+# (2) the exact extended carryforward-period bookkeeping for a suspended
+# year's loss (disclosed only as "carries forward", not an exact year
+# count); (3) pre-2008 NOLs (different carryover-period/usable-percentage
+# rules under the NOL Carryover table -- this models general post-2008
+# NOLs only, same population every other 20-year-carryover feature in
+# this codebase assumes).
+NOL_THRESHOLD = 1000000.0
+NOL_CITATION = "FTB 2025 Instructions for Form 3805V -- NOL Suspension / General Information"
+NOL_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3805v-instructions.html"
+
+NOL_TERMS = {
+    "net operating loss carryover", "net operating loss deduction",
+    "nol carryover", "nol deduction", "net operating loss",
+}
+# Wage-context terms excluded here (unlike excess-business-loss, which
+# treats them as the SECOND figure) -- this path has no mixed-income
+# variant, so a stated wage figure alongside a business-income/NOL
+# question means real complexity (does the $1M test income-source
+# distinction actually matter now?) this MVP doesn't attempt; same
+# "business loss" exclusion as excess-business-loss's own module note,
+# since an EBL carryover and an NOL carryover are explicitly DIFFERENT
+# buckets per FTB (see excess_business_loss's module note) -- mixing both
+# in one question is deferred rather than guessed at.
+NOL_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "alimony",
+    "gambling", "gambled", "betting", "wagering",
+    "capital gain", "capital loss", "stock", "rsu",
+    "disaster loss", "disaster",
+    "wage", "wages", "salary", "salaried", "w-2", "w2",
+    "business loss", "excess business loss",
+}
+
+
+def _has_nol_term(q: str) -> bool:
+    return any(t in q for t in NOL_TERMS) or re.search(r"\bnol\b", q) is not None
+
+
+def _nol_base_signal_ok(q: str) -> bool:
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_nol_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'business
+    income with a stated NOL carryover deduction' question. Mirrors
+    detect_excess_business_loss_signal's shape."""
+    q = question.lower()
+    if not _nol_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_nol_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _nol_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_nol_ca_tax(conn, business_income: float, nol_carryover_amount: float,
+                        filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """business_income is treated as the taxpayer's ONLY income -- both
+    "net business income" and "modified AGI" for the suspension test (see
+    module note above on this simplification and its disclosed limits).
+
+    Suspended (business_income >= $1,000,000): the ENTIRE carryover is
+    disallowed this year -- nol_deduction=0, full nol_carryover_amount
+    preserved as remaining_carryover.
+
+    Not suspended: nol_deduction = min(nol_carryover_amount, MTI), where
+    MTI (Modified Taxable Income) is taxable income BEFORE the NOL
+    deduction (business income minus the standard deduction, floored at
+    0) -- no percentage cap, unlike federal law post-2017."""
+    if business_income is None or business_income <= 0:
+        return None
+    if nol_carryover_amount is None or nol_carryover_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    mti = max(0.0, business_income - dedu["amount"])
+    suspended = business_income >= NOL_THRESHOLD
+    nol_deduction = 0.0 if suspended else min(nol_carryover_amount, mti)
+    remaining_carryover = nol_carryover_amount - nol_deduction
+    taxable_income = max(0.0, mti - nol_deduction)
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "business_income": business_income, "nol_carryover_amount": nol_carryover_amount,
+            "suspended": suspended, "nol_deduction": nol_deduction,
+            "remaining_carryover": remaining_carryover, "mti": mti,
+            "standard_deduction": dedu["amount"]}
+
+
+# --- cannabis 280E business-expense decoupling (Ring 3 extension, R&TC
+# Section 17209) -- verified against R&TC 17209's statutory text
+# (leginfo.legislature.ca.gov) and the 2025 Schedule CA (540) instructions'
+# Line 3 cannabis paragraph. Structurally this is a SELF-EMPLOYMENT
+# computation with one extra CA-specific fact, not a new mechanism --
+# reuses compute_self_employment_ca_tax via its cannabis_280e_expenses
+# parameter (see that function's docstring for the math) rather than
+# building a parallel compute path, same "extend one function with an
+# optional fact" precedent as itemized deductions' 7 add-on parameters.
+#
+# THE RULE: IRC Section 280E disallows ANY deduction/credit for a trade or
+# business "trafficking" in a federally-controlled substance -- cannabis
+# remains federally controlled regardless of state legality, so a
+# cannabis business's FEDERAL Schedule C can only deduct cost of goods
+# sold, not ordinary business expenses (rent, wages, etc.), inflating
+# federal net profit relative to true economic profit. California does
+# NOT conform: R&TC 17209(a) turns 280E OFF entirely (not a partial
+# carve-out) "for each taxable year beginning on or after January 1,
+# 2020, and before January 1, 2030" -- FTB confirms licensees "may deduct
+# cost of goods sold and all ordinary and necessary business expenses,
+# such as rent and wages."
+#
+# THE LICENSING GATE MATTERS: R&TC 17209(b) restricts this to
+# "commercial cannabis activity" by a "licensee" as defined under
+# MAUCRSA/the Business and Professions Code (Division 10) -- i.e. state
+# DCC-licensed operations only. FTB is explicit that UNLICENSED cannabis
+# businesses get NO restoration ("may deduct cost of goods sold ... but
+# may not deduct other business expenses") -- federal 280E fully applies
+# for CA purposes too in that case, meaning the PLAIN self-employment path
+# (cannabis_280e_expenses omitted) is already the CORRECT answer for an
+# unlicensed operator, not a gap. Because getting this gate wrong would
+# either wrongly grant or wrongly deny a real deduction, this path
+# REQUIRES an explicit licensing statement in the question (not just
+# "cannabis business") before computing at all -- mirrors this codebase's
+# "never guess a material fact" discipline (missing filing status,
+# ambiguous bare "partnership", etc.).
+#
+# SCOPE (per this feature's own research/scoping pass): sole-proprietor /
+# single-member-LLC path ONLY (Schedule CA (540) Line 3, Column B) --
+# reuses SE_COMPLEXITY_EXCLUDE unchanged (same k-1/s-corp/partnership/llc
+# exclusions the self-employment path already enforces) since a K-1
+# RECIPIENT needs NO new computation here: the entity itself (Form
+# 565/568/100S) already does the 280E-decoupled computation before
+# issuing the K-1, so this codebase's existing "trust the K-1 figure
+# as-is" behavior (compute_k1_ca_tax) is already correct for licensed-
+# cannabis K-1s too, confirmed by the Schedule CA Line 5 instructions
+# containing zero cannabis-specific mentions (unlike Line 3).
+CANNABIS_LICENSE_TERMS = {
+    "licensed cannabis", "cannabis license", "maucrsa", "dcc-licensed",
+    "dcc license",
+}
+CANNABIS_280E_EXPENSE_TERMS = {
+    "280e", "disallowed expenses", "disallowed business expenses",
+    "cannabis expenses",
+}
+CANNABIS_280E_CITATION = "R&TC Section 17209; FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 3"
+CANNABIS_280E_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+
+def _cannabis_280e_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in CANNABIS_LICENSE_TERMS):
+        return False
+    # SE_COMPLEXITY_EXCLUDE minus CANNABIS_LICENSE_TERMS -- same "narrower
+    # exclude set, minus the trigger term" pattern as itemized/capital-loss
+    # (SE_COMPLEXITY_EXCLUDE now CONTAINS the cannabis-license terms, added
+    # for the collision guard on the plain self-employment path -- using it
+    # unmodified here would make this trigger exclude itself).
+    other_exclude = SE_COMPLEXITY_EXCLUDE - CANNABIS_LICENSE_TERMS
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_cannabis_280e_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'licensed
+    cannabis business net profit with a stated 280E-disallowed-expense
+    restoration' question. Mirrors detect_self_employment_signal's shape,
+    reusing the SAME complexity boundary (SE_COMPLEXITY_EXCLUDE) since
+    this is the sole-proprietor/SMLLC self-employment path with one extra
+    fact, not a differently-scoped path."""
+    q = question.lower()
+    if not _cannabis_280e_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_cannabis_280e_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _cannabis_280e_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
 
 
 def detect_filing_status(question: str):
