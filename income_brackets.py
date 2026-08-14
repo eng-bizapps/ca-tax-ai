@@ -236,6 +236,167 @@ def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
             "standard_deduction": dedu["amount"]}
 
 
+# --- K-1 pass-through income (business entities Phase B; trust/estate
+# Phase B added 2026-08-13, same session) --------------------------------
+# Verified against Schedule CA (540) Part I, Section B, Line 5 ("Rental
+# Real Estate, Royalties, Partnerships, S Corporations, Trusts, etc.") --
+# K-1 income (from a partnership/LLC/S-corp OR a trust/estate the taxpayer
+# is a partner/member/shareholder/beneficiary of) flows through the EXACT
+# SAME standard-deduction/bracket path already built for wages, since FTB
+# taxes pass-through income as ordinary income with no special rate. This
+# needed ZERO new tax math -- compute_ca_tax (already built) is reused
+# directly, the same "zero new math, just a new income source" finding as
+# nonresident tax Phase 3. Genuinely different from business entities
+# Phase A (entity_tax.py) / trust-estate Phase A (not yet built): this
+# computes what the INDIVIDUAL beneficiary/owner owes personally, not what
+# the entity/trust/estate itself owes -- see entity_tax.py's
+# K1_EXCLUDE_TERMS for the defense against a question mentioning both an
+# entity type and "K-1" being wrongly routed to the entity-level answer.
+#
+# TRUST/ESTATE K-1 (Form 541 Schedule K-1), verified separately: lands on
+# the SAME Schedule CA (540) Line 5 as business K-1 for ordinary/rental/
+# portfolio income boxes (confirmed via the K-1 (541) beneficiary
+# instructions, which explicitly route those boxes to "Schedule CA (540),
+# Part I, Section B, line 5"). One REAL difference from business K-1,
+# disclosed in the answer text: TAX-EXEMPT INTEREST shown on a trust/
+# estate K-1 must be EXCLUDED, not taxed -- the taxpayer is asked to state
+# the TAXABLE K-1 figure specifically. Capital-gain character technically
+# routes to a different form (Schedule D) rather than Line 5, but since
+# California taxes capital gains as ordinary income with no special rate,
+# lumping it into this same compute path doesn't change the actual CA tax
+# owed -- a safe, disclosed simplification, not a new complexity to build
+# around. DNI/tier allocation is resolved at the FIDUCIARY level before
+# the K-1 is even issued (the trust/estate's own problem, not the
+# beneficiary's), so it doesn't add a new pitfall beyond business K-1's
+# existing "trust the input" caveats. GRANTOR TRUSTS are a genuine
+# exception, NOT handled by this path at all: FTB's own optional
+# simplified reporting for grantor trusts means the income is taxed
+# DIRECTLY to the grantor on the grantor's own personal return, not via a
+# real K-1 -- see GRANTOR_TRUST_TERMS/detect_grantor_trust_mention, which
+# redirects rather than computing a number.
+#
+# NOT MODELED (disclosed, not silently ignored -- confirmed via FTB
+# Schedule K-1 (100S) instructions' own "most common adjustment items"
+# list): the taxpayer's STATED (federal) K-1 amount is used AS-IS for the
+# CA taxable-income base -- same "trust the input" precedent as every
+# itemized-deduction figure in this engine -- but California generally
+# does NOT equal the federal K-1 amount exactly. Real, FTB-disclosed
+# differences this module does not attempt: (1) the entity's own CA
+# annual/minimum tax ($800/1.5%/3.5%, federally deductible but NOT
+# deductible against the CA tax base, normally added back -- see
+# entity_tax.py for the entity-level amounts); (2) depreciation/basis
+# differences (California does not conform to federal bonus depreciation);
+# (3) narrower items like government bond interest. Basis limitations
+# (IRC Section 1366(d)), at-risk rules (IRC Section 465), and passive
+# activity loss limitations (IRC Section 469) are real, FTB-disclosed
+# complexities that can each independently reduce how much of the stated
+# K-1 amount is even currently deductible -- not attempted here, so the
+# computed tax is a reasonable estimate assuming none of these limitations
+# apply, not a guarantee. Also not modeled: California's ELECTIVE
+# Pass-Through Entity (PTE) tax credit (AB150/SB113) -- a separate
+# mechanism from the entity's mandatory annual tax that, if the entity
+# elected into it, generates a shareholder/partner-level credit this
+# module does not account for.
+#
+# SCOPE: K-1-ONLY income (the taxpayer's ONLY income is the stated K-1
+# amount) -- mirrors the self-employment-only path's scope discipline
+# exactly. Mixing K-1 with wage or self-employment income in one question
+# is real added complexity, deliberately deferred (K1_COMPLEXITY_EXCLUDE
+# below), same as the self-employment path originally deferred wage-mixing
+# until its own dedicated mixed-income path was built.
+K1_TRIGGERS = {
+    "k-1", "k1", "schedule k-1", "schedule k1", "received a k-1", "got a k-1",
+    "k-1 income", "pass-through income", "pass through income",
+}
+K1_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "rental", "renting", "rented", "dependent", "stock", "rsu",
+    "gambling", "gambled", "betting", "wagering",
+    "alimony", "pension", "self-employ", "self employ", "1099",
+    "schedule c", "schedule e", "w-2", "w2", "wage", "wages", "salary", "salaried",
+}
+
+# Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
+# trusts instead of a real K-1 -- income taxed directly to the grantor on
+# the grantor's OWN personal return (Form 540), not computed via this
+# pass-through path at all. Checked as its own distinct signal (not part
+# of K1_COMPLEXITY_EXCLUDE, which defers with a generic message) because
+# the correct response here is a SPECIFIC redirect, not a generic defer --
+# see detect_grantor_trust_mention.
+GRANTOR_TRUST_TERMS = {"grantor trust"}
+
+K1_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 5"
+K1_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+
+def detect_k1_signal(question: str):
+    """Returns a filing_status key iff this looks like a genuine K-1-only
+    income tax computation: a K-1 trigger term, a filing status, a compute
+    trigger phrase, and none of the K1_COMPLEXITY_EXCLUDE terms. Mirrors
+    detect_self_employment_signal's shape exactly."""
+    q = question.lower()
+    if not any(t in q for t in K1_TRIGGERS):
+        return None
+    if any(t in q for t in K1_COMPLEXITY_EXCLUDE):
+        return None
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_k1_missing_filing_status(question: str) -> bool:
+    """Mirrors detect_self_employment_missing_filing_status."""
+    q = question.lower()
+    if not any(t in q for t in K1_TRIGGERS):
+        return False
+    if any(t in q for t in K1_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_grantor_trust_mention(question: str) -> bool:
+    """True iff a K-1 question mentions a grantor trust specifically --
+    checked as its OWN signal (independent of K1_COMPLEXITY_EXCLUDE) since
+    the correct response is a specific redirect (this income is taxed
+    directly to the grantor, not via this K-1 path), not a generic defer.
+    Requires K-1 language too, so a grantor-trust mention with no K-1
+    context at all doesn't fire this (it wouldn't reach this function's
+    caller in that case anyway, but keeps the check self-contained)."""
+    q = question.lower()
+    return any(t in q for t in K1_TRIGGERS) and any(t in q for t in GRANTOR_TRUST_TERMS)
+
+
+def detect_trust_estate_k1(question: str) -> bool:
+    """True iff a K-1 question appears to originate from a trust or
+    estate (not a business entity) -- used only to decide whether to
+    append the tax-exempt-interest exclusion disclosure to the answer
+    text, not to gate whether the question is answered at all (both
+    business and trust/estate K-1s use the identical compute path)."""
+    q = question.lower()
+    return "trust" in q or "estate" in q
+
+
+def compute_k1_ca_tax(conn, k1_amount: float, filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """k1_amount is the taxpayer's STATED (federal) K-1 pass-through
+    income, used as-is for CA taxable income -- see the module note above
+    for the disclosed gap vs. the true CA-adjusted amount. Assumes this is
+    the taxpayer's ONLY income (K-1-only, see module note on scope)."""
+    if k1_amount is None or k1_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, k1_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "k1_amount": k1_amount, "taxable_income": taxable_income,
+            "standard_deduction": dedu["amount"], "citation": K1_CITATION,
+            "source_url": K1_SOURCE_URL}
+
+
 # --- mixed wages + self-employment (the first multi-amount compute path) -
 # The MVP self-employment path above deliberately assumed SE income was the
 # ONLY income source (via SE_COMPLEXITY_EXCLUDE's wage/W-2/salary terms).
@@ -341,6 +502,129 @@ ITEMIZED_DEDUCTION_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-i
 ITEMIZED_TERMS = {"itemized deduction", "itemized deductions", "itemize deductions",
                    "itemizing deductions"}
 
+# Optional third figure for the itemized path (Schedule CA Line 5a): the
+# state/local income tax (or SDI/general sales tax) portion already
+# included in the stated itemized total -- California disallows this
+# portion entirely, unlike federal. Purely additive/optional (see
+# compute_itemized_ca_tax's salt_amount param) -- if not cleanly extracted,
+# the itemized total is trusted as-is, same as before this existed.
+SALT_TERMS = {"state income tax", "state and local tax", "state and local taxes",
+              "state tax", "salt deduction", "state disability insurance", "sdi"}
+
+# Optional fourth figure (Schedule CA Line 8): mortgage interest disallowed
+# under FEDERAL limits that California still allows -- covers BOTH federal
+# sub-rules with one fact, since both restore via the identical mechanic
+# (add the disallowed amount back to the itemized total): (1) federal caps
+# the mortgage-interest acquisition-debt principal at $750k/$375k-MFS,
+# California still allows the pre-TCJA $1M/$500k-MFS cap; (2) federal
+# suspended the deduction entirely for up to $100k/$50k-MFS of home-equity-
+# indebtedness interest not used to buy/build/improve the home, California
+# doesn't conform. Deliberately asks for the DISALLOWED AMOUNT directly
+# (same "trust the input, don't derive it" precedent as itemized_amount/
+# net self-employment profit) rather than trying to derive it from loan
+# balance + origination date + proceeds-use facts, which would need a much
+# larger fact-gathering conversation than this assistant's single-question
+# model supports.
+MORTGAGE_INTEREST_ADDBACK_TERMS = {
+    "mortgage interest was limited", "mortgage interest limited",
+    "mortgage interest was disallowed", "disallowed mortgage interest",
+    "mortgage interest disallowed", "home equity interest disallowed",
+    "home equity interest was disallowed", "disallowed home equity interest",
+    "mortgage interest addback", "limited mortgage interest",
+    "mortgage interest cap", "interest was disallowed", "interest was limited",
+}
+
+# Optional fifth figure (Schedule CA Part II, Lines 19-22 "Job Expenses and
+# Certain Miscellaneous Deductions"): federal law suspended the pre-TCJA
+# "miscellaneous itemized deductions subject to the 2% floor" category
+# (unreimbursed employee expenses, tax-prep fees, certain other expenses)
+# entirely; California does not conform -- it still allows this category,
+# subject to the SAME 2%-of-AGI floor that applied federally before the
+# TCJA suspension (IRC Section 67(a), a stable, decades-old mechanic, not a
+# provision that has recently changed -- unlike most of this session's
+# other Schedule CA research, no primary-source ambiguity to resolve here).
+# Trusts the user's stated TOTAL of these misc. expenses (before the
+# floor) -- same "trust the input" precedent as every other itemized-path
+# figure -- and applies the floor itself: reinstated = max(0, misc_expenses
+# - 0.02*AGI).
+MISC_ITEMIZED_FLOOR_RATE = 0.02
+MISC_ITEMIZED_TERMS = {
+    "unreimbursed employee expense", "unreimbursed employee expenses",
+    "tax preparation fee", "tax preparation fees", "tax prep fee", "tax prep fees",
+    "miscellaneous itemized deduction", "miscellaneous itemized deductions",
+    "misc itemized deduction", "misc itemized deductions",
+    "job expenses", "job expense",
+}
+
+
+def compute_misc_itemized_reinstatement(misc_expenses: float, agi: float):
+    """Schedule CA (540) Part II Lines 19-22 -- reinstates the pre-TCJA
+    2%-of-AGI-floor miscellaneous itemized deduction category federal law
+    suspended. Returns the amount to ADD to the itemized total (0 if the
+    2% floor isn't cleared)."""
+    if misc_expenses is None or agi is None or misc_expenses < 0 or agi < 0:
+        return None
+    floor = agi * MISC_ITEMIZED_FLOOR_RATE
+    return max(0.0, misc_expenses - floor)
+
+
+# Optional sixth figure (Schedule CA Part II, Lines 11-12 "Gifts by Cash or
+# Check" / "Other than by Cash or Check"): verified against the primary
+# source directly -- "California limits the amount of your deduction to
+# 50% of your federal AGI" for QUALIFIED charitable contributions, for
+# BOTH cash and non-cash gifts (federal's own cap varies -- 60% for cash
+# post-TCJA, 50% for non-cash -- but CA's own limit is flatly 50% of AGI
+# regardless, so this doesn't need to untangle which federal cap applied).
+# SCOPE: only the general "qualified charitable contributions" cap --
+# deliberately excludes the separate, narrower charitable CONSERVATION
+# EASEMENT limit (CA 30% vs federal 50%, a genuinely different population/
+# rate) and the College Access Tax Credit / disallowed-institution carve-
+# outs, which stay in the ledger as their own not_applicable/narrow items.
+# Trusts the user's stated charitable contribution total (same "trust the
+# input" precedent as every other itemized-path figure) -- the CA-
+# disallowed excess is SUBTRACTED, same direction as salt_amount.
+CHARITABLE_AGI_CAP_RATE = 0.50
+CHARITABLE_TERMS = {
+    "charitable contribution", "charitable contributions", "charitable donation",
+    "charitable donations", "charity donation", "charity donations",
+    "donated to charity", "gave to charity",
+}
+
+
+def compute_charitable_cap(charitable_amount: float, agi: float):
+    """Schedule CA (540) Part II Lines 11-12 -- caps the qualified
+    charitable contribution deduction at 50% of federal AGI. Returns the
+    amount to SUBTRACT from the itemized total (0 if the cap isn't
+    exceeded)."""
+    if charitable_amount is None or agi is None or charitable_amount < 0 or agi < 0:
+        return None
+    cap = agi * CHARITABLE_AGI_CAP_RATE
+    return max(0.0, charitable_amount - cap)
+
+
+# Optional seventh figure (Schedule CA Part II Line 5e), Tier 2's 7th and
+# final item: federal law limits the SALT deduction to $40,000 ($20,000
+# MFS) for the AGGREGATE of state/local income tax AND property tax.
+# California does not conform. Verified against the primary source
+# directly -- the instruction literally says "enter an adjustment on line
+# 5e, column C for THE AMOUNT OVER THE FEDERAL LIMIT", i.e. a directly
+# statable fact, not something requiring a property-tax/income-tax
+# allocation. (Proved this algebraically before trusting it: net SALT
+# adjustment = -salt_amount (Line 5a, income tax only) + max(0, total SALT
+# paid - federal cap) (Line 5e) is IDENTICAL whether or not you separately
+# know the property-tax/income-tax split of the excess -- the form's own
+# framing and a from-scratch derivation starting from "CA should end up
+# deducting exactly your property tax paid" agree exactly.) Same "trust
+# the input" precedent as mortgage_interest_addback -- ADDED to the
+# itemized total, same direction as mortgage_interest_addback and
+# misc_itemized reinstatement.
+SALT_CAP_ADDBACK_TERMS = {
+    "salt was limited", "salt cap", "salt deduction was limited",
+    "salt deduction was capped", "property tax was disallowed",
+    "salt was capped", "salt deduction cap", "state and local tax was limited",
+    "state and local tax cap", "over the federal salt limit",
+}
+
 
 def _itemized_base_signal_ok(q: str) -> bool:
     if not any(t in q for t in ITEMIZED_TERMS):
@@ -386,29 +670,123 @@ def detect_itemized_mfs_unsupported(question: str) -> bool:
     return detect_filing_status(question) == "mfs"
 
 
+def compute_itemized_deduction_phaseout(itemized_amount: float, agi: float, filing_status: str):
+    """Schedule CA (540), Part II, Line 29 "Itemized Deductions Worksheet" --
+    verified against FTB's 2025 instructions (the exact 10-step worksheet,
+    not a secondhand summary): once AGI exceeds the filing-status threshold,
+    itemized deductions are reduced by the SMALLER of (a) 80% of the
+    "reducible" itemized total, or (b) 6% of the AGI over the threshold.
+
+    SIMPLIFICATION, disclosed to the caller (not hidden): the worksheet's
+    "reducible" amount excludes medical expenses (Sched A line 4),
+    investment interest (line 9), casualty/theft losses (line 15), and
+    gambling losses -- this treats the ENTIRE itemized total as reducible,
+    which is exactly correct for the common case (a taxpayer whose itemized
+    deductions are just SALT + mortgage interest + charitable, none of
+    which are on the excluded list) and only an approximation for someone
+    who ALSO has one of those less-common deduction types mixed in. This
+    can only ever OVERSTATE the reduction relative to the true worksheet
+    (since the true 80%-of-reducible term can only be smaller when items
+    are excluded, and min() of a same-or-larger first term against an
+    unchanged second term is never smaller) -- i.e. it can only make the
+    computed tax a slight OVERestimate, never an underestimate.
+
+    Returns None if AGI is at/below the threshold (no reduction applies --
+    caller should just use itemized_amount as-is)."""
+    threshold = ITEMIZED_AGI_LIMIT_THRESHOLD.get(filing_status)
+    if threshold is None or agi <= threshold or itemized_amount <= 0:
+        return None
+    reducible_cap = itemized_amount * 0.80
+    excess_agi_cap = (agi - threshold) * 0.06
+    reduction = min(reducible_cap, excess_agi_cap)
+    return {
+        "reduction": reduction,
+        "reduced_itemized": max(0.0, itemized_amount - reduction),
+        "threshold": threshold,
+    }
+
+
 def compute_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
-                              filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+                              filing_status: str, tax_year: int = DEFAULT_TAX_YEAR,
+                              salt_amount: float = None, mortgage_interest_addback: float = None,
+                              misc_itemized_expenses: float = None, charitable_amount: float = None,
+                              salt_cap_addback: float = None):
     """income_amount is treated as both gross wage income and California AGI
     (no other adjustments -- same simple-case assumption as the plain
-    wage-earner compute path). Returns None if AGI is at/above the CA
-    itemized-deduction limitation threshold for this filing status (see
-    module note above) -- caller must defer, not silently skip the
-    reduction worksheet."""
+    wage-earner compute path). Applies the Line 29 phase-out worksheet when
+    AGI exceeds the filing-status threshold (see
+    compute_itemized_deduction_phaseout) instead of silently deferring.
+    `salt_amount`, if given, is the state/local income tax (or SDI/general
+    sales tax) portion already included in itemized_amount -- California
+    disallows that portion entirely (Schedule CA Line 5a), so it's
+    subtracted out BEFORE the phase-out worksheet runs, same order as the
+    real form (Part II adjustments happen before Line 29). `mortgage_
+    interest_addback`, if given, is mortgage interest disallowed under
+    FEDERAL limits (acquisition-debt cap or home-equity-indebtedness
+    suspension) that California still allows -- see
+    MORTGAGE_INTEREST_ADDBACK_TERMS's docstring -- added BACK to the
+    itemized total, the opposite direction from salt_amount.
+    `misc_itemized_expenses`, if given, is the taxpayer's stated TOTAL
+    unreimbursed-employee/tax-prep/other misc. expenses BEFORE the 2%-of-
+    AGI floor (Schedule CA Lines 19-22) -- see
+    compute_misc_itemized_reinstatement -- the floored amount is added to
+    the itemized total, same direction as mortgage_interest_addback.
+    `charitable_amount`, if given, is the taxpayer's stated qualified
+    charitable contribution total already included in itemized_amount --
+    see compute_charitable_cap -- the CA-disallowed excess over 50% of AGI
+    is subtracted, same direction as salt_amount. `salt_cap_addback`, if
+    given, is the amount the taxpayer's federal SALT deduction was reduced
+    by the $40,000/$20,000-MFS federal cap (Schedule CA Line 5e) -- see
+    SALT_CAP_ADDBACK_TERMS's docstring for why this is trusted directly
+    rather than derived from a property-tax/income-tax split -- added
+    BACK to the itemized total, same direction as mortgage_interest_
+    addback. If none of these are given, itemized_amount is trusted as
+    already CA-conforming, same as before these parameters existed."""
     if income_amount is None or itemized_amount is None or income_amount < 0 or itemized_amount < 0:
         return None
-    threshold = ITEMIZED_AGI_LIMIT_THRESHOLD.get(filing_status)
-    if threshold is None or income_amount >= threshold:
-        return None
+    if salt_amount is not None:
+        if salt_amount < 0 or salt_amount > itemized_amount:
+            return None
+        itemized_amount = itemized_amount - salt_amount
+    if mortgage_interest_addback is not None:
+        if mortgage_interest_addback < 0:
+            return None
+        itemized_amount = itemized_amount + mortgage_interest_addback
+    misc_reinstated = None
+    if misc_itemized_expenses is not None:
+        if misc_itemized_expenses < 0:
+            return None
+        misc_reinstated = compute_misc_itemized_reinstatement(misc_itemized_expenses, income_amount)
+        itemized_amount = itemized_amount + misc_reinstated
+    charitable_disallowed = None
+    if charitable_amount is not None:
+        if charitable_amount < 0:
+            return None
+        charitable_disallowed = compute_charitable_cap(charitable_amount, income_amount)
+        if charitable_disallowed > itemized_amount:
+            return None
+        itemized_amount = itemized_amount - charitable_disallowed
+    if salt_cap_addback is not None:
+        if salt_cap_addback < 0:
+            return None
+        itemized_amount = itemized_amount + salt_cap_addback
     dedu = standard_deduction(conn, filing_status, tax_year)
     if not dedu:
         return None
-    used_itemized = itemized_amount > dedu["amount"]
-    deduction_used = itemized_amount if used_itemized else dedu["amount"]
+    phaseout = compute_itemized_deduction_phaseout(itemized_amount, income_amount, filing_status)
+    ca_itemized_amount = phaseout["reduced_itemized"] if phaseout else itemized_amount
+    used_itemized = ca_itemized_amount > dedu["amount"]
+    deduction_used = ca_itemized_amount if used_itemized else dedu["amount"]
     taxable_income = max(0.0, income_amount - deduction_used)
     calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
     if not calc:
         return None
     return {**calc, "income_amount": income_amount, "itemized_amount": itemized_amount,
+            "salt_amount": salt_amount, "mortgage_interest_addback": mortgage_interest_addback,
+            "misc_itemized_expenses": misc_itemized_expenses, "misc_reinstated": misc_reinstated,
+            "charitable_amount": charitable_amount, "charitable_disallowed": charitable_disallowed,
+            "salt_cap_addback": salt_cap_addback,
+            "phaseout": phaseout, "ca_itemized_amount": ca_itemized_amount,
             "standard_deduction": dedu["amount"], "used_itemized": used_itemized,
             "deduction_used": deduction_used}
 
@@ -501,11 +879,22 @@ def detect_filing_status(question: str):
     typing just "filing MFS" with no other wording. Found via adversarial
     testing: that phrasing fell through to a generic defer despite stating
     a filing status. Hyphenated "head-of-household" is also recognized
-    alongside the spaced form, same reasoning."""
+    alongside the spaced form, same reasoning.
+
+    Uses a \\bmarried\\b WORD-BOUNDARY check, not a plain substring test --
+    found via testing the Joint Custody HOH credit (which combines
+    "unmarried" with "joint custody" in one sentence): a plain "married"
+    in q substring check ALSO matches inside "unmarried" (un+MARRIED), so
+    that combination was wrongly detected as MFJ filing status. This is
+    the SAME bug class as several other fixes this session (a literal
+    substring match firing inside a negated/prefixed word), this time in
+    the single most shared function in the income domain -- every compute
+    path calls this, so the fix benefits all of them, not just the one
+    question shape that exposed it."""
     q = question.lower()
-    if re.search(r"\bmfj\b", q) or ("married" in q and "joint" in q):
+    if re.search(r"\bmfj\b", q) or (re.search(r"\bmarried\b", q) and "joint" in q):
         return "mfj"
-    if re.search(r"\bmfs\b", q) or ("married" in q and "separat" in q):
+    if re.search(r"\bmfs\b", q) or (re.search(r"\bmarried\b", q) and "separat" in q):
         return "mfs"
     if "head of household" in q or "head-of-household" in q or re.search(r"\bhoh\b", q):
         return "hoh"

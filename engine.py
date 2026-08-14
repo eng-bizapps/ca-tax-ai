@@ -15,9 +15,14 @@ import cannabis_local
 import config
 import db
 import fees as fee_layer
+import entity_tax
+import fiduciary_tax
 import income_brackets
 import income_credits
+import income_eligibility
+import income_nonresident
 import income_db
+import district_rates
 import local_rates
 
 genai.configure(api_key=config.require("GEMINI_API_KEY", config.GEMINI_API_KEY))
@@ -460,6 +465,24 @@ def _branch_info(conn, key: str):
             "condition": cond or summ or "", "measure_fraction": float(mfrac)}
 
 
+def _income_branch_info(conn, key: str):
+    """Label + condition detail for presenting an income topic as a branch --
+    mirrors _branch_info, minus rate/measure_fraction (income topics aren't
+    priced items; they're a taxable/not-taxable determination on an income
+    TYPE, computed by _income_compute_answer separately, not here)."""
+    r = conn.execute(
+        "SELECT topic_label, taxable, citation, condition, summary "
+        "FROM income_tax_topics WHERE topic_key=%s ORDER BY tax_year DESC LIMIT 1",
+        (key,)).fetchone()
+    if not r:
+        return None
+    label, taxable, citation, cond, summ = r
+    if taxable is None:
+        return None   # not a taxable/exempt topic -- not comparable as a branch
+    return {"key": key, "label": label, "taxable": bool(taxable),
+            "citation": citation, "condition": cond or summ or ""}
+
+
 GENERIC_TOKEN_DF = 0.08          # a word appearing in more than this fraction of
                                  # the rule catalog is too common to count as
                                  # meaningful relevance on its own (e.g. "food"
@@ -467,6 +490,42 @@ GENERIC_TOKEN_DF = 0.08          # a word appearing in more than this fraction o
                                  # sit at <1%) -- computed FROM THE CORPUS, not a
                                  # hand-authored word list, so it stays correct
                                  # as rules are added or reworded
+GENERIC_TOKEN_MIN_DOCS = 3       # a word must appear in MORE than this many
+                                 # documents before the FRACTION alone can flag
+                                 # it generic -- protects small corpora (found by
+                                 # collision_audit.py against income's 13-topic
+                                 # catalog: 8% of 13 is ~1 document, so almost any
+                                 # word shared by 2 related topics -- exactly the
+                                 # case this check exists to catch -- got wrongly
+                                 # excluded as "too common", silently defeating
+                                 # branch disclosure for gambling_winnings vs
+                                 # california_lottery_winnings). At sales-tax
+                                 # scale (520+ rules) this floor never binds --
+                                 # 8% of the corpus is already far above 3.
+SMALL_CORPUS_DOCS = 100          # below this many documents, DF-based
+                                 # specificity is statistically underpowered --
+                                 # with too few samples, an ordinary English
+                                 # connective (found live: "including", shared
+                                 # by two UNRELATED income topics purely because
+                                 # both texts happen to use the word, triggered
+                                 # a false "branch" between them) can just as
+                                 # easily sit at a low document count as a
+                                 # genuine content word. Below this size, layer
+                                 # in a small universal-English stopword list as
+                                 # a second filter -- checked to be a NO-OP at
+                                 # sales-tax scale (789 docs): every word below
+                                 # was verified to already sit at or above the
+                                 # DF-generic cutoff there, so this never
+                                 # changes sales-domain matching, only small
+                                 # (currently: income) corpora.
+_SMALL_CORPUS_EXTRA_STOP = frozenset((
+    "including excluding through these even though another only out all any "
+    "since whether however rather than same both their they why here there "
+    "can have has were also during via one under because before after every "
+    "still despite being please makes make back unlike inside later simply "
+    "follows related general matches topic run add issued direct window "
+    "notes verify answer case itself"
+).split())
 _TOKEN_DF_CACHE = {}   # keyed by table name -- see _token_doc_freq
 
 
@@ -496,11 +555,16 @@ def _token_doc_freq(conn, table: str = "rule_embeddings"):
 
 def _specific_toks(conn, tokens, table: str = "rule_embeddings"):
     """Subset of `tokens` that are NOT too common across the rule catalog to
-    carry discriminating signal (see GENERIC_TOKEN_DF)."""
+    carry discriminating signal (see GENERIC_TOKEN_DF / GENERIC_TOKEN_MIN_DOCS /
+    SMALL_CORPUS_DOCS)."""
     df, n = _token_doc_freq(conn, table)
     if not n:
         return tokens
-    return {t for t in tokens if df.get(t, 0) / n <= GENERIC_TOKEN_DF}
+    cutoff = max(GENERIC_TOKEN_DF * n, GENERIC_TOKEN_MIN_DOCS)
+    specific = {t for t in tokens if df.get(t, 0) <= cutoff}
+    if n < SMALL_CORPUS_DOCS:
+        specific -= _SMALL_CORPUS_EXTRA_STOP
+    return specific
 
 
 def _route_confidence(question: str, rows) -> bool:
@@ -511,12 +575,17 @@ def _route_confidence(question: str, rows) -> bool:
     return len(_toks(question) & _toks(rows[0][1])) > 1
 
 
-def _find_branches(conn, question, rows, primary_key, primary_taxable, margin=BRANCH_MARGIN):
+def _find_branches(conn, question, rows, primary_key, primary_taxable, margin=BRANCH_MARGIN,
+                    table="rule_embeddings", branch_info=None):
     """Opposite-verdict rules close enough to the best match to be plausible
     alternate readings of the question. rows = routing candidates
     [(key, text, dist), ...]. `margin` widens when the router itself was
     uncertain (see _route_confidence) -- an uncertain pick should disclose
     plausible opposite-verdict alternatives more readily than a confident one.
+    `table`/`branch_info` let this be reused for the income domain (its own
+    embedding table + its own _income_branch_info lookup) without comparing
+    against the sales corpus's word-frequency distribution -- see
+    _token_doc_freq's per-table cache.
 
     A branch must be a genuine alternate reading of the SAME aspect of the
     question the primary rule matched on, not just any coincidental word
@@ -533,9 +602,10 @@ def _find_branches(conn, question, rows, primary_key, primary_taxable, margin=BR
          the unrelated word "children" is not a real alternate reading of
          the same purchase).
     Returns up to MAX_BRANCHES branch dicts."""
+    branch_info = branch_info or _branch_info
     best_dist = float(rows[0][2])
     qt = _toks(question)
-    qt_specific = _specific_toks(conn, qt)
+    qt_specific = _specific_toks(conn, qt, table=table)
     primary_text = next((t for k, t, d in rows if k == primary_key), "")
     primary_ov = qt_specific & _toks(primary_text)
     branches = []
@@ -545,7 +615,7 @@ def _find_branches(conn, question, rows, primary_key, primary_taxable, margin=BR
         cand_ov = qt_specific & _toks(text)
         if not cand_ov or (primary_ov and not (cand_ov & primary_ov)):
             continue
-        info = _branch_info(conn, k)
+        info = branch_info(conn, k)
         if info and info["taxable"] != primary_taxable:
             branches.append(info)
         if len(branches) >= MAX_BRANCHES:
@@ -885,26 +955,61 @@ def _income_mixed_wage_se_missing_filing_status_answer(question: str, base: dict
     return result
 
 
+def _tagged_amount(question: str, terms, claimed: set):
+    """_amount_near, skipped if it collides with a figure another anchor
+    phrase already claimed in this same question (same number matched two
+    different tags -- ambiguous, so don't double-count it)."""
+    amt = _amount_near(question, terms)
+    return None if amt in claimed else amt
+
+
 def _income_itemized_answer(conn, question: str, base: dict):
-    """Wage income + a stated CA itemized-deduction total -- see
+    """Wage income + a stated itemized-deduction total -- see
     income_brackets.compute_itemized_ca_tax's docstring for the Line 29/30
-    conformity basis (greater-of comparison, AGI-limitation threshold, MFS
-    exclusion). Uses _amount_near (not _amount) to pull the itemized-tagged
-    figure out separately from the income figure, same distance-based
-    approach as the mixed wage+SE path; if more than one non-itemized
-    amount remains, the question is ambiguous and this defers rather than
-    guessing which one is income."""
+    conformity basis (greater-of comparison, AGI-limitation PHASE-OUT
+    worksheet, MFS exclusion). Uses _amount_near (not _amount) to pull the
+    itemized-tagged figure (and, optionally, SALT/mortgage-addback/misc-
+    itemized/charitable/SALT-cap-addback-tagged figures -- see
+    _tagged_amount) out separately from the income figure, same distance-
+    based approach as the mixed wage+SE path; if more than one
+    unaccounted-for amount remains, the question is ambiguous and this
+    defers rather than guessing which one is income. All 5 optional
+    figures are additive -- see income_brackets.SALT_TERMS /
+    MORTGAGE_INTEREST_ADDBACK_TERMS / MISC_ITEMIZED_TERMS /
+    CHARITABLE_TERMS / SALT_CAP_ADDBACK_TERMS. Each of the (up to) 7
+    figures has its OWN distinct, non-overlapping anchor phrase, unlike
+    FYTC's shared-anchor collision earlier this session, so the same
+    exclude-based extraction scales safely."""
     fs = income_brackets.detect_itemized_signal(question)
     if not fs:
         return None
     itemized_amount = _amount_near(question, income_brackets.ITEMIZED_TERMS)
     if itemized_amount is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != itemized_amount]
+    claimed = {itemized_amount}
+    salt_amount = _tagged_amount(question, income_brackets.SALT_TERMS, claimed)
+    if salt_amount is not None:
+        claimed.add(salt_amount)
+    mortgage_addback = _tagged_amount(question, income_brackets.MORTGAGE_INTEREST_ADDBACK_TERMS, claimed)
+    if mortgage_addback is not None:
+        claimed.add(mortgage_addback)
+    misc_expenses = _tagged_amount(question, income_brackets.MISC_ITEMIZED_TERMS, claimed)
+    if misc_expenses is not None:
+        claimed.add(misc_expenses)
+    charitable_amount = _tagged_amount(question, income_brackets.CHARITABLE_TERMS, claimed)
+    if charitable_amount is not None:
+        claimed.add(charitable_amount)
+    salt_cap_addback = _tagged_amount(question, income_brackets.SALT_CAP_ADDBACK_TERMS, claimed)
+    if salt_cap_addback is not None:
+        claimed.add(salt_cap_addback)
+    others = [a for a, _, _ in _amounts(question) if a not in claimed]
     if len(others) != 1:
         return None
     income_amount = others[0]
-    calc = income_brackets.compute_itemized_ca_tax(conn, income_amount, itemized_amount, fs)
+    calc = income_brackets.compute_itemized_ca_tax(
+        conn, income_amount, itemized_amount, fs, salt_amount=salt_amount,
+        mortgage_interest_addback=mortgage_addback, misc_itemized_expenses=misc_expenses,
+        charitable_amount=charitable_amount, salt_cap_addback=salt_cap_addback)
     if not calc:
         return None
     label = income_brackets.FILING_STATUS_LABELS[fs]
@@ -917,25 +1022,82 @@ def _income_itemized_answer(conn, question: str, base: dict):
     if calc["surtax"]:
         surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
                        f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    salt_note = ""
+    if salt_amount is not None:
+        salt_note = (f" California does not allow a deduction for state/local income tax, SDI, "
+                     f"or general sales tax, so your stated ${salt_amount:,.2f} was subtracted "
+                     f"from your itemized total, leaving ${calc['ca_itemized_amount']:,.2f} "
+                     f"before the standard-vs-itemized comparison (Schedule CA (540) Line 5a).")
+    mortgage_note = ""
+    if mortgage_addback is not None:
+        mortgage_note = (
+            f" California allows mortgage interest deductions federal law disallowed -- "
+            f"either because your acquisition debt is between the federal $750,000/$375,000-MFS "
+            f"cap and California's higher $1,000,000/$500,000-MFS cap, or because it's home "
+            f"equity indebtedness interest federal law suspended -- so your stated "
+            f"${mortgage_addback:,.2f} in disallowed interest was added BACK to your itemized "
+            f"total (Schedule CA (540) Line 8).")
+    misc_note = ""
+    if misc_expenses is not None:
+        floor = income_amount * income_brackets.MISC_ITEMIZED_FLOOR_RATE
+        misc_note = (
+            f" California reinstates the miscellaneous itemized deduction category "
+            f"(unreimbursed employee expenses, tax preparation fees, and similar) that federal "
+            f"law suspended, subject to the same 2%-of-AGI floor that applied before the federal "
+            f"suspension: of your stated ${misc_expenses:,.2f}, ${floor:,.2f} (2% of your AGI) "
+            f"is not deductible, leaving ${calc['misc_reinstated']:,.2f} added to your itemized "
+            f"total (Schedule CA (540) Lines 19-22).")
+    charitable_note = ""
+    if charitable_amount is not None:
+        cap = income_amount * income_brackets.CHARITABLE_AGI_CAP_RATE
+        if calc["charitable_disallowed"] > 0:
+            charitable_note = (
+                f" California caps the charitable contribution deduction at 50% of AGI "
+                f"(${cap:,.2f} here), lower than federal's own limit -- of your stated "
+                f"${charitable_amount:,.2f} in charitable contributions, "
+                f"${calc['charitable_disallowed']:,.2f} exceeds California's cap and was "
+                f"subtracted from your itemized total (Schedule CA (540) Lines 11-12).")
+        else:
+            charitable_note = (
+                f" Your stated ${charitable_amount:,.2f} in charitable contributions is under "
+                f"California's 50%-of-AGI cap (${cap:,.2f} here), so no adjustment was needed.")
+    salt_cap_note = ""
+    if salt_cap_addback is not None:
+        salt_cap_note = (
+            f" The federal deduction for state and local tax (income tax plus property tax "
+            f"combined) is capped at $40,000 ($20,000 if married filing separately); California "
+            f"does not conform to that cap, so your stated ${salt_cap_addback:,.2f} that was cut "
+            f"off by the federal limit was added BACK to your itemized total (Schedule CA (540) "
+            f"Line 5e).")
+    phaseout_note = ""
+    if calc["phaseout"]:
+        phaseout_note = (
+            f" Because your income exceeds California's itemized-deduction limitation "
+            f"threshold (${calc['phaseout']['threshold']:,.0f} for your filing status), your "
+            f"itemized deductions were reduced by ${calc['phaseout']['reduction']:,.2f} under "
+            f"the Schedule CA (540) Line 29 worksheet (the smaller of 80% of your itemized "
+            f"total or 6% of income over the threshold), leaving "
+            f"${calc['ca_itemized_amount']:,.2f}. This assumes your full itemized total is "
+            f"subject to the reduction -- medical expenses, investment interest, casualty "
+            f"losses, and gambling losses are excluded from the reduction and would make your "
+            f"actual reduction slightly smaller (a lower tax) if you have any of those.")
     if calc["used_itemized"]:
-        dedu_note = (f"your stated itemized deductions (${itemized_amount:,.2f}), which are "
-                     f"larger than the {income_brackets.DEFAULT_TAX_YEAR} standard deduction "
+        dedu_note = (f"your itemized deductions (${calc['ca_itemized_amount']:,.2f} after any "
+                     f"California adjustments), which are larger than the "
+                     f"{income_brackets.DEFAULT_TAX_YEAR} standard deduction "
                      f"(${calc['standard_deduction']:,.0f})")
     else:
         dedu_note = (f"the standard deduction (${calc['standard_deduction']:,.0f}), since your "
-                     f"stated itemized deductions (${itemized_amount:,.2f}) are smaller and "
-                     "California uses whichever is larger")
+                     f"itemized deductions (${calc['ca_itemized_amount']:,.2f} after any "
+                     "California adjustments) are smaller and California uses whichever is larger")
     result["answer_text"] = (
         f"Assuming ${income_amount:,.2f} in gross wage income (also your California AGI, "
         f"with no other adjustments), filing status {label}, and {dedu_note}: your California "
         f"taxable income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket "
         f"is {calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
         f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
-        f"{surtax_note} This assumes your stated itemized-deduction total already reflects "
-        "California's rules (for example, state and local income taxes are not deductible on "
-        "your California return, unlike the federal return) and that your income is below the "
-        "level where California begins reducing itemized deductions for high earners -- your "
-        "actual liability may differ."
+        f"{surtax_note}{salt_note}{mortgage_note}{misc_note}{charitable_note}{salt_cap_note}{phaseout_note} This assumes your stated itemized-deduction "
+        "total otherwise already reflects California's rules -- your actual liability may differ."
     )
     return result
 
@@ -1171,6 +1333,348 @@ def _income_ycta_answer(conn, question: str, amount, base: dict):
     return result
 
 
+def _fytc_income_amount(question: str):
+    """FYTC questions naturally state TWO or THREE numbers close together
+    (age, foster-care age, income -- "I am 20... foster care at age 15...
+    made $50,000"). Found via testing: _amount_near's nearest-keyword-
+    DISTANCE approach picked the WRONG number here -- it measures from a
+    keyword's START position, which systematically under-counts the
+    distance to whichever number comes right after the keyword's own
+    length, and with three numbers clustered this close together that
+    bias was enough to flip the winner (a stated age of 15 beat the
+    actual $50,000 income figure for the keyword "made"). FIX: the same
+    "exclude the known OTHER numbers, trust what's left" pattern already
+    used for itemized deductions/capital losses -- explicitly exclude the
+    stated age and the foster-care-age number (both independently
+    detected elsewhere for eligibility), then require EXACTLY ONE
+    remaining amount. More numbers than that -> ambiguous, defer."""
+    known = set()
+    age = income_credits.fytc_stated_age(question)
+    if age is not None:
+        known.add(float(age))
+    fc_age = income_credits.fytc_foster_care_age_number(question)
+    if fc_age is not None:
+        known.add(float(fc_age))
+    others = [a for a, _, _ in _amounts(question) if a not in known]
+    return others[0] if len(others) == 1 else None
+
+
+def _income_fytc_answer(conn, question: str, base: dict):
+    """Foster Youth Tax Credit -- see income_credits.compute_fytc's
+    docstring for the two-gate design (CalEITC-eligibility verified via
+    the real table lookup, THEN the FYTC-specific phase-out arithmetic).
+    Needs a children count too (not because FYTC's amount depends on it,
+    but because verifying the CalEITC gate does)."""
+    children = income_credits.detect_fytc_signal(question)
+    if children is None:
+        return None
+    amount = _fytc_income_amount(question)
+    if amount is None:
+        return None
+    hit = income_credits.compute_fytc(conn, amount, children)
+    if not hit:
+        return None
+    if not hit["eligible_for_caleitc"]:
+        result = {**base, "status": "answered", "category": "foster_youth_tax_credit",
+                  "amount": amount, "tax": 0.0}
+        result["answer_text"] = (
+            f"Based on ${amount:,.2f} in California earned income and the children you "
+            "stated, you would not qualify for CalEITC -- and the Foster Youth Tax Credit "
+            "requires being allowed the CalEITC first, so you would not qualify for FYTC "
+            "either (2025 FTB 3514 Booklet, Step 10)."
+        )
+        return result
+    child_label = "no qualifying children" if children == 0 else (
+        "1 qualifying child" if children == 1 else f"{children} qualifying children"
+        + (" (3 or more)" if children == 3 else ""))
+    result = {**base, "status": "answered", "category": "foster_youth_tax_credit",
+              "amount": amount, "tax": hit["credit"], "citation": hit["citation"],
+              "source_url": hit["source_url"]}
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in California earned income with {child_label}, that you "
+        "were 18 to 25 at year end, and that you were in foster care at age 13 or older and "
+        "placed through the California foster care system, your estimated Foster Youth Tax "
+        f"Credit (FYTC) is ${hit['credit']:,.2f} ({hit['citation']}). This is an estimate "
+        "only -- your actual credit depends on filing a complete return and your foster "
+        "youth status being verified by the California Department of Social Services."
+    )
+    return result
+
+
+def _income_fytc_age_disqualified_answer(question: str, base: dict):
+    """A clean, definitive 'no' when foster-care-at-13+ already checks out
+    but the stated age is explicitly outside 18-25 -- not a generic defer,
+    same distinction income_eligibility draws for HOH's age test."""
+    if not income_credits.detect_fytc_age_disqualified(question):
+        return None
+    amount = _fytc_income_amount(question)
+    if amount is None:
+        return None
+    result = {**base, "status": "answered", "category": "foster_youth_tax_credit",
+              "amount": amount, "tax": 0.0}
+    result["answer_text"] = (
+        "Based on what you stated, you do not qualify for the Foster Youth Tax Credit -- "
+        "FYTC requires being 18 to 25 years old at the end of the tax year (2025 FTB 3514 "
+        "Booklet, Step 10)."
+    )
+    return result
+
+
+def _income_fytc_checklist_incomplete_answer(question: str, base: dict):
+    """Specific checklist instead of a generic defer -- same pattern as
+    every other missing-fact clarifying message in this project."""
+    if not income_credits.detect_fytc_checklist_incomplete(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Foster Youth Tax Credit (FYTC), I need ALL of the following "
+        "stated in one question: (1) your California earned income and number of "
+        "qualifying children (so I can verify you're allowed the CalEITC first -- FYTC "
+        "requires it), (2) your age (must be 18 to 25 at year end), and (3) that you were "
+        "in foster care at age 13 or older, placed through the California foster care "
+        "system. Example: \"what is my FYTC if I am 20, was in foster care at age 15, and "
+        "made $9,975 with no children?\""
+    )
+    return result
+
+
+def _senior_hoh_income_amount(question: str):
+    """Excludes the stated age before isolating the income figure --
+    same 'exclude known non-target numbers' pattern as FYTC/itemized/
+    capital-loss, applied preemptively here rather than rediscovered
+    through testing (a two-number question -- age + income -- is exactly
+    the shape that pattern already handles cleanly)."""
+    known = set()
+    age = income_credits.senior_hoh_stated_age(question)
+    if age is not None:
+        known.add(float(age))
+    others = [a for a, _, _ in _amounts(question) if a not in known]
+    return others[0] if len(others) == 1 else None
+
+
+def _income_senior_hoh_answer(question: str, base: dict):
+    """Senior Head of Household Credit -- see
+    income_credits.compute_senior_hoh_credit's docstring for the formula,
+    the separate-eligibility-ceiling wrinkle, and why AGI (not taxable
+    income) is the figure this trusts directly -- the 540 instructions
+    state the $98,652 ceiling is AGI-based specifically, and deriving
+    taxable income from AGI would need a current filing status that's
+    genuinely ambiguous for someone whose qualifying person just died."""
+    if not income_credits.detect_senior_hoh_signal(question):
+        return None
+    agi = _senior_hoh_income_amount(question)
+    if agi is None:
+        return None
+    hit = income_credits.compute_senior_hoh_credit(agi)
+    if not hit:
+        return None
+    result = {**base, "status": "answered", "category": "senior_hoh_credit",
+              "amount": agi, "tax": hit["credit"], "citation": hit["citation"],
+              "source_url": hit["source_url"]}
+    if not hit["eligible_income"]:
+        result["answer_text"] = (
+            f"Based on ${agi:,.2f} in California AGI -- at or above the "
+            f"${income_credits.SENIOR_HOH_INCOME_CEILING:,.0f} ceiling -- you do not qualify "
+            f"for the Senior Head of Household Credit ({hit['citation']})."
+        )
+    else:
+        result["answer_text"] = (
+            f"Assuming ${agi:,.2f} in California AGI, and that you were 65 or older at year "
+            "end, qualified as Head of Household for at least 1 of the past 2 years, and "
+            "your qualifying person died within the past 2 years, your estimated Senior "
+            f"Head of Household Credit is ${hit['credit']:,.2f} (2% of taxable income, "
+            f"capped at ${income_credits.SENIOR_HOH_MAX_CREDIT:,.0f}) ({hit['citation']}). "
+            "This uses your AGI as an approximation for taxable income, which can only "
+            "OVERSTATE the credit slightly (never understate it) -- your actual credit "
+            "depends on filing a complete return."
+        )
+    return result
+
+
+def _income_senior_hoh_age_disqualified_answer(question: str, base: dict):
+    """Clean 'no' when the other facts check out but age is explicitly
+    under 65 -- not a generic defer."""
+    if not income_credits.detect_senior_hoh_age_disqualified(question):
+        return None
+    result = {**base, "status": "answered", "category": "senior_hoh_credit", "tax": 0.0}
+    result["answer_text"] = (
+        "Based on what you stated, you do not qualify for the Senior Head of Household "
+        f"Credit -- it requires being 65 or older at year end ({income_credits.SENIOR_HOH_CITATION})."
+    )
+    return result
+
+
+def _income_senior_hoh_checklist_incomplete_answer(question: str, base: dict):
+    if not income_credits.detect_senior_hoh_checklist_incomplete(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Senior Head of Household Credit, I need ALL of the following "
+        "stated in one question: (1) that you were 65 or older at year end, (2) that you "
+        "qualified as Head of Household for at least 1 of the past 2 years, (3) that your "
+        "qualifying person died within the past 2 years, and (4) your California AGI. "
+        "Example: \"what is my senior head of household credit if I am 67, qualified for "
+        "head of household last year, my qualifying person died this year, and my AGI is "
+        "$40,000?\""
+    )
+    return result
+
+
+def _quantity_excluded_amount(question: str):
+    """Returns the single dollar amount left after excluding any figure
+    immediately followed by 'month(s)'/'day(s)' -- a duration quantity
+    (e.g. "the last 6 months", "146 days") is never the target tax-
+    liability figure. Preemptive use of the FYTC lesson (a non-dollar
+    number can still collide with the real one) for Joint
+    Custody/Dependent Parent's simpler 1-2-number questions."""
+    ql = question.lower()
+    kept = []
+    for amount, start, end in _amounts(question):
+        after = ql[end:end + 10].strip()
+        if after.startswith("month") or after.startswith("day"):
+            continue
+        kept.append(amount)
+    return kept[0] if len(kept) == 1 else None
+
+
+def _joint_custody_tax_amount(question: str):
+    """Also excludes the stated residency-day count specifically (on top
+    of the generic month/day-quantity exclusion above), since Joint
+    Custody's day count is checked as a NUMBER, not just skipped as a
+    quantity phrase."""
+    known = set()
+    days = income_credits.joint_custody_stated_days(question)
+    if days is not None:
+        known.add(float(days))
+    ql = question.lower()
+    kept = []
+    for amount, start, end in _amounts(question):
+        if amount in known:
+            continue
+        after = ql[end:end + 10].strip()
+        if after.startswith("month") or after.startswith("day"):
+            continue
+        kept.append(amount)
+    return kept[0] if len(kept) == 1 else None
+
+
+def _income_joint_custody_answer(question: str, base: dict):
+    """Joint Custody Head of Household Credit -- see
+    income_credits.compute_shared_hoh_parent_credit's docstring for why
+    this trusts a STATED tax-liability figure directly (Form 540 line 35
+    is the taxpayer's computed CA tax before special credits, a figure
+    this project's bracket engine doesn't derive since it doesn't model
+    CA's exemption-credit mechanic)."""
+    if not income_credits.detect_joint_custody_signal(question):
+        return None
+    tax_liability = _joint_custody_tax_amount(question)
+    if tax_liability is None:
+        return None
+    hit = income_credits.compute_shared_hoh_parent_credit(
+        tax_liability, income_credits.JOINT_CUSTODY_CITATION, income_credits.JOINT_CUSTODY_SOURCE_URL)
+    if not hit:
+        return None
+    result = {**base, "status": "answered", "category": "joint_custody_hoh_credit",
+              "amount": tax_liability, "tax": hit["credit"], "citation": hit["citation"],
+              "source_url": hit["source_url"]}
+    result["answer_text"] = (
+        f"Assuming ${tax_liability:,.2f} in California tax liability (Form 540 line 35, "
+        "your computed tax before special credits), and that you have joint custody of "
+        "your child/stepchild/grandchild under a custody agreement, pay more than half "
+        "their expenses, were unmarried (or married but lived apart from your spouse all "
+        "year), and your home was your child's main home for between 146 and 219 days, "
+        "your estimated Joint Custody Head of Household Credit is "
+        f"${hit['credit']:,.2f} (30% of tax liability, capped at "
+        f"${income_credits.JOINT_CUSTODY_MAX_CREDIT:,.0f}) ({hit['citation']}). This is an "
+        "estimate only -- your actual credit depends on filing a complete return, and you "
+        "cannot claim this together with the Dependent Parent Credit."
+    )
+    return result
+
+
+def _income_joint_custody_residency_disqualified_answer(question: str, base: dict):
+    """Clean 'no' when every other fact checks out but the stated day
+    count is explicitly outside 146-219 -- not a generic defer."""
+    if not income_credits.detect_joint_custody_residency_disqualified(question):
+        return None
+    result = {**base, "status": "answered", "category": "joint_custody_hoh_credit", "tax": 0.0}
+    result["answer_text"] = (
+        "Based on what you stated, you do not qualify for the Joint Custody Head of "
+        "Household Credit -- your home must have been your child's main home for at least "
+        "146 but not more than 219 days of the year "
+        f"({income_credits.JOINT_CUSTODY_CITATION}). (If the child lived with you MORE than "
+        "half the year, you may qualify for Head of Household filing status instead -- ask "
+        "about that separately.)"
+    )
+    return result
+
+
+def _income_joint_custody_checklist_incomplete_answer(question: str, base: dict):
+    if not income_credits.detect_joint_custody_checklist_incomplete(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Joint Custody Head of Household Credit, I need ALL of the "
+        "following stated in one question: (1) that you have joint custody of your child/"
+        "stepchild/grandchild under a custody agreement, (2) that you pay more than half "
+        "their (or the household's) expenses, (3) that you were unmarried, or married but "
+        "lived apart from your spouse the whole year, (4) the number of days (146-219) "
+        "your home was the child's main home, and (5) your California tax liability. "
+        "Example: \"what is my joint custody head of household credit if I have joint "
+        "custody of my daughter, pay more than half her expenses, was unmarried, she lived "
+        "with me 180 days, and my tax liability is $2,000?\""
+    )
+    return result
+
+
+def _income_dependent_parent_answer(question: str, base: dict):
+    """Credit for Dependent Parent -- shares Joint Custody HOH's exact
+    amount formula (30% of tax liability, capped at $610), different
+    eligibility (must file MFS, spouse apart 6+ months, support a parent
+    -- not a child)."""
+    if not income_credits.detect_dependent_parent_signal(question):
+        return None
+    tax_liability = _quantity_excluded_amount(question)
+    if tax_liability is None:
+        return None
+    hit = income_credits.compute_shared_hoh_parent_credit(
+        tax_liability, income_credits.DEPENDENT_PARENT_CITATION, income_credits.DEPENDENT_PARENT_SOURCE_URL)
+    if not hit:
+        return None
+    result = {**base, "status": "answered", "category": "dependent_parent_credit",
+              "amount": tax_liability, "tax": hit["credit"], "citation": hit["citation"],
+              "source_url": hit["source_url"]}
+    result["answer_text"] = (
+        f"Assuming ${tax_liability:,.2f} in California tax liability (Form 540 line 35, "
+        "your computed tax before special credits), and that you were married/RDP filing "
+        "separately, your spouse was not a member of your household during the last 6 "
+        "months of the year, and you furnished more than half the household expenses for "
+        "your dependent mother's or father's home, your estimated Credit for Dependent "
+        f"Parent is ${hit['credit']:,.2f} (30% of tax liability, capped at "
+        f"${income_credits.JOINT_CUSTODY_MAX_CREDIT:,.0f}) ({hit['citation']}). This is an "
+        "estimate only -- your actual credit depends on filing a complete return, and you "
+        "cannot claim this together with the Joint Custody Head of Household Credit."
+    )
+    return result
+
+
+def _income_dependent_parent_checklist_incomplete_answer(question: str, base: dict):
+    if not income_credits.detect_dependent_parent_checklist_incomplete(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Credit for Dependent Parent, I need ALL of the following stated "
+        "in one question: (1) that you were married/RDP filing separately, (2) that your "
+        "spouse was not a member of your household during the last 6 months of the year, "
+        "(3) that you furnished more than half the household expenses for your dependent "
+        "mother's or father's home, and (4) your California tax liability. Example: \"what "
+        "is my dependent parent credit if I am married filing separately, my spouse was "
+        "not a member of my household for the last six months, I paid more than half my "
+        "mother's household expenses, and my tax liability is $2,000?\""
+    )
+    return result
+
+
 def _income_renters_credit_answer(conn, question: str, amount, base: dict):
     """Nonrefundable Renter's Credit -- a flat $60/$120 amount by
     filing-status tier with a hard income ceiling (not a gradual phase-out
@@ -1199,6 +1703,628 @@ def _income_renters_credit_answer(conn, question: str, amount, base: dict):
     return result
 
 
+def _income_military_retirement_answer(conn, question: str, amount, base: dict):
+    """Military retirement pay / DoD Survivor Benefit Plan exclusion (NEW
+    for TY2025-2029, Schedule CA (540) Tier 1 expansion) -- an AGI
+    eligibility CLIFF, not a gradual phase-out (see
+    income_credits.compute_military_retirement_exclusion). Answers the
+    eligibility question from AGI + filing status alone; deliberately does
+    NOT try to also extract a second "amount of retirement pay received"
+    figure -- see income_credits.py's module comment for why (the same
+    two-clustered-numbers extraction risk that caused real bugs building
+    FYTC)."""
+    if amount is None or not income_credits.detect_military_retirement_signal(question):
+        return None
+    fs = income_brackets.detect_filing_status(question)
+    if not fs:
+        return None
+    hit = income_credits.compute_military_retirement_exclusion(amount, fs)
+    if not hit:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "military_retirement_exclusion",
+              "taxable": not hit["eligible"], "amount": amount,
+              "citation": hit["citation"], "source_url": hit["source_url"]}
+    if hit["eligible"]:
+        result["answer_text"] = (
+            f"With federal AGI of ${amount:,.2f} (filing status {label}), which is at or "
+            f"below the ${hit['ceiling']:,.0f} limit, you may exclude up to "
+            f"${hit['cap_per_type']:,.0f} EACH of military retirement pay and DoD Survivor "
+            f"Benefit Plan annuity payments from California income for tax years 2025-2029 "
+            f"({hit['citation']})."
+        )
+    else:
+        result["answer_text"] = (
+            f"With federal AGI of ${amount:,.2f} (filing status {label}), which EXCEEDS the "
+            f"${hit['ceiling']:,.0f} limit for this exclusion, none of your military "
+            f"retirement pay or DoD Survivor Benefit Plan annuity is excluded -- it remains "
+            f"fully taxable for California, same as federal ({hit['citation']})."
+        )
+    return result
+
+
+def _income_military_retirement_missing_fs_answer(question: str, amount, base: dict):
+    """Mirrors _income_renters_credit_missing_fs_answer."""
+    if amount is None or not income_credits.detect_military_retirement_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To determine whether your military retirement pay or DoD Survivor Benefit Plan "
+        "payments are excluded from California income, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse -- the AGI limit depends on it. Please ask again and "
+        "include it.")
+    return result
+
+
+def _income_nonresident_answer(conn, question: str, base: dict):
+    """Ring 3, Phases 1-3 -- full-year CA nonresident OR part-year CA
+    resident, wage-only. Tries the numeric partial-split path FIRST (a
+    stated CA-source dollar figure via _amount_near/income_nonresident.
+    CA_SOURCE_AMOUNT_TERMS, same distinct-anchor exclude-based extraction
+    as _income_itemized_answer's tagged figures); for full-year
+    nonresidents only, if no such figure is present this falls back to
+    the Phase 1 phrase-based ALL/NONE path
+    (income_nonresident.detect_ca_source_fraction), which resolves to
+    ca_source_amount == total_wages or == 0 before calling the same
+    compute function. Part-year residents (Phase 3) have no ALL/NONE
+    shortcut -- see income_nonresident.py's module docstring for why --
+    so they always need the stated numeric figure. Both populations call
+    the EXACT SAME compute_nonresident_wage_tax (confirmed via FTB Pub
+    1100 research: identical formula, only what the stated CA-source
+    figure MEANS differs); only the detection and answer wording branch
+    on `is_part_year`."""
+    if income_nonresident.detect_nonresident_signal(question):
+        is_part_year = False
+    elif income_nonresident.detect_part_year_signal(question):
+        is_part_year = True
+    else:
+        return None
+    fs = income_brackets.detect_filing_status(question)
+    if not fs:
+        return None
+
+    ca_source_amount = _amount_near(question, income_nonresident.CA_SOURCE_AMOUNT_TERMS)
+    if ca_source_amount is not None:
+        others = [a for a, _, _ in _amounts(question) if a != ca_source_amount]
+        if len(others) != 1:
+            return None
+        total_wages = others[0]
+    elif is_part_year:
+        return None
+    else:
+        fraction = income_nonresident.detect_ca_source_fraction(question)
+        if fraction is None:
+            return None
+        total_wages = _amount(question)
+        if total_wages is None:
+            return None
+        ca_source_amount = total_wages * fraction
+
+    calc = income_nonresident.compute_nonresident_wage_tax(conn, total_wages, ca_source_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    category = "part_year_resident_wage_tax" if is_part_year else "nonresident_wage_tax"
+    result = {**base, "status": "answered", "category": category,
+              "amount": total_wages, "taxable_income": calc["ca_taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["ca_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+
+    if is_part_year:
+        surtax_note = ""
+        if calc["surtax"]:
+            surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                           f"Tax on your TOTAL income (1% of total taxable income over "
+                           f"$1,000,000) ({calc['citation']}).")
+        result["answer_text"] = (
+            f"Assuming ${calc['ca_source_amount']:,.2f} of your ${total_wages:,.2f} in total "
+            f"wage income for the year counts as California-source under the part-year "
+            f"resident rule (all wages earned while you were a California resident, plus any "
+            f"wages earned while a nonresident that were for work physically performed in "
+            f"California), you had no other income, filing status {label}: California computes "
+            f"your tax using an EFFECTIVE RATE (the tax on your total income at California's "
+            f"regular brackets, divided by that total income -- here, ${calc['tax_on_total']:,.2f} "
+            f"/ ${calc['total_taxable_income']:,.2f} = {calc['effective_rate']*100:.2f}%), then "
+            f"applies it to your California-source income after prorating your standard "
+            f"deduction by the same California-source share (${calc['prorated_deduction']:,.2f} "
+            f"of ${calc['standard_deduction']:,.2f}). Your estimated California tax is "
+            f"${calc['ca_tax']:,.2f} ({calc['citation']}).{surtax_note} This assumes wage "
+            "income only, with no other income from any source -- your actual liability may "
+            "differ."
+        )
+    elif calc["ca_source_amount"] == 0.0:
+        result["answer_text"] = (
+            f"Assuming none of your ${total_wages:,.2f} in wage income was earned working "
+            f"physically in California, and you were a nonresident of California for the "
+            f"entire year: you likely owe no California tax on this income, since California "
+            f"only taxes nonresidents on California-source income ({calc['citation']}). This "
+            "assumes wage income only, with no other California-source income (rental, "
+            "business, or investment) -- your actual liability may differ."
+        )
+    elif calc["ca_source_amount"] == total_wages:
+        surtax_note = ""
+        if calc["surtax"]:
+            surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                           f"Tax (1% of total taxable income over $1,000,000, prorated the same "
+                           f"way as the rest of your tax) ({calc['citation']}).")
+        result["answer_text"] = (
+            f"Assuming all ${total_wages:,.2f} of your wage income was earned working "
+            f"physically in California, you had no other income, and you were a nonresident "
+            f"of California for the entire year, filing status {label}: California computes "
+            f"your tax using an EFFECTIVE RATE (the tax on your total income at California's "
+            f"regular brackets, divided by that total income), then applies it to your "
+            f"California-source income. Since 100% of your income is California-source here, "
+            f"this works out to the SAME ${calc['ca_tax']:,.2f} a California resident with "
+            f"identical income would owe ({calc['citation']}).{surtax_note} This assumes wage "
+            "income only, with no other income from any source -- your actual liability may "
+            "differ, especially if you have income from outside California too (a common "
+            "case this assistant doesn't yet handle -- state a nonresident question with "
+            "SOME income earned outside California and it will correctly defer rather than "
+            "guess)."
+        )
+    else:
+        surtax_note = ""
+        if calc["surtax"]:
+            surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                           f"Tax on your TOTAL income (1% of total taxable income over "
+                           f"$1,000,000) ({calc['citation']}).")
+        result["answer_text"] = (
+            f"Assuming ${calc['ca_source_amount']:,.2f} of your ${total_wages:,.2f} in total "
+            f"wage income was earned working physically in California ({calc['ca_source_fraction']*100:.1f}%), "
+            f"you had no other income, and you were a nonresident of California for the "
+            f"entire year, filing status {label}: California computes your tax using an "
+            f"EFFECTIVE RATE (the tax on your total income at California's regular brackets, "
+            f"divided by that total income -- here, ${calc['tax_on_total']:,.2f} / "
+            f"${calc['total_taxable_income']:,.2f} = {calc['effective_rate']*100:.2f}%), then "
+            f"applies it to your California-source income after prorating your standard "
+            f"deduction by the same California-source share (${calc['prorated_deduction']:,.2f} "
+            f"of ${calc['standard_deduction']:,.2f}). Your estimated California tax is "
+            f"${calc['ca_tax']:,.2f} ({calc['citation']}).{surtax_note} This assumes wage "
+            "income only, with no other income from any source -- your actual liability may "
+            "differ."
+        )
+    return result
+
+
+def _income_nonresident_missing_source_answer(question: str, base: dict):
+    """Nonresident or part-year-resident signal present but the CA-source
+    amount couldn't be determined -- mirrors the missing-filing-status
+    pattern used throughout this project. Gated on at least one dollar
+    amount being present at all -- without any figure, the more pressing
+    problem is a missing income amount, not a missing CA-source
+    specification, so this falls through to a different/generic
+    needs_review instead."""
+    if not _amounts(question):
+        return None
+    if income_nonresident.detect_nonresident_missing_source(question):
+        result = {**base, "status": "needs_review"}
+        result["answer_text"] = (
+            "To estimate your California nonresident tax, I need to know how much of your wage "
+            "income was earned working physically in California. You can either state a specific "
+            "dollar figure (for example, \"$80,000 in wages, $30,000 of which was earned working "
+            "in California\"), or say \"I worked entirely in California\" or \"I did not work in "
+            "California at all\" if that applies.")
+        return result
+    if income_nonresident.detect_part_year_missing_source(question):
+        result = {**base, "status": "needs_review"}
+        result["answer_text"] = (
+            "To estimate your California part-year resident tax, I need your total "
+            "California-source income for the year under the part-year rule: ALL wages earned "
+            "while you were a California resident (regardless of where the work was performed), "
+            "PLUS any wages earned while you were a nonresident that were for work physically "
+            "performed in California. Please state your total wage income for the year and this "
+            "combined California-source figure (for example, \"$90,000 in wages for the year, "
+            "$60,000 of which was California-source\").")
+        return result
+    return None
+
+
+def _income_nonresident_fallback_answer(question: str, base: dict):
+    """Catch-all for any nonresident- OR part-year-resident-signaled
+    question that reaches this point without being answered by either
+    function above -- e.g. a stated CA-source split that doesn't make
+    sense (exceeds total wages), or a missing filing status. Without this,
+    the question would fall through to the generic wage-only RESIDENT
+    bracket path below and silently compute tax as if the person were a
+    full-year California resident -- a confidently wrong answer for
+    someone who explicitly said they're a nonresident or part-year
+    resident. Deliberately generic wording since this covers several
+    distinct underlying causes (invalid split, missing filing status) that
+    _income_nonresident_missing_source_answer's more specific message
+    doesn't cover."""
+    if not (income_nonresident.detect_nonresident_signal(question)
+            or income_nonresident.detect_part_year_signal(question)):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "I can see you're asking about California nonresident or part-year resident tax, but "
+        "I'm missing something needed to compute it correctly -- your filing status, and your "
+        "total wage income along with a California-source dollar amount that doesn't exceed it. "
+        "Please restate your question with these details.")
+    return result
+
+
+def _income_k1_grantor_trust_answer(question: str, base: dict):
+    """A K-1 question mentioning a GRANTOR trust specifically must be
+    redirected, not computed: FTB's optional simplified reporting for
+    grantor trusts means the income is taxed DIRECTLY to the grantor on
+    the grantor's own personal return, not via a real K-1 -- see
+    income_brackets.py's K-1 section docstring. Checked FIRST, before any
+    other K-1 logic, since computing a K-1-shaped answer here would be
+    based on a form the taxpayer likely never actually receives."""
+    if not income_brackets.detect_grantor_trust_mention(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "For a GRANTOR trust, California follows the federal simplified reporting rule: the "
+        "trust's income is taxed DIRECTLY to the grantor on the grantor's own personal tax "
+        "return -- there isn't a real Schedule K-1 to report in the way this question is "
+        "phrased. If you're the grantor, please ask about this income as your own personal "
+        "income (for example, state the dollar amount and your filing status directly, the "
+        "same way you would for wages) rather than as K-1 income."
+    )
+    return result
+
+
+def _income_k1_answer(conn, question: str, base: dict):
+    """Business entities Phase B (extended to trust/estate K-1s, same
+    session) -- K-1 pass-through income to the INDIVIDUAL beneficiary/
+    owner's personal return. See income_brackets.py's K-1 section
+    docstring for the verified Schedule CA (540) Line 5 basis and
+    disclosed non-modeled adjustments (business AND trust/estate). K-1-
+    only scope: assumes the K-1 amount is the taxpayer's ONLY income.
+    `amount` is extracted here (not shared with the later generic
+    `amount = _amount(question)` line) since this must run BEFORE
+    entity_tax's checks below -- a question like "K-1 from my S-corp"
+    would otherwise risk being routed to entity_tax's ENTITY-level answer
+    instead (defended twice: this function runs first, AND entity_tax.py's
+    own K1_EXCLUDE_TERMS refuses to fire on K-1 language regardless of
+    ordering). Grantor-trust mentions are intercepted separately, before
+    this function is even reached -- see _income_k1_grantor_trust_answer."""
+    fs = income_brackets.detect_k1_signal(question)
+    if not fs:
+        return None
+    amount = _amount(question)
+    if amount is None:
+        return None
+    calc = income_brackets.compute_k1_ca_tax(conn, amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "k1_pass_through_income_tax",
+              "amount": amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['citation']}).")
+    if income_brackets.detect_trust_estate_k1(question):
+        adjustment_note = (
+            "It does not account for California-specific adjustments that commonly apply "
+            "(such as depreciation/basis differences), nor for basis, at-risk, or "
+            "passive-activity-loss limitations. Make sure the figure you stated EXCLUDES any "
+            "tax-exempt interest shown separately on your K-1 -- that portion is not taxable "
+            "and should not be included."
+        )
+    else:
+        adjustment_note = (
+            "It does not account for California-specific adjustments that commonly apply "
+            "(such as adding back the entity's own California tax, or depreciation/basis "
+            "differences), nor for basis, at-risk, or passive-activity-loss limitations, nor "
+            "for California's separate elective Pass-Through Entity tax credit if your entity "
+            "elected into it."
+        )
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in K-1 pass-through income is your ONLY income, filing "
+        f"status {label}, and the standard deduction (${calc['standard_deduction']:,.0f}): "
+        f"your California tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This uses your STATED K-1 amount as-is -- {adjustment_note} This also "
+        f"assumes no other income (wages, self-employment, etc.) -- your actual liability may "
+        f"differ."
+    )
+    return result
+
+
+def _income_k1_missing_fs_answer(question: str, base: dict):
+    """Mirrors _income_missing_filing_status_answer for the K-1-only path."""
+    if not income_brackets.detect_k1_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California tax on K-1 pass-through income, I need your filing "
+        "status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include it (for "
+        "example, \"...filing single\" or \"...as head of household\").")
+    return result
+
+
+def _income_k1_fallback_answer(question: str, base: dict):
+    """Catch-all for any K-1-signaled question not answered by either
+    function above (missing dollar amount, or a K1_COMPLEXITY_EXCLUDE term
+    present alongside K-1 language, e.g. mixed wage+K-1 income). Without
+    this, a K-1 question mentioning an entity type ("K-1 from my S-corp")
+    could fall through toward entity_tax's ENTITY-level answer below (or,
+    if that path also declines, the generic wage-only bracket path) and
+    risk a confidently wrong answer about the wrong taxpayer -- the entity
+    itself, not the individual -- the same bug class as nonresident tax
+    Phase 2's fallback fix."""
+    q = question.lower()
+    if not any(t in q for t in income_brackets.K1_TRIGGERS):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "I can see you're asking about K-1 pass-through income, but I'm missing something "
+        "needed to compute your PERSONAL California tax on it -- your filing status and your "
+        "stated K-1 income amount. I can currently only handle K-1 income as your ONLY income "
+        "source; if you also have wage or self-employment income, please ask about the K-1 "
+        "amount on its own, or check back for updates.")
+    return result
+
+
+def _entity_tax_answer(conn, question: str, base: dict):
+    """Ring 3, business entities Phase A -- entity-level California annual/
+    minimum tax (S-corps, LLCs, partnerships). Genuinely different from
+    every other path in this domain: it taxes the ENTITY, not an
+    individual's personal return (that's Phase B, K-1 pass-through, not
+    yet built). See entity_tax.py's module docstring for the verified
+    per-entity-type formula. Ambiguous bare "partnership" phrasing is
+    handled by _entity_tax_ambiguous_type_answer instead -- this function
+    only proceeds once a SPECIFIC entity type is known."""
+    entity_type, is_ambiguous = entity_tax.detect_entity_type(question)
+    if is_ambiguous or entity_type is None:
+        return None
+    if not entity_tax.detect_entity_compute_signal(question):
+        return None
+
+    ca_income = None
+    if entity_type in entity_tax.INCOME_REQUIRED_TYPES:
+        ca_income = _amount(question)
+        if ca_income is None:
+            return None
+
+    is_first_year = entity_tax.detect_first_year(question)
+    calc = entity_tax.compute_entity_tax(conn, entity_type, ca_income, is_first_year)
+    if not calc:
+        return None
+
+    label = entity_tax.ENTITY_TYPE_LABELS[entity_type]
+    result = {**base, "status": "answered", "category": "entity_annual_tax",
+              "amount": ca_income, "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+
+    parts = []
+    if calc["annual_tax_waived"]:
+        parts.append(f"the $800 minimum annual tax is WAIVED (this is your {label}'s first "
+                      f"taxable year, and California permanently waives the $800 floor for "
+                      f"entities formed or qualified on or after January 1, 2020)")
+    elif calc["annual_tax"] > 0:
+        parts.append(f"an $800 minimum annual tax")
+    else:
+        parts.append("no annual tax (general partnerships do not owe California's $800 "
+                      "minimum annual tax)")
+    if calc["income_tax"] > 0:
+        rate_pct = calc["income_tax_rate"] * 100
+        parts.append(f"${calc['income_tax']:,.2f} in entity-level income tax "
+                      f"({rate_pct:.1f}% of ${ca_income:,.2f} in net California income)")
+    if calc["fee_amount"] > 0:
+        parts.append(f"an LLC fee of ${calc['fee_amount']:,.2f} (based on ${ca_income:,.2f} "
+                      f"in total California income) ({calc['fee_citation']})")
+    breakdown = "; plus ".join(parts) if len(parts) > 1 else parts[0]
+
+    result["answer_text"] = (
+        f"Assuming your {label} is a single-state California entity with no other complicating "
+        f"factors: it owes {breakdown}, for a total of ${calc['total_tax']:,.2f} "
+        f"(Form {calc['form_number']}) ({calc['citation']}). This covers only the entity's own "
+        f"California franchise/annual tax -- it does NOT cover how this income is taxed to you "
+        f"personally as a shareholder, partner, or member (a separate calculation from your "
+        f"Schedule K-1). This also assumes no multi-state apportionment and no combined/unitary "
+        f"group filing -- your actual liability may differ if either applies."
+    )
+    return result
+
+
+def _entity_tax_missing_income_answer(question: str, base: dict):
+    """Entity type is known and needs an income figure (LLC fee tier or
+    S-corp's 1.5%/3.5% income tax), but none was stated."""
+    entity_type, is_ambiguous = entity_tax.detect_entity_type(question)
+    if is_ambiguous or entity_type is None:
+        return None
+    if entity_type not in entity_tax.INCOME_REQUIRED_TYPES:
+        return None
+    if not entity_tax.detect_entity_compute_signal(question):
+        return None
+    if _amount(question) is not None:
+        return None
+    label = entity_tax.ENTITY_TYPE_LABELS[entity_type]
+    income_label = ("net California income" if entity_type.startswith("s_corp") or entity_type.startswith("c_corp")
+                     else "total California income")
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        f"To estimate your {label}'s California tax, I need its {income_label} for the year. "
+        f"Please restate your question with that figure (for example, "
+        f"\"how much tax does my {label} owe on $300,000 in {income_label}\").")
+    return result
+
+
+def _entity_tax_ambiguous_type_answer(question: str, base: dict):
+    """Bare "partnership" with no general/limited/liability qualifier --
+    general partnerships owe $0, LPs/LLPs owe $800, so this must not be
+    guessed."""
+    entity_type, is_ambiguous = entity_tax.detect_entity_type(question)
+    if not is_ambiguous:
+        return None
+    if not entity_tax.detect_entity_compute_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California taxes partnerships differently depending on the specific type: a GENERAL "
+        "partnership owes no California annual tax at all, while a LIMITED partnership (LP) or "
+        "limited liability partnership (LLP) owes an $800 minimum annual tax. Please restate "
+        "your question specifying which type of partnership you have.")
+    return result
+
+
+def _fiduciary_tax_grantor_redirect_answer(question: str, base: dict):
+    """A fiduciary-tax question mentioning a GRANTOR trust must be
+    redirected, not computed -- FTB's optional simplified reporting means
+    grantor trust income is taxed DIRECTLY to the grantor on the grantor's
+    own personal return, so a grantor trust never owes THIS fiduciary-
+    level tax at all. Reuses income_brackets.GRANTOR_TRUST_TERMS, the same
+    constant trust/estate Phase B's K-1 grantor-trust redirect uses.
+    Checked FIRST, before any other fiduciary-tax logic."""
+    q = question.lower()
+    if not any(t in q for t in income_brackets.GRANTOR_TRUST_TERMS):
+        return None
+    if not fiduciary_tax.detect_fiduciary_compute_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "For a GRANTOR trust, California follows the federal simplified reporting rule: the "
+        "trust's income is taxed DIRECTLY to the grantor on the grantor's own personal tax "
+        "return -- the trust itself does not pay this fiduciary-level tax. If you're the "
+        "grantor, please ask about this income as your own personal income instead (state the "
+        "dollar amount and your filing status directly, the same way you would for wages)."
+    )
+    return result
+
+
+def _fiduciary_tax_answer(conn, question: str, base: dict):
+    """Ring 3, trust/estate Phase A -- fiduciary-level tax on RETAINED
+    (undistributed) trust/estate income. See fiduciary_tax.py's module
+    docstring for the verified Form 541 mechanic (reuses
+    income_brackets.compute_ca_tax's bracket step unchanged, subtracts a
+    small exemption credit). Two shapes: a full-distribution question
+    (answered directly, $0 fiduciary tax, no residency/amount needed) or a
+    retained-income question (needs both the CA-residency bail-out
+    assertion AND a stated dollar amount)."""
+    fiduciary_type = fiduciary_tax.detect_fiduciary_type(question)
+    if not fiduciary_type:
+        return None
+    if not fiduciary_tax.detect_fiduciary_compute_signal(question):
+        return None
+    label = fiduciary_tax.FIDUCIARY_TYPE_LABELS[fiduciary_type]
+
+    if fiduciary_tax.detect_full_distribution(question):
+        result = {**base, "status": "answered", "category": "fiduciary_tax", "tax": 0.0}
+        result["answer_text"] = (
+            f"If your {label} distributed ALL of its income to beneficiaries, it owes NO "
+            f"California fiduciary income tax itself -- California allows a distribution "
+            f"deduction equal to the amount distributed (up to distributable net income), "
+            f"which offsets the {label}'s own taxable income entirely. Each beneficiary "
+            f"instead reports and pays tax on their own share via Schedule K-1 (541) -- ask "
+            f"about that as K-1 pass-through income on the beneficiary's personal return."
+        )
+        return result
+
+    if not fiduciary_tax.detect_ca_resident_entity_assertion(question):
+        return None
+
+    amount = _amount(question)
+    if amount is None:
+        return None
+    calc = fiduciary_tax.compute_fiduciary_tax(conn, amount, fiduciary_type)
+    if not calc:
+        return None
+
+    result = {**base, "status": "answered", "category": "fiduciary_tax",
+              "amount": amount, "tax": calc["total_tax"], "marginal_rate": calc["marginal_rate"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services Tax."
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} of retained (undistributed) income and that your {label} "
+        f"qualifies for California's residency bail-out (no Schedule G apportionment needed): "
+        f"California computes fiduciary tax using the SAME bracket schedule as an individual "
+        f"filer (tax before credit: ${calc['tax_before_credit']:,.2f}), then subtracts a "
+        f"${calc['exemption_credit']:,.2f} exemption credit ({calc['citation']}), for a total "
+        f"California tax of ${calc['total_tax']:,.2f}.{surtax_note} This assumes the retained "
+        f"amount is genuinely NOT distributed to beneficiaries (distributed income is instead "
+        f"taxed to beneficiaries via K-1, not here), and doesn't account for the full "
+        f"Distributable Net Income computation (tax-exempt income, capital gains allocated to "
+        f"corpus) -- a reasonable estimate for the simple case, not a guarantee."
+    )
+    return result
+
+
+def _fiduciary_tax_missing_residency_answer(question: str, base: dict):
+    """Fiduciary type + compute signal present, not a full-distribution
+    question, but no CA-residency bail-out condition was stated."""
+    fiduciary_type = fiduciary_tax.detect_fiduciary_type(question)
+    if not fiduciary_type:
+        return None
+    if not fiduciary_tax.detect_fiduciary_compute_signal(question):
+        return None
+    if fiduciary_tax.detect_full_distribution(question):
+        return None
+    if fiduciary_tax.detect_ca_resident_entity_assertion(question):
+        return None
+    label = fiduciary_tax.FIDUCIARY_TYPE_LABELS[fiduciary_type]
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        f"California's rules for whether a {label}'s income is fully taxable here (versus "
+        f"needing apportionment) depend on residency. I can compute this only for the "
+        f"straightforward case where ALL trustees are California residents, OR all "
+        f"non-contingent beneficiaries are California residents, OR all of the {label}'s "
+        f"income is California-source. Please restate your question confirming one of these "
+        f"applies (for example, \"all trustees are California residents\")."
+    )
+    return result
+
+
+def _fiduciary_tax_missing_amount_answer(question: str, base: dict):
+    """Fiduciary type + compute signal + residency assertion all present,
+    not a full-distribution question, but no retained-income figure was
+    stated."""
+    fiduciary_type = fiduciary_tax.detect_fiduciary_type(question)
+    if not fiduciary_type:
+        return None
+    if not fiduciary_tax.detect_fiduciary_compute_signal(question):
+        return None
+    if fiduciary_tax.detect_full_distribution(question):
+        return None
+    if not fiduciary_tax.detect_ca_resident_entity_assertion(question):
+        return None
+    if _amount(question) is not None:
+        return None
+    label = fiduciary_tax.FIDUCIARY_TYPE_LABELS[fiduciary_type]
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        f"To estimate your {label}'s California fiduciary tax, I need the amount of RETAINED "
+        f"(undistributed) income for the year. Please restate your question with that figure."
+    )
+    return result
+
+
+def _fiduciary_tax_fallback_answer(question: str, base: dict):
+    """Catch-all for any fiduciary-type-and-compute-signaled question not
+    answered by any function above (e.g. an invalid amount). Mirrors the
+    same defensive-fallback discipline as nonresident tax Phase 2 and the
+    K-1/entity-tax collision fix -- though here the risk is lower since
+    "trust"/"estate" are already excluded from the generic wage-only
+    bracket path's own COMPLEXITY_EXCLUDE, so this is belt-and-suspenders
+    for a clearer message, not the last line of defense against a wrong
+    answer."""
+    fiduciary_type = fiduciary_tax.detect_fiduciary_type(question)
+    if not fiduciary_type:
+        return None
+    if not fiduciary_tax.detect_fiduciary_compute_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "I can see you're asking about California fiduciary tax on trust or estate income, but "
+        "I'm missing something needed to compute it correctly -- either confirmation that all "
+        "of the income was distributed to beneficiaries, or a stated retained-income amount "
+        "plus confirmation that the trust/estate qualifies as fully California-taxable (see "
+        "the residency conditions above). Please restate your question with these details."
+    )
+    return result
+
+
 def _income_renters_credit_missing_fs_answer(question: str, amount, base: dict):
     """Mirrors _income_missing_filing_status_answer / _income_missing_children_answer."""
     if amount is None or not income_credits.detect_renters_credit_missing_filing_status(question):
@@ -1212,24 +2338,89 @@ def _income_renters_credit_missing_fs_answer(question: str, amount, base: dict):
     return result
 
 
-def _income_topic_by_key(conn, compose: bool, topic_key: str, base: dict):
+def _income_hoh_determination_answer(question: str, base: dict):
+    """A REAL Head of Household eligibility determination -- see
+    income_eligibility's module docstring for the FTB Form 3532 conformity
+    basis and the narrow v1 scope (unmarried the entire year, taxpayer's
+    own child, child lived with taxpayer >half the year, taxpayer paid
+    >half the home costs, simple age/full-time-student test). Distinct
+    from the existing head_of_household_eligibility INFORMATIONAL topic
+    (which only explains the criteria) -- this gives an actual yes/no."""
+    verdict = income_eligibility.detect_hoh_determination(question)
+    if verdict is None:
+        return None
+    result = {**base, "status": "answered", "category": "head_of_household_determination",
+              "taxable": verdict, "citation": income_eligibility.HOH_CITATION,
+              "source_url": income_eligibility.HOH_SOURCE_URL}
+    if verdict:
+        result["answer_text"] = (
+            "Based on what you stated -- unmarried the entire year, your child lived with "
+            "you more than half the year, you paid more than half the cost of keeping up "
+            "your home, and your child meets the age/student test -- you qualify for "
+            "California Head of Household filing status. This assumes the support, joint-"
+            f"return, and citizenship requirements are also met ({income_eligibility.HOH_CITATION}). "
+            "You must also attach Form FTB 3532 to your return."
+        )
+    else:
+        result["answer_text"] = (
+            "Based on what you stated -- married for the entire year -- you do not qualify "
+            "for California Head of Household filing status. (If you were married but lived "
+            "apart from your spouse for the last 6 months of the year, you may still be "
+            f"\"considered unmarried\" for HOH purposes -- see {income_eligibility.HOH_CITATION} "
+            "for that separate test, which this assistant doesn't evaluate.)"
+        )
+    return result
+
+
+def _income_hoh_checklist_incomplete_answer(question: str, base: dict):
+    """When the question is clearly asking for an HOH determination but
+    doesn't state enough facts to reach one, give the specific checklist
+    instead of a generic defer -- same pattern as every other
+    missing-fact clarifying message in this module."""
+    if not income_eligibility.detect_hoh_checklist_incomplete(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To determine if you qualify for California Head of Household filing status, "
+        "I need ALL of the following stated in one question: (1) that you were unmarried "
+        "the entire year, (2) that you paid more than half the cost of keeping up your "
+        "home, (3) that your own child (birth, step, adopted, or foster) lived with you "
+        "more than half the year, and (4) your child's age (and whether they were a "
+        "full-time student, if age 19-23). Example: \"I was unmarried all year, paid more "
+        "than half the cost of keeping up my home, and my 10-year-old son lived with me "
+        "all year -- do I qualify for head of household?\" (This assistant only handles "
+        "this simplest case -- married-but-separated taxpayers and qualifying RELATIVES, "
+        f"rather than your own child, need FTB's fuller test: {income_eligibility.HOH_CITATION}.)"
+    )
+    return result
+
+
+def _income_topic_by_key(conn, compose: bool, topic_key: str, base: dict, branches=None):
     """Build a structured income_tax_topics verdict for a KNOWN topic_key --
-    shared by the embedding-routed path (_income_topic_answer) and the
-    cross-domain override (_cross_domain_income_override), which already
-    knows exactly which topic applies and skips routing entirely."""
+    shared by the embedding-routed path (_income_topic_answer, which may pass
+    disclosed opposite-verdict `branches`) and the cross-domain override
+    (_cross_domain_income_override), which already knows exactly which topic
+    applies and skips routing/branch-finding entirely."""
     topic = _income_lookup(conn, topic_key)
     if not topic:
         return None
     t_key, t_taxable, _t_treatment, t_citation, t_summary, t_source_url = topic
-    result = {**base, "status": "answered", "category": t_key,
+    branches = branches or []
+    result = {**base, "status": "conditional" if branches else "answered", "category": t_key,
               "taxable": bool(t_taxable) if t_taxable is not None else None,
-              "citation": t_citation, "source_url": t_source_url}
+              "citation": t_citation, "source_url": t_source_url, "branches": branches}
     if not compose:
         return result
     verdict = ("not taxable in California" if t_taxable is False
                else "taxable in California" if t_taxable else "treatment varies")
-    result["answer_text"] = (
-        f"{t_summary} ({t_citation})" if t_summary else f"This is {verdict} ({t_citation}).")
+    text = (f"{t_summary} ({t_citation})" if t_summary else f"This is {verdict} ({t_citation}).")
+    if branches:
+        alts = "; ".join(
+            f"if {b['condition']}, it may instead be "
+            f"{'taxable' if b['taxable'] else 'not taxable'} ({b['citation']})"
+            for b in branches)
+        text += f" NOTE -- this depends on the specifics: {alts}."
+    result["answer_text"] = text
     return result
 
 
@@ -1237,10 +2428,27 @@ def _income_topic_answer(conn, question: str, compose: bool, rows, base: dict):
     """Structured topic verdict (income_tax_topics, via income_rule_embeddings
     routing -- the Phase 2 scaffold, now real). Unlike the informational
     tier, this states an actual taxable/not-taxable fact with its own
-    citation, not just a paraphrased pointer."""
+    citation, not just a paraphrased pointer.
+
+    Also checks for opposite-verdict BRANCHES near the primary pick (mirrors
+    the sales-tax _find_branches call in _answer()) -- added after
+    collision_audit.py --domain=income flagged gambling_winnings (taxable)
+    sitting only 0.008 from california_lottery_winnings (exempt), and live
+    testing confirmed it was a REAL bug: "I won money from the california
+    lottery, is that taxable" was answered a confident (and wrong) TAXABLE,
+    with no disclosure of the CA-specific lottery exclusion, because this
+    path never called _find_branches at all until now."""
     if not rows or float(rows[0][2]) > INCOME_EMBED_ROUTER_THRESHOLD:
         return None
-    return _income_topic_by_key(conn, compose, rows[0][0], base)
+    primary_key = rows[0][0]
+    primary = _income_lookup(conn, primary_key)
+    branches = []
+    if primary and primary[1] is not None:
+        margin = BRANCH_MARGIN if _route_confidence(question, rows) else UNCERTAIN_BRANCH_MARGIN
+        branches = _find_branches(conn, question, rows, primary_key, bool(primary[1]),
+                                   margin=margin, table="income_rule_embeddings",
+                                   branch_info=_income_branch_info)
+    return _income_topic_by_key(conn, compose, primary_key, base, branches=branches)
 
 
 # Curated CROSS-DOMAIN overrides -- same shape/philosophy as DISAMBIG, but
@@ -1261,6 +2469,20 @@ CROSS_DOMAIN_INCOME_OVERRIDE = [
     ({"gift", "gifts", "inheritance", "inherit", "inherited"},
      {"received", "receive", "receiving", "got", "get"},
      "gifts_and_inheritance"),
+    # Found live via income_item_sweep.py right after the Schedule CA Tier 1
+    # expansion added educator_expenses: sales' INFORMATIONAL tier (not even
+    # a rule match -- doc_chunks) latched onto an entirely unrelated CDTFA
+    # "Cooking Class Providers" industry guide (dist=0.265, under threshold)
+    # purely on "classroom"/"instruction"-flavored vocabulary overlap,
+    # shadowing the income-domain educator expense deduction question
+    # before it was ever tried. group_b requires a "deduct*" word
+    # specifically (not just "tax") since "classroom supplies... sales tax"
+    # is a genuinely different, legitimate SALES question (is the PURCHASE
+    # taxable) -- "deduct" is a verb that essentially never appears in that
+    # framing, so it safely discriminates the income-tax reading.
+    ({"classroom", "educator", "educators", "teacher", "teachers"},
+     {"deduct", "deducting", "deductible", "deduction", "deductions"},
+     "educator_expenses"),
 ]
 
 # Additional receiver signal found by the cross-domain sweep (2026-07-28):
@@ -1301,6 +2523,158 @@ def _answer_income(conn, question: str, compose: bool, qv):
     dedu_result = _income_deduction_answer(conn, question, base)
     if dedu_result:
         return dedu_result
+
+    # Senior HOH / Joint Custody HOH / Dependent Parent checked HERE,
+    # BEFORE the generic wage-only bracket path below -- found via
+    # testing: these 3 credits' own NAMES contain "head of household"
+    # (which income_brackets.detect_filing_status reads as a genuine
+    # filing-status statement) and their natural phrasing ("my tax
+    # liability is $X") happens to contain "tax liability", one of
+    # income_brackets.COMPUTE_TRIGGERS. Together, a complete, valid
+    # question for one of these 3 credits was being silently hijacked by
+    # the generic bracket-compute system before ever reaching this
+    # credit-specific logic -- once misdetected as HOH filing status
+    # with a stray dollar amount as "gross wage income", it either
+    # computed a bogus $0 bracket answer or (worse) fired the generic
+    # "please state your filing status" defer despite one having been
+    # given, just not in bracket-path vocabulary. None of the OTHER
+    # credits below share "head of household" in their name or need a
+    # "tax liability" figure, so they aren't exposed to this same
+    # collision and didn't need to move.
+    senior_hoh_result = _income_senior_hoh_answer(question, base)
+    if senior_hoh_result:
+        return senior_hoh_result
+
+    senior_hoh_age_disqualified_result = _income_senior_hoh_age_disqualified_answer(question, base)
+    if senior_hoh_age_disqualified_result:
+        return senior_hoh_age_disqualified_result
+
+    senior_hoh_incomplete_result = _income_senior_hoh_checklist_incomplete_answer(question, base)
+    if senior_hoh_incomplete_result:
+        return senior_hoh_incomplete_result
+
+    joint_custody_result = _income_joint_custody_answer(question, base)
+    if joint_custody_result:
+        return joint_custody_result
+
+    joint_custody_disqualified_result = _income_joint_custody_residency_disqualified_answer(question, base)
+    if joint_custody_disqualified_result:
+        return joint_custody_disqualified_result
+
+    joint_custody_incomplete_result = _income_joint_custody_checklist_incomplete_answer(question, base)
+    if joint_custody_incomplete_result:
+        return joint_custody_incomplete_result
+
+    dependent_parent_result = _income_dependent_parent_answer(question, base)
+    if dependent_parent_result:
+        return dependent_parent_result
+
+    dependent_parent_incomplete_result = _income_dependent_parent_checklist_incomplete_answer(question, base)
+    if dependent_parent_incomplete_result:
+        return dependent_parent_incomplete_result
+
+    # Military retirement exclusion checked HERE too, same reason as the 3
+    # credits above: natural phrasing ("how much tax do I owe on my
+    # military retirement, AGI is $130,000 filing single") can satisfy the
+    # generic wage-only bracket path's own trigger conditions (COMPUTE_
+    # TRIGGERS + a detected filing status + a dollar amount) before ever
+    # reaching this credit-specific logic if placed later.
+    military_amount = _amount(question)
+    military_retirement_result = _income_military_retirement_answer(conn, question, military_amount, base)
+    if military_retirement_result:
+        return military_retirement_result
+
+    military_retirement_missing_fs_result = _income_military_retirement_missing_fs_answer(
+        question, military_amount, base)
+    if military_retirement_missing_fs_result:
+        return military_retirement_missing_fs_result
+
+    # Nonresident/part-year-resident tax (Ring 3, Phases 1-3) checked HERE too, same reason as
+    # military retirement above: "how much tax do I owe on my wages,
+    # filing single" phrasing is exactly what the generic wage-only
+    # bracket path also triggers on, and this credit-specific logic must
+    # get first look.
+    nonresident_result = _income_nonresident_answer(conn, question, base)
+    if nonresident_result:
+        return nonresident_result
+
+    nonresident_missing_source_result = _income_nonresident_missing_source_answer(
+        question, base)
+    if nonresident_missing_source_result:
+        return nonresident_missing_source_result
+
+    nonresident_fallback_result = _income_nonresident_fallback_answer(question, base)
+    if nonresident_fallback_result:
+        return nonresident_fallback_result
+
+    # K-1 pass-through income (business entities Phase B) checked BEFORE
+    # entity-level tax below -- a question mentioning both an entity type
+    # ("K-1 from my S-corp") and K-1 language must be answered as the
+    # INDIVIDUAL's personal tax on the pass-through income, not the
+    # ENTITY's own tax, so this needs first look (also defended inside
+    # entity_tax.py itself via K1_EXCLUDE_TERMS, in case ordering ever
+    # changes).
+    k1_grantor_trust_result = _income_k1_grantor_trust_answer(question, base)
+    if k1_grantor_trust_result:
+        return k1_grantor_trust_result
+
+    k1_result = _income_k1_answer(conn, question, base)
+    if k1_result:
+        return k1_result
+
+    k1_missing_fs_result = _income_k1_missing_fs_answer(question, base)
+    if k1_missing_fs_result:
+        return k1_missing_fs_result
+
+    k1_fallback_result = _income_k1_fallback_answer(question, base)
+    if k1_fallback_result:
+        return k1_fallback_result
+
+    # Entity-level business tax (Ring 3, business entities Phase A) checked
+    # HERE too, same defensive-early reasoning as the paths above --
+    # entity-tax vocabulary (LLC/S-corp/partnership) is already excluded
+    # from the generic wage-only path's COMPLEXITY_EXCLUDE, but this
+    # dedicated path needs first look to actually ANSWER rather than just
+    # correctly avoid answering.
+    entity_result = _entity_tax_answer(conn, question, base)
+    if entity_result:
+        return entity_result
+
+    entity_missing_income_result = _entity_tax_missing_income_answer(question, base)
+    if entity_missing_income_result:
+        return entity_missing_income_result
+
+    entity_ambiguous_result = _entity_tax_ambiguous_type_answer(question, base)
+    if entity_ambiguous_result:
+        return entity_ambiguous_result
+
+    # Fiduciary-level trust/estate tax (Ring 3, trust/estate Phase A)
+    # checked HERE, after entity_tax -- "trust"/"estate" vocabulary
+    # doesn't collide with entity_tax's own type checks (S-corp/LLC/
+    # partnership), and this path defends against the K-1 path itself
+    # (fiduciary_tax.detect_fiduciary_compute_signal refuses to fire on
+    # K-1 language), so ordering relative to the K-1 checks above doesn't
+    # matter for correctness, only for which specific message a
+    # mixed-signal question gets.
+    fiduciary_grantor_result = _fiduciary_tax_grantor_redirect_answer(question, base)
+    if fiduciary_grantor_result:
+        return fiduciary_grantor_result
+
+    fiduciary_result = _fiduciary_tax_answer(conn, question, base)
+    if fiduciary_result:
+        return fiduciary_result
+
+    fiduciary_missing_residency_result = _fiduciary_tax_missing_residency_answer(question, base)
+    if fiduciary_missing_residency_result:
+        return fiduciary_missing_residency_result
+
+    fiduciary_missing_amount_result = _fiduciary_tax_missing_amount_answer(question, base)
+    if fiduciary_missing_amount_result:
+        return fiduciary_missing_amount_result
+
+    fiduciary_fallback_result = _fiduciary_tax_fallback_answer(question, base)
+    if fiduciary_fallback_result:
+        return fiduciary_fallback_result
 
     amount = _amount(question)
     compute_result = _income_compute_answer(conn, question, amount, base)
@@ -1367,6 +2741,18 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if ycta_result:
         return ycta_result
 
+    fytc_result = _income_fytc_answer(conn, question, base)
+    if fytc_result:
+        return fytc_result
+
+    fytc_age_disqualified_result = _income_fytc_age_disqualified_answer(question, base)
+    if fytc_age_disqualified_result:
+        return fytc_age_disqualified_result
+
+    fytc_incomplete_result = _income_fytc_checklist_incomplete_answer(question, base)
+    if fytc_incomplete_result:
+        return fytc_incomplete_result
+
     renters_result = _income_renters_credit_answer(conn, question, amount, base)
     if renters_result:
         return renters_result
@@ -1374,6 +2760,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_renters_fs_result = _income_renters_credit_missing_fs_answer(question, amount, base)
     if missing_renters_fs_result:
         return missing_renters_fs_result
+
+    hoh_result = _income_hoh_determination_answer(question, base)
+    if hoh_result:
+        return hoh_result
+
+    hoh_incomplete_result = _income_hoh_checklist_incomplete_answer(question, base)
+    if hoh_incomplete_result:
+        return hoh_incomplete_result
 
     rows = _income_route_candidates(conn, qv)
     topic_result = _income_topic_answer(conn, question, compose, rows, base)
@@ -1408,14 +2802,67 @@ def _answer_income(conn, question: str, compose: bool, qv):
 def _effective_rate(conn, taxable, base_rate, question, location):
     """Pick the rate to apply. Only standard-rate (7.25%) taxable items get
     localized; partial/special-rate items are left alone; exempt stays 0.
-    Returns (eff_rate, rate_basis, loc_label)."""
-    loc = location or local_rates.detect(conn, question)
-    loc_info = local_rates.resolve(conn, loc) if loc else None
+    Returns (eff_rate, rate_basis, loc_label).
+
+    Tries ADDRESS-LEVEL precision first (district_rates.py, a live CDTFA
+    API call) when the question contains a full street address -- only
+    then, since it's the one case city/county granularity (local_rates.py)
+    can't resolve on its own (a sub-city special tax district). Falls
+    through to the existing city/county path on ANY failure: no address
+    detected, the API call fails/times out, or the geocode confidence
+    isn't high enough to trust -- district_rates.lookup_by_address already
+    encodes all of that as a plain None, so this function doesn't need its
+    own special-casing beyond "if it returned something, use it; if not,
+    fall back exactly as before this feature existed." A near-boundary
+    AMBIGUOUS result (two different rates plausible) is used but flagged
+    in rate_basis rather than silently picked, matching this project's
+    disclosure-over-silent-guessing pattern elsewhere (HOH/credit branches,
+    conditional sales verdicts)."""
     if not taxable:
         return base_rate, "exempt", None
     if base_rate in SPECIAL_RATES:
+        loc = location or local_rates.detect(conn, question)
+        loc_info = local_rates.resolve(conn, loc) if loc else None
         return base_rate, "special/partial rate; local district tax not auto-applied", \
             (loc_info["label"] if loc_info else None)
+
+    addr = district_rates.detect_address(question)
+    if addr:
+        street, city, zip_code = addr
+        addr_result = district_rates.lookup_by_address(street, city, zip_code)
+        if addr_result:
+            if addr_result["ambiguous"]:
+                alt = addr_result["alternates"][0]
+                basis = (
+                    f"address-level rate for {addr_result['formatted_address']} "
+                    f"({addr_result['jurisdiction']}) -- NOTE: this address is near a tax-"
+                    f"rate-area boundary; a nearby area (\"{alt['jurisdiction']}\") has a "
+                    f"different rate of {alt['rate'] * 100:.3f}%, so confirm the exact rate "
+                    f"with CDTFA if precision matters ({addr_result['citation']})"
+                )
+            else:
+                basis = (
+                    f"address-level rate for {addr_result['formatted_address']} "
+                    f"({addr_result['jurisdiction']}, {addr_result['citation']})"
+                )
+            return addr_result["rate"], basis, addr_result["formatted_address"]
+        # address detected but the API couldn't confidently resolve it --
+        # fall back to the CITY already parsed out of the address, not
+        # local_rates.detect(question) below: its "at <city>" regex greedily
+        # grabs the STREET portion instead of the city when both follow
+        # "at" in the same question ("at 123 Main St, Sacramento" ->
+        # captures "123 Main St"), which would otherwise drop a perfectly
+        # resolvable city rate all the way down to the statewide base.
+        loc_info = local_rates.resolve(conn, city)
+        if loc_info:
+            return loc_info["rate"], \
+                f"combined rate for {loc_info['label']} (as of {loc_info['as_of']})", \
+                loc_info["label"]
+        # city itself doesn't resolve either (e.g. a non-CA city) -- fall
+        # through to city/county below, same as if no address was given.
+
+    loc = location or local_rates.detect(conn, question)
+    loc_info = local_rates.resolve(conn, loc) if loc else None
     if loc_info:
         return loc_info["rate"], \
             f"combined rate for {loc_info['label']} (as of {loc_info['as_of']})", \
@@ -1449,6 +2896,28 @@ def _answer(question: str, compose: bool = True, location: str = None,
                 cross_result = _income_topic_by_key(iconn, compose, cross_topic, base)
             if cross_result:
                 return cross_result
+
+        # Military retirement pay / DoD Survivor Benefit Plan annuity: same
+        # early-intercept reasoning as the cross-domain override above, but
+        # routed through the FULL income pipeline (not a bare topic lookup)
+        # since the real verdict is AGI-dependent (see
+        # income_credits.compute_military_retirement_exclusion), not a
+        # fixed answer. Found live, via income_item_sweep.py, right after
+        # this topic was added: sales' own military-vehicle/federal-area
+        # rule cluster ("sales_on_federal_areas", "vehicle_sale_to_
+        # servicemember"...) sits close enough in embedding space to ANY
+        # "military"-flavored question that "is my military retirement
+        # taxable in California" was confidently (and nonsensically)
+        # answered as 7.25% SALES TAX on the stated AGI dollar figure,
+        # treating income as if it were a purchase price. Sales tries
+        # first by default, so without this intercept the income-domain
+        # military retirement exclusion would never even be tried.
+        if income_credits.detect_military_retirement_signal(question):
+            qv_military = _embed(question)
+            with income_db.get_conn() as iconn:
+                military_result = _answer_income(iconn, question, compose, qv_military)
+            if military_result:
+                return military_result
 
         branches, qv = [], None
         route_dist = None

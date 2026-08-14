@@ -82,6 +82,7 @@ EITC_TABLE_PATH = os.path.join(os.path.dirname(__file__), "caleitc_table_2025.js
 EITC_TABLE_CITATION = "FTB 2025 Earned Income Tax Credit Table (FTB 3514 Booklet)"
 EITC_BOOKLET_URL = "https://www.ftb.ca.gov/forms/2025/2025-3514-booklet.html"
 YCTC_CITATION = "FTB 2025 Form 3514, Part VII (Young Child Tax Credit)"
+FYTC_CITATION = "FTB 2025 Form 3514, Step 10 / Part IX (Foster Youth Tax Credit)"
 RENTERS_CREDIT_CITATION = "FTB Nonrefundable Renter's Credit"
 RENTERS_CREDIT_URL = "https://www.ftb.ca.gov/file/personal/credits/nonrefundable-renters-credit.html"
 # (max_amount, income_ceiling) by filing status -- flat amount below the
@@ -145,6 +146,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "unemployment_compensation",
         "topic_label": "Unemployment compensation",
+        "schedule_ca_line": "Pt I Sec B line 7",
         "taxable": False,
         "summary": ("Unemployment compensation is nontaxable for California state "
                      "purposes (though it IS federally taxable) -- make a subtraction "
@@ -156,6 +158,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "social_security_income",
         "topic_label": "Social Security income",
+        "schedule_ca_line": "Pt I Sec A line 6",
         "taxable": False,
         "summary": ("California excludes Social Security income (and equivalent "
                      "Railroad Retirement benefits) from state taxable income entirely "
@@ -167,6 +170,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "paid_family_leave",
         "topic_label": "Paid Family Leave (PFL) benefits",
+        "schedule_ca_line": "Pt I Sec B line 7",
         "taxable": False,
         "summary": ("California Paid Family Leave (PFL) benefits are nontaxable for "
                      "California state purposes (though included in federal AGI) -- "
@@ -195,6 +199,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "gambling_winnings",
         "topic_label": "Gambling and lottery winnings (general)",
+        "schedule_ca_line": "Pt I Sec B line 8b",
         "taxable": True,
         "summary": ("All gambling winnings are taxable in California, including "
                      "winnings from raffles, horse races, casinos, and lotteries run "
@@ -209,6 +214,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "california_lottery_winnings",
         "topic_label": "California Lottery winnings",
+        "schedule_ca_line": "Pt I Sec B line 8b",
         "taxable": False,
         "summary": ("California does not tax winnings from the California Lottery, "
                      "including SuperLotto, Powerball, and Mega Millions when played "
@@ -222,6 +228,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "us_government_bond_interest",
         "topic_label": "Interest on U.S. government obligations",
+        "schedule_ca_line": "Pt I Sec A line 2",
         "taxable": False,
         "summary": ("Interest from U.S. Treasury bills, notes, and bonds, U.S. "
                      "savings bonds, and other direct obligations of the United "
@@ -236,6 +243,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "out_of_state_municipal_bond_interest",
         "topic_label": "Interest on out-of-state municipal bonds",
+        "schedule_ca_line": "Pt I Sec A line 2",
         "taxable": True,
         "summary": ("Unlike federal law, which exempts interest from municipal "
                      "bonds issued by ANY state, California taxes interest from "
@@ -249,6 +257,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "hsa_contributions_and_earnings",
         "topic_label": "Health Savings Account (HSA) contributions and earnings",
+        "schedule_ca_line": "Pt I Sec A line 1h/2, Sec B line 8e/8f, Sec C line 13 (cluster)",
         "taxable": True,
         "summary": ("California does not conform to federal law on Health Savings "
                      "Accounts (HSAs): contributions are NOT deductible for "
@@ -351,6 +360,7 @@ INCOME_TOPICS = [
     {
         "topic_key": "alimony_spousal_support",
         "topic_label": "Alimony / spousal support",
+        "schedule_ca_line": "Pt I Sec B line 2a / Sec C line 19a",
         "taxable": None,
         "summary": ("Whether alimony (spousal support) is taxable in California depends "
                      "on WHEN the divorce or separation agreement was executed -- it is "
@@ -368,6 +378,136 @@ INCOME_TOPICS = [
                      "needed. Please specify when the agreement was executed for an exact "
                      "answer."),
         "citation": "FTB 2025 Instructions for Schedule CA (540) -- Line 2a, Alimony Received",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
+    # --- Schedule CA Tier 1 conformity expansion (2026-08-11, same session,
+    # user said "yes start it" to the scoping plan) -- 5 new topics chosen
+    # from a full ~90-item inventory (see schedule_ca_inventory.py) for
+    # being both common/high-value AND answerable as a single topic verdict
+    # with no new compute engine, unlike the deferred IRA-basis/CFC-GILTI/
+    # business-owner items. All figures verified directly against FTB's
+    # 2025 Schedule CA (540) instructions (full ~104K-char document fetched
+    # via browser and read in its entirety by a research agent, not
+    # sampled/summarized secondhand).
+    {
+        "topic_key": "state_tax_refund",
+        "topic_label": "State income tax refund",
+        "schedule_ca_line": "Pt I Sec B line 1",
+        "taxable": False,
+        "summary": ("California does not tax a refund of state income tax, even if "
+                     "you included it in federal income because you itemized "
+                     "deductions in the year you paid it (the federal 'tax benefit "
+                     "rule'). Subtract the refund amount on Schedule CA (540), Part I, "
+                     "Section B, line 1, column B. This only applies to state income "
+                     "tax refunds -- it does not cover other refunds or rebates."),
+        "citation": "FTB 2025 Instructions for Schedule CA (540) -- Line 1, Taxable Refunds",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
+    {
+        "topic_key": "mortgage_forgiveness_debt_relief",
+        "topic_label": "Mortgage forgiveness / cancellation of debt on a principal residence",
+        "schedule_ca_line": "Pt I Sec B line 8c",
+        "taxable": True,
+        "summary": ("California does NOT conform to the federal exclusion for "
+                     "cancellation-of-debt (COD) income from the discharge of "
+                     "mortgage debt on your principal residence, for discharges "
+                     "occurring after December 31, 2017. If you excluded this income "
+                     "on your federal return, you must add it back as taxable income "
+                     "on Schedule CA (540), Part I, Section B, line 8c, column C -- "
+                     "even though it was federally tax-free."),
+        "citation": "FTB 2025 Instructions for Schedule CA (540) -- Line 8c, Cancellation of Debt",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
+    {
+        "topic_key": "educator_expenses",
+        "topic_label": "Educator expenses deduction",
+        "schedule_ca_line": "Pt I Sec C line 11",
+        "taxable": True,
+        "summary": ("California does not conform to the federal educator expenses "
+                     "deduction (the out-of-pocket classroom supplies deduction "
+                     "available to eligible K-12 teachers and other educators). "
+                     "Whatever amount you deducted federally on this line must be "
+                     "added back for California purposes on Schedule CA (540), Part "
+                     "I, Section C, line 11, column B -- it does not reduce your "
+                     "California taxable income the way it reduces your federal AGI."),
+        "citation": "FTB 2025 Instructions for Schedule CA (540) -- Line 11, Educator Expenses",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
+    {
+        "topic_key": "military_retirement_exclusion",
+        "topic_label": "Military retirement pay / DoD Survivor Benefit Plan exclusion",
+        "schedule_ca_line": "Pt I Sec A line 5a/5b",
+        # taxable=None deliberately (same precedent as alimony_spousal_support):
+        # the real answer is conditional on stated AGI (a hard eligibility
+        # cliff, not a gradual phase-out) -- a blanket False would be
+        # confidently wrong for a high earner over the $125k/$250k limit.
+        # engine._income_military_retirement_answer computes the real,
+        # AGI-specific verdict when AGI+filing status are stated; this topic
+        # is the fallback for a bare question with neither.
+        "taxable": None,
+        "summary": ("NEW for tax years 2025 through 2029: California allows a "
+                     "qualified taxpayer to exclude from income federal retirement "
+                     "pay received for service in the uniformed services, and/or "
+                     "annuity payments under a U.S. Department of Defense Survivor "
+                     "Benefit Plan, up to $20,000 for EACH type of payment (so up to "
+                     "$40,000 total if you receive both). This exclusion only "
+                     "applies if your federal AGI does not exceed $125,000 (single, "
+                     "HOH, or MFS) or $250,000 (married filing jointly, or a "
+                     "surviving spouse) -- it is an eligibility cutoff, not a "
+                     "gradual phase-out: if your AGI exceeds the limit, none of the "
+                     "exclusion applies and the pay is fully taxable, same as "
+                     "federal. The exclusion sunsets after tax year 2029. Please "
+                     "state your AGI and filing status for an exact answer."),
+        "citation": "R&TC Sections 17132.9 and 17132.10; FTB 2025 Instructions for Schedule CA (540) -- Line 5a/5b",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
+    },
+    # Wildfire/disaster settlement family: 6 separately-named settlement/
+    # relief programs (Kincade, Zogg, Thomas/Woolsey, Fire Victims Trust,
+    # Chiquita Canyon, wildfire mitigation payments) plus a general
+    # provision, ALL sharing the identical mechanic (excluded from CA
+    # income, though federally taxable) -- modeled as ONE topic rather than
+    # 7 separate rows, since the verdict and the underlying "why" are
+    # identical for all of them; the summary enumerates each program's own
+    # citation and sunset date individually so a question naming a specific
+    # fire still gets a precise, correctly-dated answer. Deliberately
+    # EXCLUDES the "Federal Disaster Tax Relief Act" wildfire relief payment
+    # (line 8z) -- that one is the OPPOSITE mechanic (CA does NOT conform to
+    # THAT federal exclusion, so it stays taxable) and would be actively
+    # wrong to fold into this "generally excluded" topic.
+    {
+        "topic_key": "wildfire_disaster_settlement_exclusion",
+        "topic_label": "Wildfire and disaster settlement payment exclusion",
+        "schedule_ca_line": "Pt I Sec B line 8z (multiple programs)",
+        "taxable": False,
+        "summary": ("California excludes from income amounts received from several "
+                     "specific, named wildfire-related settlements and disaster "
+                     "programs, even though these amounts may be taxable federally. "
+                     "Each program has its own sunset date -- the exclusion no "
+                     "longer applies once a program's window closes: "
+                     "(1) Kincade Fire (2019, PG&E settlement) -- tax years 2020 "
+                     "through 2027, R&TC 17139.2. "
+                     "(2) Zogg Fire (2020, PG&E settlement) -- tax years 2020 "
+                     "through 2027, R&TC 17139.3. "
+                     "(3) Thomas Fire (2017) and Woolsey Fire (2018) Southern "
+                     "California Edison settlements -- through tax year 2026, "
+                     "R&TC 17138.6. "
+                     "(4) Fire Victims Trust (Camp Fire / PG&E bankruptcy) -- "
+                     "through tax year 2027, R&TC 17138.5. "
+                     "(5) Chiquita Canyon elevated temperature landfill event "
+                     "payments -- tax years 2024 through 2028, R&TC 17157.5. "
+                     "(6) California Wildfire Mitigation Financial Assistance "
+                     "Program payments -- tax years 2024 through 2028, R&TC 17138.8. "
+                     "(7) General qualified wildfire disaster settlement payments "
+                     "(any settlement entity, in connection with a qualified "
+                     "California wildfire disaster) -- tax years 2021 through 2029, "
+                     "R&TC 17138.7. If you received a settlement in a prior year "
+                     "and included it as income, you can file an amended return "
+                     "within the normal statute of limitations. NOTE: this does NOT "
+                     "cover general federal wildfire relief payments under the "
+                     "Federal Disaster Tax Relief Act of 2023 -- California does "
+                     "NOT conform to that specific federal exclusion, so those "
+                     "payments remain taxable for California."),
+        "citation": "R&TC Sections 17138.5, 17138.6, 17138.7, 17138.8, 17139.2, 17139.3, 17157.5",
         "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
     },
 ]
@@ -422,12 +562,13 @@ def load():
     for t in INCOME_TOPICS:
         conn.execute(
             "INSERT INTO income_tax_topics (topic_key, topic_label, taxable, tax_year, "
-            "citation, summary, source_url, tier, status, confidence) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,'consumer','verified',1.0) "
+            "citation, summary, source_url, schedule_ca_line, tier, status, confidence) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'consumer','verified',1.0) "
             "ON CONFLICT (topic_key, tax_year) DO UPDATE SET "
-            "taxable=EXCLUDED.taxable, summary=EXCLUDED.summary, citation=EXCLUDED.citation",
+            "taxable=EXCLUDED.taxable, summary=EXCLUDED.summary, citation=EXCLUDED.citation, "
+            "schedule_ca_line=EXCLUDED.schedule_ca_line",
             (t["topic_key"], t["topic_label"], t["taxable"], TAX_YEAR,
-             t["citation"], t["summary"], t["source_url"]))
+             t["citation"], t["summary"], t["source_url"], t.get("schedule_ca_line")))
         n_topics += 1
 
     # Young Child Tax Credit reference numbers -- filing_status=NULL (applies
@@ -444,6 +585,24 @@ def load():
         "1189,27425,32900,21.71,TRUE,%s,%s,CURRENT_DATE)",
         (TAX_YEAR, YCTC_CITATION, EITC_BOOKLET_URL))
     n_credits = 1
+
+    # Foster Youth Tax Credit -- verified against FTB's 2025 3514 Booklet,
+    # Step 10 (eligibility) and Part IX Line 34/36-39 (arithmetic): SAME
+    # phase-out formula and numbers as YCTC ($1,189 max, $27,425 threshold,
+    # $21.71 per $100 over) -- confirmed by reading the actual worksheet
+    # lines, not assumed from the two credits sharing a dollar figure.
+    # filing_status=NULL, same NULL != NULL delete-then-insert reasoning as YCTC.
+    conn.execute(
+        "DELETE FROM ca_income_credits WHERE credit_key='foster_youth_tax_credit' AND tax_year=%s",
+        (TAX_YEAR,))
+    conn.execute(
+        "INSERT INTO ca_income_credits (credit_key, credit_label, tax_year, filing_status, "
+        "max_amount, phase_out_start, phase_out_end, phase_out_rate, refundable, citation, "
+        "source_url, as_of) "
+        "VALUES ('foster_youth_tax_credit','Foster Youth Tax Credit (FYTC)',%s,NULL,"
+        "1189,27425,32900,21.71,TRUE,%s,%s,CURRENT_DATE)",
+        (TAX_YEAR, FYTC_CITATION, EITC_BOOKLET_URL))
+    n_credits += 1
 
     # Nonrefundable Renter's Credit -- one row per filing status (real value,
     # ON CONFLICT works fine here since filing_status is never NULL for this

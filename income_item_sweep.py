@@ -102,6 +102,110 @@ ITEMS = [
     ("what is my yctc if I make $32,900",
      {"status": "answered", "domain": "income", "category": "young_child_tax_credit", "tax": 1.00}),
 
+    # --- Foster Youth Tax Credit (FTB 2025 Form 3514, Step 10 / Part IX) --
+    # reclassified from "Bucket 1 -- structurally impossible" once it was
+    # clear the barrier was missing facts, not multi-turn intake. SAME
+    # phase-out formula/numbers as YCTC ($1,189 max, $27,425 threshold,
+    # $21.71 per $100) verified against Part IX's own Line 34/36-39
+    # arithmetic -- but gated on TWO extra facts (age 18-25, foster care
+    # at 13+) PLUS a real CalEITC-eligibility check (via lookup_eitc_table,
+    # not a bare claim). $9,975/2 children under the $27,425 threshold ->
+    # full $1,189 (below threshold, no phase-out).
+    ("what is my foster youth tax credit if I am 20 years old, was in foster care at age 15, and made $9,975 with 2 qualifying children",
+     {"status": "answered", "domain": "income", "category": "foster_youth_tax_credit", "tax": 1189.00}),
+    # non-numeric "since age 13" phrasing, reordered clauses (income+children
+    # stated BEFORE age/foster-care) -- both orderings must agree.
+    ("what is my fytc if I am 22, in foster care since age 13, and made $100 with no children",
+     {"status": "answered", "domain": "income", "category": "foster_youth_tax_credit", "tax": 1189.00}),
+    ("what is my fytc if I made $9,975 with 2 children and am 20 years old and was in foster care at age 15",
+     {"status": "answered", "domain": "income", "category": "foster_youth_tax_credit", "tax": 1189.00}),
+    # a stated age OUTSIDE 18-25 (once foster-care-at-13+ already checks
+    # out) is a clean, definitive "no" -- not a generic defer.
+    ("what is my fytc if I am 30 years old, was in foster care at age 15, and made $9,975 with 2 children",
+     {"status": "answered", "domain": "income", "category": "foster_youth_tax_credit", "tax": 0.00}),
+    # income too high to be CalEITC-eligible at all -> FYTC denied on the
+    # FIRST gate (Step 10's own requirement), not the phase-out arithmetic.
+    # Also the case that caught the sharpest bug this pass: three
+    # clustered numbers (age 20, foster-care-age 15, income $50,000) --
+    # the shared distance-based _amount_near picked the WRONG number
+    # (age, not income) for the keyword "made", and even a from-scratch
+    # nearest-number fix hit an exact tie between the two candidate ages;
+    # only clause-splitting (isolating "foster care at age 15" as its own
+    # clause) resolved it reliably.
+    ("what is my fytc if I am 20, was in foster care at age 15, and made $50,000 with no children",
+     {"status": "answered", "domain": "income", "category": "foster_youth_tax_credit", "tax": 0.00}),
+    # missing age/foster-care facts entirely -> specific checklist, not a
+    # generic defer.
+    ("what is my foster youth tax credit if I made $9,975 with 2 children",
+     {"status": "needs_review", "domain": "income"}),
+    # age stated but foster-care-at-13+ fact missing -> still incomplete
+    # (a bare "was a foster youth" alone doesn't establish the age-13 cutoff).
+    ("what is my fytc if I am 20 and made $9,975 with 2 children",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Senior Head of Household Credit (Code 163) -- min(2% of AGI,
+    # $1,860), with the $98,652 AGI ceiling as a SEPARATE eligibility
+    # gate verified against the 2025 Form 540 instructions' own worksheet
+    # (not just the credit page's looser "income" wording). $40,000 AGI
+    # -> 2%*40000=$800 (under the cap).
+    ("what is my senior head of household credit if I am 67, qualified for head of household last year, my qualifying person died this year, and my AGI is $40,000",
+     {"status": "answered", "domain": "income", "category": "senior_hoh_credit", "tax": 800.00}),
+    # $95,000 AGI: 2%*95000=$1,900 (over the $1,860 cap) but STILL under
+    # the $98,652 eligibility ceiling -> capped at exactly $1,860, not
+    # disqualified (the sharpest wrinkle this credit has).
+    ("what is my senior head of household credit if I am 70, qualified for head of household 2 years ago, my qualifying person died last year, and my AGI is $95,000",
+     {"status": "answered", "domain": "income", "category": "senior_hoh_credit", "tax": 1860.00}),
+    # $100,000 AGI -- AT/ABOVE the $98,652 ceiling -> disqualified
+    # entirely (not just capped).
+    ("what is my senior head of household credit if I am 70, qualified for head of household 2 years ago, my qualifying person died last year, and my AGI is $100,000",
+     {"status": "answered", "domain": "income", "category": "senior_hoh_credit", "tax": 0.00}),
+    # explicit under-65 age (other facts check out) -> clean "no", not a
+    # generic defer.
+    ("what is my senior hoh credit if I am 60, qualified for head of household last year, my qualifying person died this year, and my AGI is $40,000",
+     {"status": "answered", "domain": "income", "category": "senior_hoh_credit", "tax": 0.00}),
+    # missing the "qualified for HOH before"/"qualifying person died"
+    # facts -> specific checklist, not a generic defer.
+    ("what is my senior head of household credit if I am 67 and my AGI is $40,000",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Joint Custody Head of Household Credit (Code 170) / Credit for
+    # Dependent Parent (Code 173) -- SHARE the same 30%-of-tax-liability-
+    # capped-at-$610 formula (verified against the 2025 Form 540
+    # instructions' shared worksheet), different eligibility checklists.
+    # Also the pass that caught a real bug in the MOST shared function in
+    # the income domain: income_brackets.detect_filing_status's plain
+    # "married" substring check ALSO matched inside "unmarried", and
+    # combined with "joint custody" (containing "joint"), was wrongly
+    # detected as MFJ filing status -- fixed with a \bmarried\b word-
+    # boundary check that benefits every income compute path, not just
+    # this one. ALSO required reordering _answer_income() -- these 3
+    # credits' own names contain "head of household" (read as a genuine
+    # filing-status statement) and their natural "my tax liability is $X"
+    # phrasing collides with income_brackets.COMPUTE_TRIGGERS, so they're
+    # now checked BEFORE the generic wage-only bracket path rather than
+    # after every other credit.
+    ("I have joint custody of my daughter, pay more than half her expenses, was unmarried, she lived with me 180 days, and my tax liability is $2,000 -- what is my joint custody head of household credit?",
+     {"status": "answered", "domain": "income", "category": "joint_custody_hoh_credit", "tax": 600.00}),
+    # married but lived apart from spouse ALL YEAR is the alternative
+    # marital-status branch (not just "unmarried") -- and a high enough
+    # tax liability to hit the $610 cap.
+    ("I have joint custody of my son, pay more than half his expenses, was married but lived apart from my spouse all year, he lived with me 200 days, and my tax liability is $5,000 -- what is my joint custody hoh credit?",
+     {"status": "answered", "domain": "income", "category": "joint_custody_hoh_credit", "tax": 610.00}),
+    # residency days OUTSIDE 146-219 (too few -- child lived with them
+    # LESS than the required range) -> clean "no", not a generic defer.
+    ("I have joint custody of my daughter, pay more than half her expenses, was unmarried, she lived with me 100 days, and my tax liability is $2,000 -- what is my joint custody head of household credit?",
+     {"status": "answered", "domain": "income", "category": "joint_custody_hoh_credit", "tax": 0.00}),
+    # missing facts (no residency days, no marital status stated) ->
+    # specific checklist.
+    ("what is my joint custody head of household credit if I have joint custody of my son and pay more than half his expenses",
+     {"status": "needs_review", "domain": "income"}),
+    ("what is my dependent parent credit if I am married filing separately, my spouse was not a member of my household for the last six months, I paid more than half my mothers household expenses, and my tax liability is $2,000",
+     {"status": "answered", "domain": "income", "category": "dependent_parent_credit", "tax": 600.00}),
+    # wrong filing status stated (MFJ, not MFS) -> not this credit's
+    # shape at all -> specific checklist.
+    ("what is my dependent parent credit if I am married filing jointly and my tax liability is $2,000",
+     {"status": "needs_review", "domain": "income"}),
+
     # --- Nonrefundable Renter's Credit (flat amount, hard income ceiling) ---
     ("what is my renters credit if I make $40,000 single",
      {"status": "answered", "domain": "income", "category": "renters_credit", "tax": 60.00}),
@@ -124,12 +228,29 @@ ITEMS = [
     # --- second conformity batch (verified against FTB pages fetched via
     # browser this pass; income_route_eval.py confirmed the gambling/lottery
     # same-domain collision pair resolves correctly at every threshold) ---
+    # status flipped answered -> conditional (2026-08-10): collision_audit.py
+    # --domain=income flagged gambling_winnings/california_lottery_winnings
+    # as a live HIGH-risk undisclosed collision (0.008 apart, opposite
+    # verdicts) -- confirmed as a REAL bug: before this fix, a question
+    # naming the CA Lottery specifically was confidently answered TAXABLE
+    # with no mention of the CA-specific lottery exclusion, because
+    # _income_topic_answer never called _find_branches at all. Now it does
+    # (see engine._income_topic_answer/_income_branch_info), and these two
+    # topics correctly disclose each other as alternates -- same accepted
+    # "working as intended" pattern as sales tax's own MEDIUM-bucket close
+    # pairs, not a regression.
     ("are gambling winnings taxable in california",
-     {"status": "answered", "domain": "income", "category": "gambling_winnings", "taxable": True}),
+     {"status": "conditional", "domain": "income", "category": "gambling_winnings", "taxable": True}),
     ("are california lottery winnings taxable",
-     {"status": "answered", "domain": "income", "category": "california_lottery_winnings", "taxable": False}),
+     {"status": "conditional", "domain": "income", "category": "california_lottery_winnings", "taxable": False}),
+    # status flipped answered -> conditional (2026-08-10), same branch-
+    # disclosure fix: "US government bond interest" (exempt) vs "out-of-
+    # state MUNICIPAL bond interest" (taxable) is a genuinely easy real-world
+    # mix-up -- both read as "bonds from somewhere other than California" to
+    # a layperson, but CA taxes them oppositely. Disclosing the distinction
+    # here is a valuable catch, not noise.
     ("is interest from us treasury bonds taxable in california",
-     {"status": "answered", "domain": "income", "category": "us_government_bond_interest", "taxable": False}),
+     {"status": "conditional", "domain": "income", "category": "us_government_bond_interest", "taxable": False}),
     ("is interest from an out of state municipal bond taxable in california",
      {"status": "answered", "domain": "income", "category": "out_of_state_municipal_bond_interest", "taxable": True}),
     ("are hsa contributions taxable in california",
@@ -142,6 +263,67 @@ ITEMS = [
     ("can I file as head of household in california",
      {"status": "answered", "domain": "income", "category": "head_of_household_eligibility"}),
     ("am I eligible for head of household filing status",
+     {"status": "answered", "domain": "income", "category": "head_of_household_eligibility"}),
+
+    # --- Head of Household DETERMINATION (not just the criteria) -- a
+    # genuine yes/no verdict when ALL required facts are stated in one
+    # question. Reclassified from "Bucket 1 -- structurally impossible"
+    # after realizing the real barrier was missing facts, not multi-turn
+    # intake -- the same "trust the input" principle as every other
+    # compute path. Verified against FTB's actual 2025 Form 3532
+    # Instructions before building; deliberately narrow (unmarried the
+    # entire year, taxpayer's OWN child, not a qualifying relative, no
+    # "considered unmarried" separated-spouse complexity).
+    ("I was unmarried all year, paid more than half the cost of keeping up my home, and my 10 year old son lived with me all year -- do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": True}),
+    # a full-time student age 19-23 still passes the age test.
+    ("I was unmarried all year, paid more than half the cost of keeping up my home, and my 20 year old daughter who is a full-time student lived with me all year -- am I eligible for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": True}),
+    # a clean, simple negative: married all year is a hard gate,
+    # independent of every other fact.
+    ("I was married all year, do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": False}),
+    # age 25, not a full-time student -- an explicit age-test failure is
+    # its own clean "no" once everything else already checks out (not a
+    # generic defer).
+    ("I was unmarried all year, paid more than half the cost of keeping up my home, and my 25 year old son lived with me all year -- do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": False}),
+    # a stated age WITHOUT "years old" phrasing ("he is 16") -- found
+    # missing via testing, the age regex originally required "N years
+    # old"/"yo" explicitly.
+    ("my son lived with me all year, I was unmarried all year, and I paid more than half the cost of keeping up my home. He is 16. Do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": True}),
+    # negation-aware full-time-student check -- "NOT a full-time student"
+    # contains the literal substring "full-time student", which a naive
+    # check would have wrongly counted as satisfying the rescue.
+    ("I was unmarried all year, my son is 22 and NOT a full-time student, he lived with me all year, and I paid more than half the cost of keeping up my home -- do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": False}),
+    # RDP-only phrasing (no literal "unmarried") -- a real, plausible way
+    # to state the marital-status fact in California specifically.
+    ("I was not in a registered domestic partnership all year, paid more than half the cost of keeping up my home, and my daughter, 14 years old, lived with me for 200 days -- do I qualify for head of household?",
+     {"status": "answered", "domain": "income", "category": "head_of_household_determination", "taxable": True}),
+    # a qualifying-person who is a RELATIVE (not the taxpayer's own
+    # child) -- real complexity (gross-income ceiling, community
+    # property) this v1 deliberately defers rather than guesses.
+    ("I was unmarried all year and my nephew lived with me, do I qualify for head of household?",
+     {"status": "needs_review"}),
+    # a married-but-separated taxpayer -- the "considered unmarried"
+    # sub-test, real complexity this v1 deliberately defers.
+    ("I was separated from my spouse and my son lived with me, do I qualify for head of household?",
+     {"status": "needs_review"}),
+    # a partial checklist (some facts stated, not all) gets a SPECIFIC
+    # checklist message, not a generic defer -- same pattern as every
+    # other missing-fact clarifying message in this project.
+    ("I was unmarried all year and my 15 year old son lived with me all year, do I qualify for head of household?",
+     {"status": "needs_review", "domain": "income"}),
+    # precision guard: a BARE "am I eligible"/"can I file as HOH" question
+    # with ZERO personal facts must keep falling through to the existing
+    # informational topic (already tested above), NOT get intercepted by
+    # the new checklist-incomplete message -- caught as a real regression
+    # while building this feature (every vague HOH question was
+    # downgraded from "answered" informational to "needs_review" before
+    # the fix requiring at least one stated personal fact first).
+    ("what are the requirements to file head of household",
      {"status": "answered", "domain": "income", "category": "head_of_household_eligibility"}),
 
     # --- workers' comp / SDI: sourced via the actual statute (R&TC 17131,
@@ -306,11 +488,86 @@ ITEMS = [
     # choice, so this defers with a specific explanation instead of guessing.
     ("how much california tax do I owe on $80,000 in wages with $12,000 in itemized deductions married filing separately",
      {"status": "needs_review", "domain": "income"}),
-    # above the 2025 AGI limitation threshold ($252,203 single) -- itemized
-    # deductions get REDUCED by a worksheet this path doesn't implement, so
-    # it correctly defers rather than silently skipping the reduction.
+    # above the 2025 AGI limitation threshold ($252,203 single) -- Tier 2
+    # (2026-08-11, same session): the Line 29 phase-out worksheet is now
+    # IMPLEMENTED (was: silently deferred). Verified by hand: excess AGI
+    # cap = (600000-252203)*0.06 = 20867.82, 80%-of-itemized cap =
+    # 50000*0.8 = 40000 -> the smaller (excess-AGI cap) binds -> reduced
+    # itemized = 50000-20867.82 = 29132.18 -> taxable = 600000-29132.18 =
+    # 570867.82 -> tax = 52774.21 (matches the live engine exactly).
     ("how much california tax do I owe on $600,000 in wages with $50,000 in itemized deductions filing single",
-     {"status": "needs_review"}),
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 52774.21}),
+    # a much higher AGI where the OTHER side of the min() binds instead:
+    # 80% of itemized (10000*0.8=8000) is smaller than 6% of excess AGI
+    # ((2000000-252203)*0.06=104867.82) -> reduction=8000 (capped, not the
+    # excess-AGI figure) -> reduced itemized=2000 -> below the $5,706
+    # standard deduction, so the STANDARD deduction is used instead
+    # (greater-of rule) -> taxable=2000000-5706=1994294.
+    ("how much california tax do I owe on $2,000,000 in wages with $10,000 in itemized deductions filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket"}),
+    # SALT automation: $30,000 itemized total, $12,000 of which is stated
+    # state income tax -- California disallows that portion entirely
+    # (Schedule CA Line 5a), so the CA-usable itemized total is $18,000
+    # (still > the $5,706 standard deduction) -> taxable=100000-18000=82000
+    # -> tax=4064.64 (hand-verified against the live engine).
+    ("how much california tax do I owe on $100,000 in wages with $30,000 in itemized deductions, of which $12,000 was state income tax, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4064.64}),
+    # SALT amount large enough to push the CA-usable itemized total BELOW
+    # the standard deduction -- must fall back to the standard deduction,
+    # not a negative/near-zero itemized figure: $20,000 itemized - $18,000
+    # SALT = $2,000 CA-usable, less than $5,706 standard -> standard wins
+    # -> taxable=80000-5706=74294.
+    ("how much california tax do I owe on $80,000 in wages with $20,000 in itemized deductions, of which $18,000 was state income tax, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # mortgage interest addback (Schedule CA Line 8): $30,000 itemized +
+    # $8,000 disallowed-federally-but-CA-allowed mortgage interest =
+    # $38,000 CA-usable -> taxable=100000-38000=62000 -> tax=2344.05
+    # (hand-verified against the live engine).
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions, of which $8,000 in mortgage interest was limited by the federal cap, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2344.05}),
+    # SALT + mortgage addback together (4 clustered dollar amounts, each
+    # with its own distinct anchor phrase): $30,000 itemized - $12,000 SALT
+    # + $8,000 mortgage addback = $26,000 CA-usable -> taxable=74000 ->
+    # tax=3320.64.
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions, $12,000 of which was state income tax, and $8,000 in mortgage interest was disallowed, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3320.64}),
+    # misc itemized 2% floor reinstatement (Schedule CA Lines 19-22):
+    # $30,000 itemized + $5,000 tax-prep-fee-style misc expenses, floor =
+    # 2% of $100,000 AGI = $2,000, reinstated = $5,000-$2,000 = $3,000 ->
+    # $33,000 CA-usable -> taxable=100000-33000=67000 -> tax=2744.05
+    # (verified via direct function call, no Gemini needed for the math).
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions and $5,000 in tax preparation fees filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2744.05}),
+    # all 5 clustered figures together (income, itemized, SALT, mortgage
+    # addback, misc expenses): itemized=30000-12000(SALT)+8000(mortgage)=
+    # 26000, misc floor=2%*100000=2000, reinstated=5000-2000=3000,
+    # final=29000 -> taxable=71000 -> tax=3064.05.
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions, $12,000 of which was state income tax, $8,000 in mortgage interest was disallowed, and $5,000 in unreimbursed employee expenses, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3064.05}),
+    # charitable contribution AGI cap (Schedule CA Lines 11-12): $60,000
+    # itemized incl. $55,000 charitable, CA cap = 50% of $100,000 AGI =
+    # $50,000, disallowed = $5,000 -> itemized=55000 -> taxable=45000 ->
+    # tax=1234.89 (verified via direct function call).
+    ("how much tax do I owe on $100,000 in wages with $60,000 in itemized deductions and $55,000 in charitable contributions filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1234.89}),
+    # charitable contribution well under the cap -- no adjustment, same as
+    # the plain-itemized baseline with these numbers: taxable=70000 ->
+    # tax=2984.05.
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions and $5,000 in charitable contributions filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2984.05}),
+    # SALT cap addback (Schedule CA Line 5e), Tier 2's 7th and final item:
+    # $30,000 itemized + $8,000 that was cut off by the federal $40k/$20k
+    # SALT cap, which California doesn't conform to -> $38,000 CA-usable
+    # -> taxable=100000-38000=62000 -> tax=2344.05 (same shape/numbers as
+    # the mortgage-addback-only case, since both are a simple +$8,000 to
+    # the itemized total -- verified via direct function call).
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions and $8,000 that was over the federal salt limit filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2344.05}),
+    # SALT (income tax) + SALT cap addback together: $30,000 - $12,000
+    # (income tax, Line 5a) + $8,000 (cap addback, Line 5e) = $26,000 ->
+    # taxable=74000 -> tax=3320.64.
+    ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions, $12,000 of which was state income tax, and $8,000 that was over the federal salt limit, filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3320.64}),
     # a third, unrelated dollar amount makes the question ambiguous (which
     # figure is income?) -- correctly defers rather than guessing.
     ("how much california tax do I owe on $80,000 in wages with $12,000 in itemized deductions and $5,000 in bonus filing single",
@@ -426,8 +683,13 @@ ITEMS = [
     # gambling_winnings topic verdict instead.
     ("how much california tax do I owe on $60,000 including money I gambled and won single",
      {"status": "answered", "domain": "income", "category": "gambling_winnings", "taxable": True}),
+    # status flipped answered -> conditional (2026-08-10): same branch-
+    # disclosure fix as the gambling/lottery cases above -- "winnings from
+    # betting" shares the word "winnings" with california_lottery_winnings'
+    # own text closely enough to disclose the CA-lottery exception, a
+    # genuinely useful catch (the asker never said which kind of winnings).
     ("how much california tax do I owe on $60,000 in winnings from betting single",
-     {"status": "answered", "domain": "income", "category": "gambling_winnings", "taxable": True}),
+     {"status": "conditional", "domain": "income", "category": "gambling_winnings", "taxable": True}),
     # CREDIT_COMPLEXITY_EXCLUDE had NO freelance/gig-work terms at all --
     # before the fix, CalEITC computed on self-employment income as if it
     # were simple wage-only earned income, skipping FTB 3514's required
@@ -468,6 +730,268 @@ ITEMS = [
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3087.57}),
     ("how much california tax do I owe on $80,000 in wages with $1,500 in capital losses married filing separately",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3208.48}),
+
+    # --- Schedule CA Tier 1 conformity expansion (2026-08-11, same session,
+    # user said "yes start it" to the scoping plan) -- 5 new topics/rules,
+    # verified against FTB's 2025 Schedule CA (540) instructions. See
+    # schedule_ca_inventory.py for the full ~90-item research inventory and
+    # which tier each belongs to. ---
+    ("do I have to pay california tax on my state income tax refund",
+     {"status": "answered", "domain": "income", "category": "state_tax_refund", "taxable": False}),
+    ("is cancellation of my mortgage debt on my house taxable in california",
+     {"status": "answered", "domain": "income", "category": "mortgage_forgiveness_debt_relief", "taxable": True}),
+    ("can I deduct classroom supplies I bought as a teacher on my california taxes",
+     {"status": "answered", "domain": "income", "category": "educator_expenses", "taxable": True}),
+    ("I received a wildfire disaster settlement payment, is that taxable in california",
+     {"status": "answered", "domain": "income", "category": "wildfire_disaster_settlement_exclusion", "taxable": False}),
+    ("I got money from the kincade fire pge settlement, is that taxable in california",
+     {"status": "answered", "domain": "income", "category": "wildfire_disaster_settlement_exclusion", "taxable": False}),
+    # Military retirement -- an AGI eligibility cliff, not a flat exclusion:
+    # under the $125k/$250k limit -> excluded; over it -> fully taxable.
+    ("my AGI is $100,000, filing single, is my military retirement pay taxable in California",
+     {"status": "answered", "domain": "income", "category": "military_retirement_exclusion", "taxable": False}),
+    ("my AGI is $150,000, filing single, is my military retirement pay taxable in California",
+     {"status": "answered", "domain": "income", "category": "military_retirement_exclusion", "taxable": True}),
+    ("my AGI is $260,000, married filing jointly, is my DoD survivor benefit plan annuity taxable in California",
+     {"status": "answered", "domain": "income", "category": "military_retirement_exclusion", "taxable": True}),
+    # bare question, no AGI stated -- falls through to the informational
+    # topic (taxable=None, conditional prose), not a guessed verdict.
+    ("is my military retirement taxable in California",
+     {"status": "answered", "domain": "income", "category": "military_retirement_exclusion", "taxable": None}),
+
+    # --- Ring 3, Phases 1-2: nonresident tax (Form 540NR), the first
+    # genuinely new compute engine built this session (2026-08-11) --
+    # unlike Schedule CA Tier 1/2, this reuses income_brackets.
+    # compute_ca_tax() for the "tax on total income" step but is a
+    # different apportionment mechanism, for a population never handled
+    # before. Verified against FTB's 2025 Form 540NR booklet + Schedule CA
+    # (540NR) instructions directly. Phase 1 scope: full-year nonresident,
+    # wage-only, 100%-or-0% CA-source only. Phase 2 (added 2026-08-13)
+    # extends the same formula/compute function to any stated partial
+    # CA-source dollar figure -- see income_nonresident.py's docstring. ---
+    # 100% CA-source: a nonresident who worked entirely in CA owes
+    # IDENTICAL tax to a resident with the same wages (hand-verified
+    # algebraic identity, and confirmed live: matches the plain resident
+    # $80k/single case exactly, tax=3347.98).
+    ("I am a nonresident of California who worked entirely in California, how much CA tax do I owe on $80,000 in wages filing single",
+     {"status": "answered", "domain": "income", "category": "nonresident_wage_tax", "tax": 3347.98}),
+    # 0% CA-source: no CA tax owed on wages earned entirely outside CA.
+    ("I am a nonresident of California and did not work in California at all, how much CA tax do I owe on $80,000 in wages filing single",
+     {"status": "answered", "domain": "income", "category": "nonresident_wage_tax", "tax": 0.0}),
+    # Phase 2: a stated PARTIAL CA-source dollar figure. Hand-derived:
+    # $100k total wages, single standard deduction $5,706 -> total taxable
+    # $94,294 -> tax_on_total $5,207.98 -> effective rate 5.5231...% ->
+    # $30k CA-source, prorated deduction $1,711.80 -> CA taxable $28,288.20
+    # -> ca_tax = $1,562.39 (verified via direct compute-function call too).
+    ("I am a nonresident of California. I earned $100,000 in wages filing single, $30,000 of which was earned working in California. How much CA tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "nonresident_wage_tax", "tax": 1562.39}),
+    # Phase 2, different anchor phrasing for the same mechanic.
+    ("I am a nonresident of California. $45,000 in california-source wages, out of $90,000 total wages, filing single. How much CA tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "nonresident_wage_tax", "tax": 2138.99}),
+    # Phase 2 safety: a nonsensical split (stated CA-source exceeds total
+    # wages) must defer, not silently clamp or crash.
+    ("I am a nonresident of California. I earned $50,000 in wages filing single, $80,000 of which was earned working in California. How much CA tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+    # nonresident signal present but CA-source fraction/amount ambiguous --
+    # correctly defers with a specific clarifying message rather than
+    # guessing.
+    ("I am a nonresident of California, how much CA tax do I owe on $80,000 in wages filing single",
+     {"status": "needs_review", "domain": "income"}),
+    # missing filing status -- correctly defers (mirrors every other
+    # compute path's missing-filing-status pattern).
+    ("I am a nonresident of California who worked entirely in California, how much CA tax do I owe on $80,000 in wages",
+     {"status": "needs_review", "domain": "income"}),
+    # regression check: an ordinary resident wage question (no nonresident
+    # signal at all) must be completely unaffected -- same $80k/single
+    # case, same answer as the plain wage-only path always gave.
+    ("how much california tax do I owe on $80,000 in wages filing single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+
+    # --- Ring 3, Phase 3 (added 2026-08-13, same session): part-year
+    # residents. Verified against FTB Pub 1100 -- SAME formula as the
+    # full-year-nonresident case above (confirmed: Form 540NR/Schedule CA
+    # (540NR) are shared by both populations), only the MEANING of the
+    # stated CA-source figure changes (resident-period income in full,
+    # plus only the CA-source share of nonresident-period income). Reuses
+    # income_nonresident.compute_nonresident_wage_tax completely unchanged
+    # -- zero new math, only new detection/wording. No ALL/NONE phrase
+    # shortcut for this population (doesn't reduce cleanly, see
+    # income_nonresident.py docstring), so a stated dollar figure is
+    # always required. ---
+    # stated CA-source figure: hand-derived via direct compute_nonresident_
+    # wage_tax(conn, 90000, 60000, 'single') call = 2851.99.
+    ("I was a part-year resident of California. I earned $90,000 in wages for the year, $60,000 of which was California-source. How much CA tax do I owe filing single?",
+     {"status": "answered", "domain": "income", "category": "part_year_resident_wage_tax", "tax": 2851.99}),
+    # missing CA-source figure (only total wages stated) -- defers with the
+    # part-year-specific clarifying message, not the full-year one.
+    ("I was a part-year resident of California filing single. I earned $90,000 in wages for the year. How much CA tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+    # invalid split (CA-source exceeds total wages) -- must defer via the
+    # fallback catch-all, not fall through to the generic RESIDENT bracket
+    # path (the exact bug class the Phase 2 fallback fix was built for).
+    ("I was a part-year resident of California filing single. I earned $50,000 in wages for the year, $80,000 of which was California-source. How much CA tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+    # ALL/NONE phrase shortcut deliberately NOT honored for part-year
+    # residents -- correctly defers rather than misapplying the full-year
+    # nonresident shortcut.
+    ("I was a part-year resident of California filing single. I worked entirely in California. How much CA tax do I owe on $80,000 in wages?",
+     {"status": "needs_review", "domain": "income"}),
+    # missing filing status -- correctly defers (mirrors every other
+    # compute path's missing-filing-status pattern).
+    ("I was a part-year resident of California. I earned $90,000 in wages for the year, $60,000 of which was California-source. How much CA tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Ring 3, business entities Phase A (added 2026-08-13, same
+    # session): ENTITY-LEVEL California annual/minimum tax for S-corps,
+    # LLCs, and partnerships -- the first feature that taxes the ENTITY
+    # itself rather than an individual's personal return. All figures
+    # hand-verified against FTB's business-entity pages -- see
+    # load_entity_tax_data.py. Phase B (K-1 pass-through to the owner's
+    # personal return) is a deliberately separate, not-yet-built feature.
+    # ---
+    # LLC: $800 annual tax + tiered fee. $300k -> $900 fee tier -> $1,700 total.
+    ("how much franchise tax does my LLC owe on $300,000 in California income",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 1700.0}),
+    # S-corp: $800 + 1.5% of net income. $200k net -> $3,000 income tax + $800 = $3,800.
+    ("how much tax does my S-corp owe on $200,000 in net California income",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 3800.0}),
+    # financial S-corp: 3.5% rate, not 1.5%. $200k net -> $7,000 + $800 = $7,800.
+    ("how much tax does my financial S corporation owe on $200,000 in net California income",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 7800.0}),
+    # LP: flat $800 regardless of income, no income figure needed at all.
+    ("how much annual tax does my limited partnership owe",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 800.0}),
+    # LLP: same flat $800 as LP.
+    ("what tax does my limited liability partnership owe",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 800.0}),
+    # general partnership: $0, the one entity type that owes nothing.
+    ("how much tax does my general partnership owe",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 0.0}),
+    # S-corp first-year waiver: $800 floor waived (permanent 2020+ rule),
+    # but the 1.5% income tax itself still applies -- $200k net -> $3,000
+    # only, not $3,800.
+    ("how much tax does my newly formed S-corp owe on $200,000 in net California income this first year",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 3000.0}),
+    # LLC first-year: NO waiver (AB 85 expired for 2024+) -- must still be
+    # the full $800 + fee, not silently waived like the S-corp case above.
+    ("how much franchise tax does my newly formed LLC owe on $300,000 in California income this first year",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 1700.0}),
+    # LLC missing income figure -- defers, doesn't guess a fee tier.
+    ("how much franchise tax does my LLC owe",
+     {"status": "needs_review", "domain": "income"}),
+    # ambiguous bare "partnership" -- general owes $0, LP/LLP owe $800, so
+    # this must not guess between them.
+    ("how much tax does my partnership owe",
+     {"status": "needs_review", "domain": "income"}),
+
+    # C-corp (added 2026-08-13, same session, "knock out C-corp first"):
+    # bare "corporation" defaults to C-corp (S-corp is the marked/elected
+    # case, already checked first). $200k net -> 8.84% = $17,680 + $800 =
+    # $18,480.
+    ("how much tax does my corporation owe on $200,000 in net California income",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 18480.0}),
+    # financial corporation: 10.84% rate, not 8.84%. $200k net -> $21,680 + $800 = $22,480.
+    ("how much tax does my financial corporation owe on $200,000 in net California income",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 22480.0}),
+    # C-corp first-year: waiver applies here too (re-verified this session
+    # as a GENERAL corporation rule, not S-corp-specific) -- $800 floor
+    # waived, 8.84% income tax still applies -> $17,680 only, not $18,480.
+    ("how much tax does my newly formed corporation owe on $200,000 in net California income this first year",
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 17680.0}),
+
+    # --- Ring 3, business entities Phase B (added 2026-08-13, same
+    # session): K-1 pass-through income to the INDIVIDUAL owner's personal
+    # return. Confirmed via FTB research: K-1 income flows through the
+    # EXACT SAME standard-deduction/bracket engine already built for
+    # wages (Schedule CA (540) Line 5, no special rate) -- zero new tax
+    # math, only new detection/wording. K-1-only scope (no wage mixing
+    # yet). ---
+    # K-1-only: $80,000 K-1 income, single -- must match the plain resident
+    # $80k/single wage-tax figure exactly, since the underlying math is
+    # identical (verified via direct compute_k1_ca_tax/compute_ca_tax
+    # cross-check before this case was added).
+    ("I received a K-1 from my partnership showing $80,000 in income, filing single. How much tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 3347.98}),
+    # THE CRITICAL COLLISION CASE: mentions BOTH an entity type ("S-corp")
+    # and K-1 language -- must be answered as the INDIVIDUAL's personal
+    # tax on $50,000 of pass-through income (category
+    # k1_pass_through_income_tax), NEVER as what the S-CORP ENTITY itself
+    # owes (which would incorrectly compute $800+1.5%*50000=$1,550 under
+    # category entity_annual_tax) -- this is the exact bug class the
+    # K1_EXCLUDE_TERMS defense-in-depth fix in entity_tax.py + this path's
+    # early placement in _answer_income() were built to prevent.
+    ("I received a K-1 from my S-corp showing $50,000 in income, filing single. How much tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 1192.53}),
+    # missing filing status -- correctly defers with the K-1-specific message.
+    ("I received a K-1 from my LLC showing $80,000 in income. How much tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+    # missing dollar amount -- correctly defers via the fallback catch-all,
+    # not via entity_tax (confirmed entity_tax never fires on K-1 language).
+    ("I received a K-1 from my S-corp. How much tax do I owe filing single?",
+     {"status": "needs_review", "domain": "income"}),
+    # mixed wage + K-1 income -- genuinely more complex than this pass's
+    # scope, correctly defers rather than guessing which figure is which.
+    ("I have $50,000 in wages and received a K-1 showing $30,000 in income, filing single. How much tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Trust/estate income Phase B (added 2026-08-13, same session):
+    # trust/estate K-1s extend the SAME K-1 path above -- confirmed via
+    # FTB research that trust/estate K-1 income lands on the identical
+    # Schedule CA (540) Line 5, so no new compute engine was needed, just
+    # broader trigger vocabulary + a tax-exempt-interest disclosure. ---
+    # trust K-1: must match the business K-1 $80k/single figure exactly,
+    # since the underlying math is identical.
+    ("I received a K-1 from my trust showing $80,000 in income, filing single. How much tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 3347.98}),
+    # estate K-1.
+    ("I received a K-1 from an estate showing $50,000 in income, filing single. How much tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 1192.53}),
+    # GRANTOR trust -- must redirect (income taxed directly to the grantor
+    # via FTB's simplified reporting, not a real K-1), never compute a
+    # number under this path.
+    ("I received a K-1 from my grantor trust showing $80,000 in income, filing single. How much tax do I owe?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Trust/estate Phase A (added 2026-08-13, same session):
+    # FIDUCIARY-level tax on RETAINED (undistributed) trust/estate income
+    # -- what the trust/estate ITSELF owes, genuinely different from
+    # Phase B's beneficiary K-1 tax. Confirmed via FTB research: reuses
+    # income_brackets.compute_ca_tax's Schedule X bracket step UNCHANGED
+    # (California's 541 rate schedule is numerically identical to
+    # individual Single/MFS), only new reference data is the small
+    # exemption credit ($1 trust / $10 estate / $144 qualified disability
+    # trust), subtracted as a CREDIT after the bracket computation. ---
+    # trust: hand-verified via direct compute_fiduciary_tax(conn, 50000,
+    # 'trust') call = 1533.89 (tax_before_credit 1534.89 minus $1 credit).
+    ("How much tax does my trust owe on $50,000 of retained income? All trustees are California residents.",
+     {"status": "answered", "domain": "income", "category": "fiduciary_tax", "tax": 1533.89}),
+    # estate: same $50k retained income, $10 credit instead of $1 ->
+    # 1524.89, confirming the two entity types differ by exactly $9.
+    ("How much tax does my estate owe on $50,000 of retained income? All trustees are California residents.",
+     {"status": "answered", "domain": "income", "category": "fiduciary_tax", "tax": 1524.89}),
+    # full distribution shortcut: $0 fiduciary tax, no residency assertion
+    # or amount needed at all -- the distribution deduction offsets all
+    # taxable income, beneficiary is taxed instead via K-1 (Phase B).
+    ("My trust distributed all of its income to beneficiaries, does it owe any California tax?",
+     {"status": "answered", "domain": "income", "category": "fiduciary_tax", "tax": 0.0}),
+    # GRANTOR trust -- must redirect here too (reuses the same
+    # GRANTOR_TRUST_TERMS constant as Phase B's K-1 redirect), never
+    # compute a fiduciary-level number for a disregarded entity.
+    ("How much tax does my grantor trust owe on $50,000 of retained income? All trustees are California residents.",
+     {"status": "needs_review", "domain": "income"}),
+    # missing CA-residency bail-out assertion -- correctly defers rather
+    # than assuming the trust qualifies.
+    ("How much tax does my trust owe on $50,000 of retained income?",
+     {"status": "needs_review", "domain": "income"}),
+    # missing retained-income amount -- correctly defers.
+    ("How much tax does my trust owe? All trustees are California residents.",
+     {"status": "needs_review", "domain": "income"}),
+    # K-1 defense-in-depth regression: a K-1 question mentioning a trust
+    # must NEVER be answered by the fiduciary-tax path (it would compute
+    # what the TRUST owes, not what the BENEFICIARY owes) -- confirmed
+    # this still routes to k1_pass_through_income_tax, not fiduciary_tax.
+    ("I received a K-1 from my trust showing $50,000 in income, how much tax do I owe filing single?",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 1192.53}),
 
     # --- genuinely out of scope (neither domain covers it) ---
     ("what is the property tax rate in los angeles", {"status": "needs_review"}),
