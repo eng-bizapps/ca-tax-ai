@@ -70,6 +70,23 @@ COMPLEXITY_EXCLUDE = {
     "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
     "investments inside my hsa", "hsa investment sale",
     "hsa investment loss", "hsa capital loss", "loss inside my hsa",
+    # added alongside the foreign-earned-income-exclusion feature: a
+    # general-purpose addback that can accompany any income type, same
+    # reasoning as IRA deduction/HSA gain -- without this, a stated Form
+    # 2555 excluded amount would be silently dropped by the plain path.
+    "foreign earned income exclusion", "foreign earned income and housing exclusion",
+    "form 2555", "foreign housing exclusion", "excluded foreign earned income",
+    "excluded under form 2555",
+    # added alongside the Subpart F/GILTI features, same general-purpose
+    # reasoning: both are unconditional CFC-inclusion subtractions that
+    # can accompany any other income type -- without this, a stated
+    # inclusion amount would be silently dropped by the plain path.
+    "subpart f income", "subpart f inclusion", "subpart f",
+    "irc section 951(a)", "irc 951(a)", "section 951(a) inclusion",
+    "951(a) inclusion",
+    "gilti", "global intangible low-taxed income", "global intangible low taxed income",
+    "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
+    "form 8992",
 }
 COMPUTE_TRIGGERS = {
     "tax bracket", "how much tax", "how much california tax",
@@ -225,6 +242,33 @@ SE_COMPLEXITY_EXCLUDE = {
     "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
     "investments inside my hsa", "hsa investment sale",
     "hsa investment loss", "hsa capital loss", "loss inside my hsa",
+    # added alongside the fringe-benefit-restoration feature, same
+    # reasoning as cannabis 280E: without this, a fringe-benefit
+    # restoration figure stated alongside self-employment net profit
+    # would be silently ignored, computing SE tax on the federal (TCJA-
+    # limited) profit alone. NOT added to K1_COMPLEXITY_EXCLUDE -- same
+    # as cannabis 280E, the entity absorbs this before issuing the K-1.
+    "fringe benefit expense", "fringe benefit expenses", "employer fringe benefit",
+    "employee parking", "employee transit", "employee transportation benefit",
+    "employee transportation fringe", "on-premises meals", "on premises meals",
+    "employee meal benefit", "fringe benefit limitation",
+    "entertainment expense limitation",
+    # added alongside the foreign-earned-income-exclusion feature, same
+    # general-purpose reasoning as IRA deduction/HSA gain -- a Form 2555
+    # excluded amount can accompany self-employment income just as
+    # easily as wages.
+    "foreign earned income exclusion", "foreign earned income and housing exclusion",
+    "form 2555", "foreign housing exclusion", "excluded foreign earned income",
+    "excluded under form 2555",
+    # added alongside the Subpart F/GILTI features, same general-purpose
+    # reasoning as IRA deduction/HSA gain -- a CFC-inclusion subtraction
+    # can accompany self-employment income just as easily as wages.
+    "subpart f income", "subpart f inclusion", "subpart f",
+    "irc section 951(a)", "irc 951(a)", "section 951(a) inclusion",
+    "951(a) inclusion",
+    "gilti", "global intangible low-taxed income", "global intangible low taxed income",
+    "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
+    "form 8992",
 }
 
 # Federal Schedule SE mechanics (California has no separate self-employment
@@ -293,7 +337,8 @@ def compute_se_tax(net_profit: float):
 
 def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
                                      tax_year: int = DEFAULT_TAX_YEAR,
-                                     cannabis_280e_expenses: float = None):
+                                     cannabis_280e_expenses: float = None,
+                                     fringe_benefit_restoration: float = None):
     """net_profit is Schedule C NET PROFIT (revenue minus business expenses),
     not federal AGI or taxable income -- computing directly from net profit
     (rather than from an already-computed federal figure) means the federal
@@ -317,7 +362,19 @@ def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
     unlicensed cannabis businesses get NO restoration (federal 280E fully
     applies for CA purposes too in that case), so the plain path with this
     parameter omitted is already correct for them, same as before this
-    parameter existed."""
+    parameter existed.
+
+    `fringe_benefit_restoration`, if given, is the amount of employer
+    fringe-benefit expense (entertainment, employee parking/transit,
+    on-premises meals) disallowed or limited FEDERALLY under TCJA's IRC
+    Section 274 changes, which California does NOT conform to -- see
+    FRINGE_BENEFIT_TERMS's module note below. Same direction and same
+    "trust the input" precedent as cannabis_280e_expenses: SUBTRACTED
+    from AGI, se_tax untouched (federal Schedule SE still uses the full,
+    un-restored net_profit). Only meaningful for a Schedule-C filer who
+    is themselves an EMPLOYER (paid these benefits TO employees, not
+    just themselves) -- see FRINGE_BENEFIT_TERMS's own scope-gating
+    vocabulary."""
     if net_profit is None or net_profit <= 0:
         return None
     se = compute_se_tax(net_profit)
@@ -329,12 +386,17 @@ def compute_self_employment_ca_tax(conn, net_profit: float, filing_status: str,
         if cannabis_280e_expenses < 0:
             return None
         agi = agi - cannabis_280e_expenses
+    if fringe_benefit_restoration is not None:
+        if fringe_benefit_restoration < 0:
+            return None
+        agi = agi - fringe_benefit_restoration
     taxable_income = max(0.0, agi - dedu["amount"])
     calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
     if not calc:
         return None
     return {**calc, "net_profit": net_profit, "se_tax": se["se_tax"],
             "cannabis_280e_expenses": cannabis_280e_expenses,
+            "fringe_benefit_restoration": fringe_benefit_restoration,
             "half_se_deduction": se["half_deduction"], "agi": agi,
             "standard_deduction": dedu["amount"]}
 
@@ -446,6 +508,21 @@ K1_COMPLEXITY_EXCLUDE = {
     "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
     "investments inside my hsa", "hsa investment sale",
     "hsa investment loss", "hsa capital loss", "loss inside my hsa",
+    # added alongside the foreign-earned-income-exclusion feature, same
+    # reasoning as IRA deduction: no entity-level absorption applies to
+    # a personal Form 2555 exclusion either.
+    "foreign earned income exclusion", "foreign earned income and housing exclusion",
+    "form 2555", "foreign housing exclusion", "excluded foreign earned income",
+    "excluded under form 2555",
+    # added alongside the Subpart F/GILTI features, same reasoning as IRA
+    # deduction: no entity-level absorption applies to a personal CFC-
+    # inclusion subtraction either.
+    "subpart f income", "subpart f inclusion", "subpart f",
+    "irc section 951(a)", "irc 951(a)", "section 951(a) inclusion",
+    "951(a) inclusion",
+    "gilti", "global intangible low-taxed income", "global intangible low taxed income",
+    "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
+    "form 8992",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -1871,6 +1948,545 @@ def detect_capital_loss_carryover_missing_filing_status(question: str) -> bool:
     if not _capital_loss_carryover_base_signal_ok(q):
         return False
     return detect_filing_status(question) is None
+
+
+# --- Employer fringe-benefit expense restoration (Ring 3 extension,
+# Schedule CA (540) Part I Section B Line 3, "Business Income or (Loss)")
+# -- verified against FTB's 2025 Instructions for Schedule CA (540)
+# directly: "Limitation on employer's deduction for fringe benefit
+# expenses -- Under federal law, deductions for entertainment expenses
+# are disallowed; the current 50% limit on the deductibility of business
+# meals is expanded to meals provided through an in-house cafeteria or
+# otherwise on the premises of the employer; deductions for employee
+# transportation fringe benefits (e.g., parking and mass transit) are
+# denied; and no deduction is allowed for transportation expenses that
+# are the equivalent of commuting for employees... California law does
+# not conform. Figure the difference between the amounts allowed using
+# federal law and California law."
+#
+# STRUCTURALLY IDENTICAL to cannabis 280E: TCJA's IRC Section 274 changes
+# disallow/limit these employer deductions federally; California kept
+# the pre-TCJA, more permissive rule -- reuses
+# compute_self_employment_ca_tax's fringe_benefit_restoration parameter
+# (same restoration-subtracted-from-AGI mechanic, se_tax untouched).
+#
+# NOT affected by SB 711's conformity-date change (2015->2025): the
+# CURRENT (post-SB-711) 2025 instructions still explicitly list this as
+# non-conforming, confirming California's own IRC Section 274 rule
+# persists as a specific decoupling rather than simply lagging the old
+# conformity date -- same pattern as QSBS and cannabis 280E.
+#
+# SCOPE-GATING MATTERS HERE MORE THAN USUAL: this only applies to a
+# Schedule-C filer who is themselves an EMPLOYER -- these are benefits
+# paid TO EMPLOYEES (entertainment, employee parking/transit, on-
+# premises meals), not something a sole owner with no staff can incur.
+# Trigger vocabulary is deliberately built around "employee"/"employer"-
+# flavored fringe-benefit phrasing rather than a bare "fringe benefit"
+# mention, to keep that population boundary honest. Also bundles THREE
+# federally-distinct sub-limitations (entertainment: 0% federal vs. CA's
+# old-law rate; transportation fringe: 0% federal vs. full CA deduction;
+# on-premises meals: 50% federal vs. CA's old-law rate) into one trusted
+# figure -- same "trust the input" precedent as every other add-on
+# figure in this codebase, not attempting to re-derive the federal
+# limitation from raw per-category facts.
+FRINGE_BENEFIT_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 3"
+FRINGE_BENEFIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+FRINGE_BENEFIT_TERMS = {
+    "fringe benefit expense", "fringe benefit expenses", "employer fringe benefit",
+    "employee parking", "employee transit", "employee transportation benefit",
+    "employee transportation fringe", "on-premises meals", "on premises meals",
+    "employee meal benefit", "fringe benefit limitation",
+    "entertainment expense limitation",
+}
+
+
+def _fringe_benefit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in FRINGE_BENEFIT_TERMS):
+        return False
+    other_exclude = SE_COMPLEXITY_EXCLUDE - FRINGE_BENEFIT_TERMS
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_fringe_benefit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'self-
+    employment net profit with a stated employer fringe-benefit
+    restoration' question. Mirrors detect_self_employment_signal's shape,
+    reusing SE_COMPLEXITY_EXCLUDE minus this path's own trigger terms,
+    same pattern as cannabis 280E."""
+    q = question.lower()
+    if not _fringe_benefit_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_fringe_benefit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _fringe_benefit_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+# --- CA non-conformity to IRC Section 469(c)(7), the federal "real
+# estate professional" exception (Ring 3 extension, Schedule CA (540)
+# Line 5 / FTB Form 3801) -- verified against FTB's 2025 Instructions for
+# Form 3801: "California law does not conform to federal law for
+# material participation in rental real estate activities. Beginning in
+# 1994, and for federal purposes only, rental real estate activities
+# conducted by persons in real property business are not automatically
+# treated as passive activities... For California purposes, all rental
+# activities are passive activities."
+#
+# THE MECHANIC: federally, a taxpayer who qualifies as a real estate
+# professional (material participation in the specific rental activity,
+# per IRC 469(c)(7)) gets that activity's loss treated as NONPASSIVE --
+# fully deductible, no cap. California refuses this recharacterization:
+# the SAME activity stays PASSIVE for CA, so the loss falls back to the
+# ordinary $25,000 active-participation allowance with its $100,000-
+# $150,000 MAGI phase-out (IRC 469(i)) -- CONFIRMED IDENTICAL formula and
+# dollar thresholds to federal Form 8582's own passive rental-loss
+# allowance (FTB 3801: "Generally, California law is the same as federal
+# law concerning PAL limitations" -- CA reuses the federal MAGI figure
+# directly, and federal Form 6198 at-risk mechanics with CA-basis
+# inputs). CA does NOT compute a separate formula; it just refuses the
+# exception that would have exempted the taxpayer from this formula in
+# the first place. The DIFFERENCE (federal fully-allowed loss minus
+# CA-allowed loss) is the Schedule CA (540) Line 5 Column C addition.
+#
+# MFS HANDLING (per FTB 3801's own instructions, mirroring IRC 469(i)(5)
+# exactly): a taxpayer filing MFS who lived apart from their spouse ALL
+# YEAR uses HALVED figures ($12,500 allowance, $50,000-$75,000 phase-out
+# range). An MFS taxpayer who did NOT live apart all year gets NO
+# allowance at all -- $0, full stop, regardless of MAGI. Since this
+# feature can't assume which MFS scenario applies, it requires an
+# explicit "lived apart" statement before computing for MFS; without one,
+# it defers rather than guessing (same "never guess a material fact"
+# discipline as everywhere else in this codebase).
+#
+# NOT MODELED, disclosed: this assumes the rental activity is the
+# taxpayer's ONLY passive activity (no netting against other passive
+# income/losses) and no prior-year suspended-loss carryover -- both
+# genuinely require facts this single-question model doesn't gather.
+# Also assumes MAGI equals the taxpayer's stated other (non-rental)
+# income, same "trust the input, no other adjustments" simplification
+# used throughout this codebase.
+REAL_ESTATE_PRO_CITATION = "FTB 2025 Instructions for Form 3801 -- General Information, Material Participation in Real Property Business"
+REAL_ESTATE_PRO_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3801-instructions.html"
+
+REAL_ESTATE_PRO_TERMS = {
+    "real estate professional", "real property professional",
+    "real estate professional exception", "material participation in real property",
+}
+REAL_ESTATE_PRO_LOSS_TERMS = {"rental loss", "rental losses"}
+MFS_LIVED_APART_TERMS = {"lived apart", "lived separately", "did not live together"}
+MFS_LIVED_TOGETHER_TERMS = {"lived together", "did not live apart"}
+
+
+def _real_estate_pro_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in REAL_ESTATE_PRO_TERMS):
+        return False
+    # subtract "rental"/"renting"/"rented" (this feature's own trigger
+    # vocabulary always co-occurs with rental-activity wording) AND
+    # "estate" (a shared-word collision, not a trigger-phrase overlap --
+    # "real ESTATE professional" contains "estate", which COMPLEXITY_
+    # EXCLUDE also uses to guard against trust/estate income questions;
+    # found live via testing, same self-exclusion bug CLASS as cannabis
+    # 280E's, just a substring-of-a-different-word variant this time).
+    other_exclude = COMPLEXITY_EXCLUDE - {"rental", "renting", "rented", "estate"}
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_real_estate_pro_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'real estate
+    professional with a rental loss' question AND (for MFS specifically)
+    the lived-apart status is resolvable. Returns None for a bare MFS
+    mention with no lived-apart/lived-together statement -- see
+    detect_real_estate_pro_missing_mfs_status for that specific defer."""
+    q = question.lower()
+    if not _real_estate_pro_base_signal_ok(q):
+        return None
+    fs = detect_filing_status(question)
+    if fs == "mfs" and not any(t in q for t in MFS_LIVED_APART_TERMS | MFS_LIVED_TOGETHER_TERMS):
+        return None
+    return fs
+
+
+def detect_real_estate_pro_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _real_estate_pro_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_real_estate_pro_missing_mfs_status(question: str) -> bool:
+    """True iff this is a clearly real-estate-professional-shaped MFS
+    question missing only the lived-apart/lived-together fact -- gets a
+    specific clarifying message instead of a generic defer."""
+    q = question.lower()
+    if not _real_estate_pro_base_signal_ok(q):
+        return False
+    if detect_filing_status(question) != "mfs":
+        return False
+    return not any(t in q for t in MFS_LIVED_APART_TERMS | MFS_LIVED_TOGETHER_TERMS)
+
+
+def compute_real_estate_pro_allowance(magi: float, filing_status: str, lived_apart: bool = False):
+    """The standard $25,000 active-participation rental-loss allowance
+    with its $100,000-$150,000 MAGI phase-out (IRC 469(i)), which
+    California mirrors exactly for a real-estate-professional's rental
+    activity (see module note above for why CA and federal use the
+    IDENTICAL formula here). Returns the CA-ALLOWED dollar amount (before
+    applying it against the stated loss)."""
+    if filing_status == "mfs" and not lived_apart:
+        return 0.0
+    if magi is None or magi < 0:
+        return None
+    if filing_status == "mfs" and lived_apart:
+        base_allowance, phase_start, phase_end = 12500.0, 50000.0, 75000.0
+    else:
+        base_allowance, phase_start, phase_end = 25000.0, 100000.0, 150000.0
+    if magi <= phase_start:
+        return base_allowance
+    if magi >= phase_end:
+        return 0.0
+    return max(0.0, base_allowance - 0.5 * (magi - phase_start))
+
+
+def compute_real_estate_pro_ca_tax(conn, other_income: float, rental_loss: float,
+                                     filing_status: str, lived_apart: bool = False,
+                                     tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income is the taxpayer's non-rental income -- treated as
+    both California AGI (before the rental loss) and Modified AGI for
+    the phase-out test (no other adjustments, same simplification used
+    throughout this codebase). rental_loss is the FEDERAL fully-allowed
+    (nonpassive) loss amount -- CA allows only up to
+    compute_real_estate_pro_allowance's result; the excess is added back
+    for California (Line 5 Column C), not carried forward here (this
+    module doesn't track passive-loss carryovers)."""
+    if other_income is None or other_income < 0:
+        return None
+    if rental_loss is None or rental_loss <= 0:
+        return None
+    ca_allowance = compute_real_estate_pro_allowance(other_income, filing_status, lived_apart)
+    if ca_allowance is None:
+        return None
+    ca_allowed_loss = min(rental_loss, ca_allowance)
+    disallowed = rental_loss - ca_allowed_loss
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = max(0.0, other_income - ca_allowed_loss)
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "rental_loss": rental_loss,
+            "ca_allowance": ca_allowance, "ca_allowed_loss": ca_allowed_loss,
+            "disallowed": disallowed, "standard_deduction": dedu["amount"]}
+
+
+# --- Federal foreign earned income/housing exclusion addback (Ring 3
+# extension, Schedule CA (540) Line 8d, Form 2555) -- verified against
+# FTB's 2025 Instructions for Schedule CA (540) directly: "Federal
+# foreign earned income and housing exclusion -- Enter in column C, as a
+# positive number, the amount excluded from federal income on federal
+# Schedule 1 (Form 1040), line 8d." A flat, unconditional restatement --
+# no worksheet, no partial-addback language (contrast with Line 4a/4b's
+# genuine "if the CA amount is more/less than federal" framing) --
+# confirming California does not conform to IRC Section 911 AT ALL for
+# this Schedule CA (540) RESIDENT-population form.
+#
+# THE "NEEDS RESIDENCY-HISTORY FACTS" ASSUMPTION IN THIS LEDGER ITEM WAS
+# WRONG: Schedule CA (540) is titled "California Adjustments --
+# Residents" -- it ALREADY presupposes full-year CA residency as an entry
+# condition (part-year/nonresident apportionment lives on the SEPARATE
+# Schedule CA (540NR) form/engine, not this one). Within that resident-
+# only scope, CA taxes ALL worldwide income with no exception for
+# foreign-earned amounts, so the addback has no date-based or partial
+# condition -- same stale-assumption pattern already found and corrected
+# for Line 8a's federal NOL addback.
+#
+# SIMPLER THAN QSBS: no offsetting federal figure to reconcile against --
+# the WHOLE excluded amount is simply ADDED to CA income, mirroring the
+# HSA-investment-gain pattern exactly (income + addback figure, no second
+# figure needed).
+FOREIGN_EARNED_INCOME_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 8d"
+FOREIGN_EARNED_INCOME_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+FOREIGN_EARNED_INCOME_TERMS = {
+    "foreign earned income exclusion", "foreign earned income and housing exclusion",
+    "form 2555", "foreign housing exclusion", "excluded foreign earned income",
+    "excluded under form 2555",
+}
+# Narrower than COMPLEXITY_EXCLUDE on purpose -- see
+# _foreign_earned_income_base_signal_ok's comment for why self-employment
+# vocabulary is deliberately NOT here.
+FOREIGN_EARNED_INCOME_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "dependent", "trust", "estate", "gambling", "gambled", "betting",
+    "wagering", "alimony", "pension", "rental", "renting", "rented",
+    "stock", "rsu",
+}
+
+
+def _foreign_earned_income_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in FOREIGN_EARNED_INCOME_TERMS):
+        return False
+    # DELIBERATELY NOT COMPLEXITY_EXCLUDE-derived (same lesson as HSA
+    # investment gain, not IRA deduction): the Form 2555 addback is
+    # unconditional regardless of how the OTHER income was earned --
+    # wages, self-employment, whatever -- so there's no genuine reason to
+    # defer just because self-employment is mentioned, unlike IRA
+    # deduction's real open SE-income-mismatch trigger. A narrower,
+    # purpose-built exclude list instead.
+    if any(t in q for t in FOREIGN_EARNED_INCOME_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_foreign_earned_income_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated Form 2555 excluded amount' question. Mirrors
+    detect_hsa_investment_gain_signal's shape (single addback figure, no
+    offsetting figure needed)."""
+    q = question.lower()
+    if not _foreign_earned_income_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_foreign_earned_income_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _foreign_earned_income_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_foreign_earned_income_ca_tax(conn, other_income: float, excluded_amount: float,
+                                           filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income is the taxpayer's other (non-foreign-excluded) CA
+    income -- e.g. wages -- treated as gross income/AGI before the
+    addback (no other adjustments, same simplification used throughout
+    this codebase). excluded_amount is the amount excluded federally
+    under Form 2555 -- ADDED IN FULL to CA income, since California taxes
+    full-year residents on all worldwide income with no exception (see
+    module note above)."""
+    if other_income is None or other_income < 0:
+        return None
+    if excluded_amount is None or excluded_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = other_income + excluded_amount
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "excluded_amount": excluded_amount,
+            "agi": agi, "standard_deduction": dedu["amount"]}
+
+
+# --- IRC 951(a) Subpart F income inclusion (Schedule CA (540) Line 8n) --
+# California does NOT conform: FTB's own Line 8n instruction states
+# verbatim "California law does not conform" and directs the taxpayer to
+# carry the SAME federal-column amount into column B as a subtraction --
+# no worksheet, no cap, no partial condition. Corroborated by the Line 3
+# (dividends) instruction, which states CA taxes controlled foreign
+# corporation earnings "in the year distributed" -- i.e. CA's baseline is
+# to tax CFC earnings on actual distribution, not on this federal
+# deemed/phantom inclusion. Subpart F (IRC 951(a), enacted 1962) predates
+# TCJA and is a separate, independently-stated non-conformity from GILTI
+# below, not a TCJA-era item.
+#
+# MECHANICALLY THIS FULLY CANCELS, NOT JUST REDUCES: federal AGI already
+# includes the 951(a) inclusion as its own income item (federal AGI =
+# other_income + inclusion_amount); the CA subtraction removes exactly
+# that amount, so CA AGI = other_income, as if the inclusion never
+# existed. This is a real, correct computation (not degenerate) -- it's
+# just that the addition and subtraction happen to net to zero, unlike
+# the FEIE addback above (a one-directional add with no federal
+# counterpart in this codebase's model) or the QSBS/HSA-gain addbacks.
+#
+# "Trust the input" precedent applies as usual: does NOT independently
+# verify >=10% CFC-shareholder/U.S.-shareholder status from raw facts --
+# trusts the taxpayer's stated federal 951(a) inclusion amount as already
+# correct.
+SUBPART_F_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 8n"
+SUBPART_F_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+SUBPART_F_TERMS = {
+    "subpart f income", "subpart f inclusion", "subpart f",
+    "irc section 951(a)", "irc 951(a)", "section 951(a) inclusion",
+    "951(a) inclusion",
+}
+# Narrower than COMPLEXITY_EXCLUDE on purpose -- same lesson as HSA
+# investment gain/foreign earned income: the Subpart F subtraction is
+# unconditional regardless of how the OTHER income was earned, so a bare
+# self-employment mention is not a genuine reason to defer.
+SUBPART_F_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "dependent", "trust", "estate", "gambling", "gambled", "betting",
+    "wagering", "alimony", "pension", "rental", "renting", "rented",
+    "stock", "rsu",
+}
+
+
+def _subpart_f_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in SUBPART_F_TERMS):
+        return False
+    if any(t in q for t in SUBPART_F_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_subpart_f_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated federal Subpart F (951(a)) inclusion' question. Mirrors
+    detect_foreign_earned_income_signal's shape, but SUBTRACTS instead of
+    adds -- California doesn't conform to the federal INCLUSION here, so
+    the stated amount comes back OUT of CA income instead of going in."""
+    q = question.lower()
+    if not _subpart_f_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_subpart_f_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _subpart_f_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_subpart_f_ca_tax(conn, other_income: float, inclusion_amount: float,
+                               filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income is the taxpayer's other California income (e.g.
+    wages), treated as AGI-equivalent and NOT including the federal
+    Subpart F inclusion (no other adjustments, same simplification used
+    throughout this codebase). inclusion_amount is the amount the
+    taxpayer included federally under IRC 951(a) -- federal AGI equals
+    other_income + inclusion_amount, and the CA subtraction removes it in
+    full (California does not conform; see module note above), so CA AGI
+    reduces back down to just other_income."""
+    if other_income is None or other_income < 0:
+        return None
+    if inclusion_amount is None or inclusion_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    federal_agi = other_income + inclusion_amount
+    agi = other_income
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "inclusion_amount": inclusion_amount,
+            "federal_agi": federal_agi, "agi": agi, "standard_deduction": dedu["amount"]}
+
+
+# --- IRC 951A(a) GILTI inclusion (Schedule CA (540) Line 8o) -- same
+# non-conformity pattern as Subpart F above, TCJA-era (2017) instead of
+# pre-existing law: FTB's Line 8o instruction states verbatim "California
+# law does not conform" for GILTI, and this is separately confirmed in
+# the instructions' own "What's New / Federal Tax Reform" TCJA bullet
+# list ("Global intangible low-taxed income (GILTI) under IRC Section
+# 951A"). Same flat, unconditional column-A-to-column-B restatement, no
+# worksheet, no numeric example.
+#
+# IRC SECTION 250 DEDUCTION IS A NON-ISSUE FOR THIS MODEL: the federal
+# 50% GILTI deduction (IRC 250) is only available to C corporations, or
+# individuals who make an IRC 962 election to be taxed as if a
+# corporation. An ordinary individual CFC shareholder with no 962
+# election reports the GROSS/full GILTI inclusion on federal Schedule 1
+# line 8o to begin with -- there's no 250 deduction netted into that
+# number already, so the flat full-amount subtraction is correct as
+# written for the standard (non-962-electing) case. A 962-electing
+# taxpayer is a narrower edge case within an already-narrow population,
+# out of scope for this single-fact model (not independently detected or
+# flagged from raw facts).
+GILTI_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 8o"
+GILTI_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+GILTI_TERMS = {
+    "gilti", "global intangible low-taxed income", "global intangible low taxed income",
+    "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
+    "form 8992",
+}
+# Same "narrower than COMPLEXITY_EXCLUDE on purpose" reasoning as Subpart
+# F above -- the GILTI subtraction is unconditional regardless of how the
+# other income was earned.
+GILTI_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "dependent", "trust", "estate", "gambling", "gambled", "betting",
+    "wagering", "alimony", "pension", "rental", "renting", "rented",
+    "stock", "rsu",
+}
+
+
+def _gilti_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in GILTI_TERMS):
+        return False
+    if any(t in q for t in GILTI_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_gilti_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated federal GILTI (951A) inclusion' question. Mirrors
+    detect_subpart_f_signal's shape exactly -- same subtraction/non-
+    conformity mechanic, different IRC section and vintage."""
+    q = question.lower()
+    if not _gilti_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_gilti_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _gilti_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_gilti_ca_tax(conn, other_income: float, inclusion_amount: float,
+                           filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Same mechanic as compute_subpart_f_ca_tax -- other_income excludes
+    the GILTI inclusion; federal AGI = other_income + inclusion_amount;
+    the CA subtraction removes the inclusion in full, so CA AGI reduces
+    back down to just other_income. See module note above for the IRC
+    250/962-election scope note."""
+    if other_income is None or other_income < 0:
+        return None
+    if inclusion_amount is None or inclusion_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    federal_agi = other_income + inclusion_amount
+    agi = other_income
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "inclusion_amount": inclusion_amount,
+            "federal_agi": federal_agi, "agi": agi, "standard_deduction": dedu["amount"]}
 
 
 def detect_filing_status(question: str):

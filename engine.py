@@ -1792,6 +1792,394 @@ def _income_capital_loss_carryover_missing_filing_status_answer(question: str, b
     return result
 
 
+def _income_fringe_benefit_answer(conn, question: str, base: dict):
+    """Self-employed net profit + a stated employer fringe-benefit
+    restoration (entertainment, employee parking/transit, on-premises
+    meals) -- see income_brackets.compute_self_employment_ca_tax's
+    fringe_benefit_restoration docstring for the TCJA/IRC 274 non-
+    conformity basis (reuses the self-employment compute path, same
+    shape as cannabis 280E). Uses _amount_near/the 'one other amount'
+    pattern exactly like the cannabis-280E path."""
+    fs = income_brackets.detect_fringe_benefit_signal(question)
+    if not fs:
+        return None
+    restoration_amount = _amount_near(question, income_brackets.FRINGE_BENEFIT_TERMS)
+    if restoration_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != restoration_amount]
+    if len(others) != 1:
+        return None
+    net_profit = others[0]
+    calc = income_brackets.compute_self_employment_ca_tax(
+        conn, net_profit, fs, fringe_benefit_restoration=restoration_amount)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "self_employment_income_tax",
+              "amount": net_profit, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${net_profit:,.2f} in federal Schedule C net profit, filing status {label}: "
+        f"federal self-employment tax is ${calc['se_tax']:,.2f} (${calc['half_se_deduction']:,.2f} "
+        f"deductible). California does not conform to the federal TCJA limitation on employer "
+        f"fringe-benefit expense deductions (entertainment, employee parking/transit, on-"
+        f"premises meals) ({income_brackets.FRINGE_BENEFIT_CITATION}), so your "
+        f"${restoration_amount:,.2f} in federally-disallowed fringe-benefit expenses is restored "
+        f"as a deduction against California income, giving California AGI of "
+        f"${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you are yourself an EMPLOYER (these are benefits paid to "
+        "your employees, not yourself) and that self-employment income is your only income -- "
+        "your actual liability may differ."
+    )
+    return result
+
+
+def _income_fringe_benefit_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_cannabis_280e_missing_filing_status_answer for the
+    fringe-benefit-restoration path."""
+    if not income_brackets.detect_fringe_benefit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an employer fringe-benefit expense "
+        "restoration, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please ask "
+        "again and include your filing status.")
+    return result
+
+
+def _income_real_estate_pro_answer(conn, question: str, base: dict):
+    """CA non-conformity to IRC 469(c)(7) (real estate professional
+    exception) -- see income_brackets.compute_real_estate_pro_ca_tax's
+    docstring for the FTB 3801 conformity basis (CA reuses the standard
+    $25,000/$100k-$150k MAGI phase-out formula, since it just refuses the
+    recharacterization that would have exempted the taxpayer from that
+    formula federally). Uses _amount_near/the 'one other amount' pattern
+    exactly like the excess-business-loss/NOL paths."""
+    fs = income_brackets.detect_real_estate_pro_signal(question)
+    if not fs:
+        return None
+    rental_loss = _amount_near(question, income_brackets.REAL_ESTATE_PRO_LOSS_TERMS)
+    if rental_loss is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != rental_loss]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    q = question.lower()
+    lived_apart = any(t in q for t in income_brackets.MFS_LIVED_APART_TERMS)
+    calc = income_brackets.compute_real_estate_pro_ca_tax(conn, other_income, rental_loss, fs, lived_apart)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["disallowed"]:
+        loss_note = (f"${calc['ca_allowed_loss']:,.2f} of your ${rental_loss:,.2f} rental loss "
+                     f"(California's active-participation allowance at your income level is "
+                     f"${calc['ca_allowance']:,.2f}), with the remaining "
+                     f"${calc['disallowed']:,.2f} added back for California even though it's "
+                     "fully deductible on your federal return")
+    else:
+        loss_note = (f"your full ${rental_loss:,.2f} rental loss (under California's "
+                     f"${calc['ca_allowance']:,.2f} active-participation allowance at your "
+                     "income level)")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (also your Modified AGI for the "
+        f"phase-out test, with no other adjustments), filing status {label}, and that you "
+        f"qualify federally as a real estate professional (so your rental loss is fully "
+        f"deductible, nonpassive, on your federal return): California does NOT conform to the "
+        f"real estate professional exception ({income_brackets.REAL_ESTATE_PRO_CITATION}) -- "
+        f"for California, this activity stays passive, subject to the same $25,000 active-"
+        "participation allowance (with its $100,000-$150,000 MAGI phase-out) that applies to "
+        f"any other passive rental loss. Deducting {loss_note}, plus the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}): your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes this rental activity is your only passive activity (no "
+        "netting against other passive income/losses) and no prior-year suspended-loss "
+        "carryover -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_real_estate_pro_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_excess_business_loss_missing_filing_status_answer
+    for the real-estate-professional path."""
+    if not income_brackets.detect_real_estate_pro_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax on a real estate professional's rental loss, "
+        "I need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse. Please ask again and include your "
+        "filing status.")
+    return result
+
+
+def _income_real_estate_pro_missing_mfs_status_answer(question: str, base: dict):
+    """Specific clarifying message for the one MFS-only missing fact --
+    lived apart vs. lived together changes the allowance from $12,500
+    down to $0, a material difference this path won't guess at."""
+    if not income_brackets.detect_real_estate_pro_missing_mfs_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "For married filing separately, I need one more fact: did you live apart from your "
+        "spouse for the ENTIRE year? If so, California allows a reduced $12,500 active-"
+        "participation allowance (phased out between $50,000-$75,000 MAGI); if you lived "
+        "together at any point during the year, California allows NO active-participation "
+        "allowance at all for this activity. Please ask again and specify.")
+    return result
+
+
+def _foreign_earned_income_strip_form_number_phantoms(amounts):
+    """_amounts()'s shared regex has no context awareness, so literal
+    "2555" in question text -- Form 2555 is this feature's own natural
+    vocabulary -- parses as a phantom $2,555.00 dollar amount. Same
+    collision class as cannabis 280E's "280E" and QSBS's "1202"/"1045"
+    (see _qsbs_strip_section_number_phantoms), fixed the same way: a
+    local filter scoped to this feature rather than touching the shared
+    _amounts()/_amount_near() that 20+ other paths depend on."""
+    return [(a, s, e) for a, s, e in amounts if a != 2555.0]
+
+
+def _income_foreign_earned_income_answer(conn, question: str, base: dict):
+    """Other income (e.g. wages) + a stated Form 2555 foreign earned
+    income/housing exclusion amount -- see income_brackets.
+    compute_foreign_earned_income_ca_tax's docstring for the Schedule CA
+    Line 8d conformity basis (California doesn't conform to IRC 911 at
+    all for this resident-population form -- flat, unconditional
+    addback). Uses the 'one other amount' pattern exactly like the HSA-
+    investment-gain path, but via the phantom-filtered amount helpers
+    (shared with QSBS/cannabis) instead of _amounts()/_amount_near()
+    directly."""
+    fs = income_brackets.detect_foreign_earned_income_signal(question)
+    if not fs:
+        return None
+    amounts = _foreign_earned_income_strip_form_number_phantoms(_amounts(question))
+    excluded_amount = _amount_near_filtered(question, income_brackets.FOREIGN_EARNED_INCOME_TERMS, amounts)
+    if excluded_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != excluded_amount]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_foreign_earned_income_ca_tax(conn, other_income, excluded_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (e.g. wages), filing status {label}, "
+        f"and ${excluded_amount:,.2f} excluded from federal income under Form 2555 (foreign "
+        f"earned income and housing exclusion): California does NOT conform to this federal "
+        f"exclusion ({income_brackets.FOREIGN_EARNED_INCOME_CITATION}) -- as a California "
+        "resident, the full excluded amount is added back and taxed. Your California AGI is "
+        f"about ${calc['agi']:,.2f}; after the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you are filing as a California RESIDENT (part-year/"
+        "nonresident apportionment works differently) and no other adjustments -- your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_foreign_earned_income_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_hsa_investment_gain_missing_filing_status_answer
+    for the foreign-earned-income path."""
+    if not income_brackets.detect_foreign_earned_income_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a Form 2555 foreign earned income "
+        "exclusion, I need your filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse. Please ask again and "
+        "include your filing status.")
+    return result
+
+
+def _cfc_951_strip_section_number_phantoms(amounts):
+    """Literal "951" in "951(a)"/"951a" (both IRC section references --
+    this feature's own trigger vocabulary, for Subpart F and GILTI
+    respectively) parses as a phantom $951.00 dollar amount via
+    _amounts()'s shared regex (same collision class as cannabis "280E",
+    QSBS "1202"/"1045", Form 2555's "2555"). Local filter shared by both
+    CFC-inclusion paths since they collide on the same numeric
+    coincidence."""
+    return [(a, s, e) for a, s, e in amounts if a != 951.0]
+
+
+def _gilti_strip_form_number_phantoms(amounts):
+    """Literal "8992" in "Form 8992" (GILTI's own trigger vocabulary --
+    the federal GILTI computation form) parses as a phantom $8,992.00
+    dollar amount -- same collision class, scoped to GILTI only since
+    Subpart F doesn't reference this form."""
+    return [(a, s, e) for a, s, e in amounts if a != 8992.0]
+
+
+def _income_subpart_f_answer(conn, question: str, base: dict):
+    """Other income (e.g. wages) + a stated federal Subpart F (IRC
+    951(a)) inclusion amount -- see
+    income_brackets.compute_subpart_f_ca_tax's docstring for the Schedule
+    CA Line 8n conformity basis (California doesn't conform to IRC
+    951(a); CA taxes CFC earnings only on actual distribution, so the
+    federal inclusion is fully subtracted back out). Phantom-filtered for
+    literal "951" the same way QSBS/cannabis/Form 2555 are."""
+    fs = income_brackets.detect_subpart_f_signal(question)
+    if not fs:
+        return None
+    amounts = _cfc_951_strip_section_number_phantoms(_amounts(question))
+    inclusion_amount = _amount_near_filtered(question, income_brackets.SUBPART_F_TERMS, amounts)
+    if inclusion_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != inclusion_amount]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_subpart_f_ca_tax(conn, other_income, inclusion_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (e.g. wages), filing status {label}, "
+        f"and a ${inclusion_amount:,.2f} federal Subpart F (IRC Section 951(a)) inclusion as a "
+        "U.S. shareholder of a controlled foreign corporation: California does NOT conform to "
+        f"this federal inclusion ({income_brackets.SUBPART_F_CITATION}) -- CA taxes CFC "
+        "earnings only when actually distributed, so the full inclusion amount is subtracted "
+        f"back out. Your federal AGI (about ${calc['federal_agi']:,.2f}) included this amount, "
+        f"but your California AGI is about ${calc['agi']:,.2f}; after the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you are a California RESIDENT (part-year/nonresident "
+        "apportionment works differently), that your stated inclusion amount is already your "
+        "correct federal Section 951(a) inclusion (this doesn't independently verify your CFC-"
+        "shareholder status or ownership percentage), and no other adjustments -- your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_subpart_f_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_foreign_earned_income_missing_filing_status_answer
+    for the Subpart F path."""
+    if not income_brackets.detect_subpart_f_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a federal Subpart F (IRC Section 951(a)) "
+        "income inclusion, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please ask again "
+        "and include your filing status.")
+    return result
+
+
+def _income_gilti_answer(conn, question: str, base: dict):
+    """Other income (e.g. wages) + a stated federal GILTI (IRC 951A)
+    inclusion amount -- see income_brackets.compute_gilti_ca_tax's
+    docstring for the Schedule CA Line 8o conformity basis. Same
+    mechanic as _income_subpart_f_answer (CFC inclusion fully subtracted
+    back out), different IRC section/vintage. Phantom-filtered for both
+    literal "951" and literal "8992" (Form 8992)."""
+    fs = income_brackets.detect_gilti_signal(question)
+    if not fs:
+        return None
+    amounts = _gilti_strip_form_number_phantoms(_cfc_951_strip_section_number_phantoms(_amounts(question)))
+    inclusion_amount = _amount_near_filtered(question, income_brackets.GILTI_TERMS, amounts)
+    if inclusion_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != inclusion_amount]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_gilti_ca_tax(conn, other_income, inclusion_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (e.g. wages), filing status {label}, "
+        f"and a ${inclusion_amount:,.2f} federal GILTI (IRC Section 951A) inclusion as a U.S. "
+        "shareholder of a controlled foreign corporation: California does NOT conform to this "
+        f"federal inclusion ({income_brackets.GILTI_CITATION}) -- CA taxes CFC earnings only "
+        "when actually distributed, so the full inclusion amount is subtracted back out. Your "
+        f"federal AGI (about ${calc['federal_agi']:,.2f}) included this amount, but your "
+        f"California AGI is about ${calc['agi']:,.2f}; after the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you are a California RESIDENT (part-year/nonresident "
+        "apportionment works differently), that your stated inclusion amount is already your "
+        "correct federal GILTI amount with no IRC Section 962 election in place (this doesn't "
+        "independently verify your CFC-shareholder status or ownership percentage), and no "
+        "other adjustments -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_gilti_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_subpart_f_missing_filing_status_answer for the
+    GILTI path."""
+    if not income_brackets.detect_gilti_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a federal GILTI (IRC Section 951A) "
+        "inclusion, I need your filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse. Please ask again and "
+        "include your filing status.")
+    return result
+
+
 def _income_caleitc_investment_answer(conn, question: str, base: dict):
     """CalEITC + a stated investment-income figure -- see
     income_credits.compute_caleitc_with_investment_income's docstring for
@@ -3298,6 +3686,54 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if entity_ambiguous_result:
         return entity_ambiguous_result
 
+    foreign_earned_income_result = _income_foreign_earned_income_answer(conn, question, base)
+    if foreign_earned_income_result:
+        return foreign_earned_income_result
+
+    missing_foreign_earned_income_fs_result = _income_foreign_earned_income_missing_filing_status_answer(question, base)
+    if missing_foreign_earned_income_fs_result:
+        return missing_foreign_earned_income_fs_result
+
+    subpart_f_result = _income_subpart_f_answer(conn, question, base)
+    if subpart_f_result:
+        return subpart_f_result
+
+    missing_subpart_f_fs_result = _income_subpart_f_missing_filing_status_answer(question, base)
+    if missing_subpart_f_fs_result:
+        return missing_subpart_f_fs_result
+
+    gilti_result = _income_gilti_answer(conn, question, base)
+    if gilti_result:
+        return gilti_result
+
+    missing_gilti_fs_result = _income_gilti_missing_filing_status_answer(question, base)
+    if missing_gilti_fs_result:
+        return missing_gilti_fs_result
+
+    # Real-estate-professional (IRC 469(c)(7) non-conformity) checked
+    # HERE, BEFORE fiduciary trust/estate tax below -- found live via
+    # testing: fiduciary_tax.detect_fiduciary_type deliberately matches
+    # bare "estate" as a substring (its own docstring calls this an
+    # "accepted... low-risk" tradeoff, reasoning that a false match could
+    # only pick the wrong small exemption credit on an ACTUAL fiduciary
+    # question) -- but "real ESTATE professional" also contains "estate",
+    # and without this ordering, a real-estate-professional question was
+    # swallowed by the fiduciary fallback's generic trustee/beneficiary-
+    # residency defer instead of this path's own dedicated answer. Same
+    # "move the check earlier" fix as K-1 capital gain's dispatcher
+    # placement, not a change to fiduciary_tax's own accepted tradeoff.
+    real_estate_pro_result = _income_real_estate_pro_answer(conn, question, base)
+    if real_estate_pro_result:
+        return real_estate_pro_result
+
+    missing_re_pro_fs_result = _income_real_estate_pro_missing_filing_status_answer(question, base)
+    if missing_re_pro_fs_result:
+        return missing_re_pro_fs_result
+
+    missing_re_pro_mfs_status_result = _income_real_estate_pro_missing_mfs_status_answer(question, base)
+    if missing_re_pro_mfs_status_result:
+        return missing_re_pro_mfs_status_result
+
     # Fiduciary-level trust/estate tax (Ring 3, trust/estate Phase A)
     # checked HERE, after entity_tax -- "trust"/"estate" vocabulary
     # doesn't collide with entity_tax's own type checks (S-corp/LLC/
@@ -3371,6 +3807,7 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_capital_loss_carryover_fs_result:
         return missing_capital_loss_carryover_fs_result
 
+
     capital_loss_result = _income_capital_loss_answer(conn, question, base)
     if capital_loss_result:
         return capital_loss_result
@@ -3434,6 +3871,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_hsa_gain_fs_result = _income_hsa_investment_gain_missing_filing_status_answer(question, base)
     if missing_hsa_gain_fs_result:
         return missing_hsa_gain_fs_result
+
+    fringe_benefit_result = _income_fringe_benefit_answer(conn, question, base)
+    if fringe_benefit_result:
+        return fringe_benefit_result
+
+    missing_fringe_benefit_fs_result = _income_fringe_benefit_missing_filing_status_answer(question, base)
+    if missing_fringe_benefit_fs_result:
+        return missing_fringe_benefit_fs_result
 
     caleitc_investment_result = _income_caleitc_investment_answer(conn, question, base)
     if caleitc_investment_result:

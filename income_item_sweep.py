@@ -812,6 +812,49 @@ ITEMS = [
     ("how much tax do I owe on $50,000 self-employed single",
      {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 994.39}),
 
+    # --- employer fringe-benefit expense restoration (Schedule CA Line 3,
+    # Part I Section B "Business Income or (Loss)") -- verified against
+    # the 2025 FTB Schedule CA (540) instructions directly: TCJA
+    # disallows/limits employer deductions for entertainment, employee
+    # parking/transit, and on-premises meals; California does not
+    # conform (confirmed still true post-SB-711 -- a specific decoupling,
+    # not a byproduct of the old conformity date, same pattern as QSBS
+    # and cannabis 280E). Reuses compute_self_employment_ca_tax's math
+    # unchanged via a new fringe_benefit_restoration parameter -- same
+    # shape as cannabis 280E, not a new compute path. Scope-gated to
+    # taxpayers who are themselves EMPLOYERS (these are benefits paid TO
+    # employees). All tax figures verified directly against the live
+    # engine; no new bugs found this time (applied the collision-guard
+    # and phantom-amount lessons from the four prior Line-7a-family
+    # features up front).
+    #
+    # Basic restoration: $500,000 net profit, $50,000 disallowed fringe-
+    # benefit expenses restored, single -> AGI $432,386.42 -> taxable
+    # $426,680.42 -> $36,671.94.
+    ("how much california tax do I owe on $500,000 self-employed net profit with $50,000 in disallowed employee fringe benefit expenses single",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 36671.94}),
+    # MFJ coverage, using the "employee parking" specific trigger term
+    # rather than the generic "fringe benefit expenses" phrase: $300,000
+    # net profit, $30,000 restored -> $15,536.97.
+    ("how much california tax do I owe on $300,000 self-employed net profit with $30,000 in disallowed employee parking expenses married filing jointly",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 15536.97}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $500,000 self-employed net profit with $50,000 in disallowed employee fringe benefit expenses",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COLLISION, TWO amounts stated: before the
+    # SE_COMPLEXITY_EXCLUDE fix, this would have been intercepted by the
+    # plain self-employment path, computing SE tax on the federal (TCJA-
+    # limited) net profit while silently ignoring the stated restoration.
+    # Now correctly redirects to this dedicated path, same result as the
+    # plain restoration case above with identical figures: $36,671.94.
+    ("how much california tax do I owe on $500,000 self-employed with $50,000 in disallowed employee fringe benefit expenses single",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 36671.94}),
+    # SELF-EMPLOYMENT COLLISION, ONE amount only (genuinely ambiguous --
+    # no separately-stated restoration figure to extract): correctly
+    # defers rather than guessing which figure means what.
+    ("how much california tax do I owe if I am self-employed with disallowed employee fringe benefit expenses and made $500,000 single",
+     {"status": "needs_review"}),
+
     # --- traditional IRA deduction pass-through (Ring 3 extension,
     # Schedule CA (540) Part I Section C Line 20) -- verified against the
     # 2025 vs 2024 FTB Schedule CA (540) instructions diffed year-over-
@@ -1051,6 +1094,186 @@ ITEMS = [
     # here. Confirmed directly against the live engine that it still
     # returns its own Line 9 citation and current-year-loss disclosure,
     # unaffected by this feature.)
+
+    # --- CA non-conformity to IRC 469(c)(7), the "real estate
+    # professional" exception (Schedule CA Line 5 / FTB Form 3801) --
+    # verified against the 2025 FTB Instructions for Form 3801: "For
+    # California purposes, all rental activities are passive activities."
+    # A real estate professional's rental loss is fully deductible
+    # (nonpassive) federally, but stays capped by CA's ordinary $25,000
+    # active-participation allowance with its $100,000-$150,000 MAGI
+    # phase-out -- CONFIRMED IDENTICAL formula/thresholds to federal Form
+    # 8582 (not a new CA-specific calculation, just a refusal to exempt
+    # the taxpayer from the standard one). All tax figures verified
+    # directly against the live engine, including a routing-collision fix
+    # (fiduciary_tax.detect_fiduciary_type deliberately matches bare
+    # "estate" as a low-risk substring, which "real ESTATE professional"
+    # also triggers -- had to move this feature's dispatcher checks
+    # BEFORE the fiduciary trust/estate checks) and a second self-
+    # exclusion bug (my own "real estate professional" trigger phrase
+    # contains "estate", which COMPLEXITY_EXCLUDE also uses -- fixed by
+    # subtracting it from this feature's own base exclude set, same bug
+    # class as cannabis 280E's self-exclusion, different word this time).
+    #
+    # UNDER the $100,000 MAGI threshold: $80,000 other income, $15,000
+    # rental loss, single -> full allowance ($25,000) covers the full
+    # loss -> AGI $65,000 -> taxable $59,294 -> $2,127.57.
+    ("how much california tax do I owe if I am a real estate professional with $80,000 in other income and a $15,000 rental loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2127.57}),
+    # IN the phase-out range: $120,000 MAGI -> allowance = $25,000 -
+    # 0.5*($120,000-$100,000) = $15,000 -> only $15,000 of the $20,000
+    # loss allowed, $5,000 added back -> AGI $105,000 -> taxable $99,294
+    # -> $5,672.98.
+    ("how much california tax do I owe if I am a real estate professional with $120,000 in other income and a $20,000 rental loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5672.98}),
+    # OVER $150,000 MAGI: allowance fully phased to $0 -> entire $30,000
+    # loss added back for CA even though fully deductible federally ->
+    # taxable income equals other income minus std deduction -> $14,507.98.
+    ("how much california tax do I owe if I am a real estate professional with $200,000 in other income and a $30,000 rental loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 14507.98}),
+    # MFJ coverage, under threshold: same $80,000/$15,000 shape, full
+    # allowance applies -> taxable $53,588 -> $871.38.
+    ("how much california tax do I owe if I am a real estate professional with $80,000 in other income and a $15,000 rental loss married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 871.38}),
+    # MFS, lived apart all year -- HALVED thresholds ($12,500 allowance,
+    # $50,000-$75,000 phase-out): $60,000 MAGI is in the halved phase-out
+    # range -> allowance = $12,500 - 0.5*($60,000-$50,000) = $7,500 ->
+    # $7,500 of $15,000 loss allowed -> taxable $46,794 -> $1,342.53.
+    ("how much california tax do I owe if I am a real estate professional with $60,000 in other income and a $15,000 rental loss married filing separately, I lived apart from my spouse all year",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1342.53}),
+    # MFS, did NOT live apart -- ZERO allowance regardless of MAGI (IRC
+    # 469(i)(5)): entire $15,000 loss added back -> taxable $54,294 ->
+    # $1,792.53.
+    ("how much california tax do I owe if I am a real estate professional with $60,000 in other income and a $15,000 rental loss married filing separately, we lived together all year",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1792.53}),
+    # MFS missing the lived-apart/lived-together fact -- material to
+    # which allowance applies ($12,500 vs $0), so this gets a SPECIFIC
+    # clarifying message rather than a generic defer.
+    ("how much california tax do I owe if I am a real estate professional with $60,000 in other income and a $15,000 rental loss married filing separately",
+     {"status": "needs_review", "domain": "income"}),
+    # missing filing status entirely -> specific clarifying message.
+    ("how much california tax do I owe if I am a real estate professional with $80,000 in other income and a $15,000 rental loss",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Federal foreign earned income/housing exclusion addback
+    # (Schedule CA Line 8d, Form 2555) -- verified against the 2025 FTB
+    # Instructions for Schedule CA (540): "Enter in column C, as a
+    # positive number, the amount excluded from federal income on
+    # federal Schedule 1 (Form 1040), line 8d." A flat, unconditional
+    # restatement -- California doesn't conform to IRC 911 at all for
+    # this resident-population form, no partial-addback or residency-
+    # history complexity (the ledger's original "needs residency-history
+    # facts" note was stale, same pattern as Line 8a's NOL addback note).
+    # SIMPLER than QSBS -- no offsetting federal figure, just one addback
+    # figure, mirroring HSA investment gain's shape exactly. Also hit and
+    # fixed the SAME phantom-amount bug class as cannabis 280E/QSBS
+    # (literal "2555" in "Form 2555" parses as a bare number) and the
+    # SAME over-broad-exclude-set bug as HSA's first attempt (initially
+    # copied IRA deduction's "defer on self-employment" pattern, which
+    # doesn't apply here since the addback is unconditional regardless
+    # of income source) -- caught before the regression sweep this time.
+    #
+    # Basic addback: $80,000 wages, $50,000 excluded under Form 2555,
+    # single -> AGI $130,000 -> taxable $124,294 -> $7,997.98.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 excluded under form 2555 single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # same figures, excluded amount stated before income -- order
+    # independence.
+    ("how much california tax do I owe on $50,000 excluded under form 2555 and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # MFJ coverage: $120,000 wages, $60,000 excluded -> AGI $180,000 ->
+    # taxable $168,588 -> $8,555.96.
+    ("how much california tax do I owe on $120,000 in wages with $60,000 excluded under form 2555 married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 8555.96}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 excluded under form 2555",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: unlike IRA deduction, this addback is
+    # unconditional regardless of how the OTHER income was earned --
+    # correctly ANSWERED (not deferred), same result as the plain wage
+    # case above, confirming the SE path steps aside while this path
+    # still computes.
+    ("how much california tax do I owe on $80,000 self-employed with $50,000 excluded under form 2555 single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+
+    # --- IRC 951(a) Subpart F income inclusion subtraction (Schedule CA
+    # Line 8n) -- verified against the 2025 FTB Instructions for Schedule
+    # CA (540): "Under federal law, if you are a U.S. shareholder of a
+    # CFC, you must include IRC Section 951(a) amount in your income.
+    # California law does not conform. If you included the amount as
+    # income for federal purposes on line 8n, column A, enter the amount
+    # on line 8n, column B." A flat, unconditional subtraction -- no
+    # worksheet, no cap. Unlike the FEIE ADDBACK above, this fully
+    # CANCELS: federal AGI = other_income + inclusion_amount, and the CA
+    # subtraction removes it in full, so CA AGI reduces back down to
+    # exactly other_income -- the tax comes out identical to a plain
+    # other-income-only question, which is the correct outcome (CA taxes
+    # CFC earnings only on actual distribution, never on this deemed
+    # inclusion). Also hit and proactively guarded against the SAME
+    # phantom-amount bug class as cannabis 280E/QSBS/Form 2555 (literal
+    # "951" in "951(a)" parses as a bare number) before running this
+    # sweep.
+    #
+    # Basic subtraction: $80,000 wages, $50,000 Subpart F inclusion,
+    # single -> federal AGI $130,000 -> CA AGI $80,000 (inclusion fully
+    # cancels) -> taxable $74,294 -> $3,347.98 (same as a plain $80,000-
+    # wages-only question -- confirms the wash is correct, not a bug).
+    ("how much california tax do I owe on $80,000 in wages with a $50,000 subpart f income inclusion single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # same figures, inclusion amount stated before income -- order
+    # independence.
+    ("how much california tax do I owe on a $50,000 subpart f inclusion and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # alternate trigger phrasing ("irc section 951(a)" instead of "subpart
+    # f") -- must route to the SAME Subpart F path, not GILTI (951A is a
+    # different, textually-distinct IRC section reference).
+    ("how much california tax do I owe on $80,000 in wages with a $50,000 irc section 951(a) inclusion single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # MFJ coverage: $120,000 wages, $50,000 inclusion -> federal AGI
+    # $170,000 -> CA AGI $120,000 -> taxable $108,588 -> $3,585.06.
+    ("how much california tax do I owe on $120,000 in wages with a $50,000 subpart f income inclusion married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3585.06}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $50,000 subpart f income inclusion",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: unconditional regardless of how the
+    # OTHER income was earned, same "correctly ANSWERED, not deferred"
+    # precedent as FEIE/HSA gain above.
+    ("how much california tax do I owe on $80,000 self-employed with a $50,000 subpart f income inclusion single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+
+    # --- IRC 951A(a) GILTI inclusion subtraction (Schedule CA Line 8o) --
+    # same non-conformity/cancellation mechanic as Subpart F above,
+    # TCJA-era instead of pre-existing law: FTB's Line 8o instruction
+    # states verbatim "California law does not conform" for GILTI,
+    # confirmed separately in the instructions' own TCJA "What's New"
+    # bullet list. IRC Section 250's 50% GILTI deduction is a non-issue
+    # here -- it's only available to C corps or individuals with an IRC
+    # 962 election, so an ordinary individual's federal Schedule 1 line
+    # 8o already reports the GROSS inclusion with nothing netted out,
+    # meaning the flat full-amount subtraction is correct as-is for the
+    # standard case.
+    #
+    # Basic subtraction: $80,000 wages, $50,000 GILTI inclusion, single ->
+    # same wash as Subpart F -> $3,347.98.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 in gilti single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # order independence.
+    ("how much california tax do I owe on $50,000 in gilti and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+    # alternate trigger phrasing ("form 8992", GILTI's own computation
+    # form) -- also exercises the Form-8992 phantom-amount guard (literal
+    # "8992" would otherwise parse as a bare number) and MFJ coverage:
+    # $120,000 wages, $50,000 GILTI -> federal AGI $170,000 -> CA AGI
+    # $120,000 -> taxable $108,588 -> $3,585.06.
+    ("how much california tax do I owe on $120,000 in wages and $50,000 gilti reported on form 8992 married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3585.06}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 in gilti",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: same unconditional precedent as above.
+    ("how much california tax do I owe on $80,000 self-employed with $50,000 in gilti single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
 
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given

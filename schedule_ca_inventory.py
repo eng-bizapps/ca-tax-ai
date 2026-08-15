@@ -207,7 +207,16 @@ ITEMS = [
      "shadowing the income-domain answer for any cannabis-flavored question."),
     ("I", "B", "3", "Limitation on employer fringe benefit expense deduction",
      "both", "narrow", "Sched CA (540) Pt I Sec B line 3",
-     "deferred_new_engine", None, "Business-owner shape"),
+     "built", "self_employment_income_tax",
+     "Built 2026-08-15: fringe_benefit_restoration param on compute_self_employment_ca_tax "
+     "in income_brackets.py (same shape as cannabis 280E -- extends the existing SE path, "
+     "not a new one). California doesn't conform to TCJA's IRC 274 limits on employer "
+     "entertainment/employee-parking-transit/on-premises-meal deductions, confirmed still "
+     "true post-SB-711 (specific decoupling, not a conformity-date byproduct). Scope-gated "
+     "to Schedule-C filers who are themselves EMPLOYERS (benefits paid to staff, not "
+     "themselves); K-1 recipients need no adjustment since the entity absorbs it first, "
+     "same reasoning as cannabis 280E. No new bugs found -- collision-guard and phantom-"
+     "amount lessons from the prior four Line-7a-family builds applied up front."),
     ("I", "B", "3", "Limitation on wagering losses",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 3",
      "not_applicable", None, "CA doesn't conform to federal cap on wagering-transaction expenses"),
@@ -219,22 +228,92 @@ ITEMS = [
      "not_applicable", None, "Specific fraud-scheme defendants only"),
     ("I", "B", "4", "Other gains/losses basis differences (Schedule D-1)",
      "both", "narrow", "Sched CA (540) Pt I Sec B line 4",
-     "deferred_new_engine", None, None),
-    ("I", "B", "5", "Rental RE/royalties/partnership/S-corp/trust depreciation & passive-activity differences",
-     "both", "moderate", "Sched CA (540) Pt I Sec B line 5; FTB 3801/3885A",
-     "deferred_new_engine", None, "Business-owner/investor shape"),
+     "deferred_new_engine", None,
+     "Researched 2026-08-15: confirmed against FTB's 2025 Schedule CA (540) and Schedule D-1 "
+     "instructions -- Schedule D-1 parallels federal Form 4797 (Sales of Business Property), "
+     "ORDINARY gains/losses on business-property sales (1231/1245/1250 recapture), distinct "
+     "from capital-asset gains on Line 7a. Divergence driver is BASIS, not recapture "
+     "characterization (1245 'generally the same as federal'; 1250 has only a narrow R&TC "
+     "18171 carve-out). Root cause: CA's standing non-conformity to bonus depreciation (IRC "
+     "168(k), never adopted, unaffected by SB 711 -- a durable specific decoupling, not a "
+     "conformity-date artifact) plus pre-1987 ACRS non-conformity -- both require the "
+     "taxpayer's cumulative CA-basis depreciation history, same 'not a single document away' "
+     "problem as Line 4a/4b IRA basis and the generic Line 7a basis-differences item. No "
+     "narrower tractable sub-slice found. Left deferred, not reclassified -- OBBBA (2025) made "
+     "100% bonus depreciation permanent federally, so this divergence is not closing over time."),
+    ("I", "B", "5", "Rental RE/royalties/partnership/S-corp/trust depreciation differences (ordinary passive activities)",
+     "both", "moderate", "Sched CA (540) Pt I Sec B line 5; FTB 3885A",
+     "deferred_new_engine", None,
+     "Researched 2026-08-15: for an activity that's PASSIVE under both CA and federal law "
+     "(the ordinary landlord/K-1 case, dominant real-world driver of this line), the PAL "
+     "mechanic itself is confirmed identical CA/federal -- FTB 3801: 'Generally, California "
+     "law is the same as federal law concerning PAL limitations.' Any divergence comes purely "
+     "from feeding CA-basis vs federal-basis income/loss (FTB 3885A, depreciation/bonus-"
+     "depreciation non-conformity) into that otherwise-identical calculation -- same "
+     "cumulative-historical-CA-depreciation problem as Line 4/4a/4b, left deferred. See the "
+     "separate 'IRC 469(c)(7) real estate professional' row for the one tractable slice found."),
+    ("I", "B", "5b", "CA non-conformity to IRC 469(c)(7) real estate professional exception",
+     "addition", "narrow", "Sched CA (540) Pt I Sec B line 5; FTB 3801 General Information",
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_real_estate_pro_allowance/ca_tax in income_brackets.py. "
+     "California refuses the federal IRC 469(c)(7) recharacterization -- 'For California "
+     "purposes, all rental activities are passive activities' -- so a real estate "
+     "professional's rental loss, fully deductible (nonpassive) federally, stays capped by "
+     "CA's ordinary $25,000 active-participation allowance with its $100,000-$150,000 MAGI "
+     "phase-out (IRC 469(i)) -- CONFIRMED IDENTICAL formula/thresholds to federal Form 8582 "
+     "(FTB 3801 reuses the federal MAGI figure and federal Form 6198 at-risk mechanics "
+     "directly, just with CA-basis inputs). MFS-lived-apart-all-year uses halved figures "
+     "($12,500/$50k-$75k); MFS not living apart gets $0 allowance (IRC 469(i)(5)) -- deferred "
+     "if lived-apart status isn't stated, not guessed. Narrow population (real estate "
+     "professionals specifically) despite the parent row's 'moderate' frequency, which mixes "
+     "in the much more common (and untractable) ordinary-landlord case."),
     ("I", "B", "6", "Farm income depreciation/passive-activity/NOL differences",
-     "both", "narrow", "Sched CA (540) Pt I Sec B line 6",
-     "deferred_new_engine", None, None),
+     "both", "narrow", "Sched CA (540) Pt I Sec B line 6; FTB 3801/3885A",
+     "deferred_new_engine", None,
+     "Researched 2026-08-15, per-component (checked for a Line-5-style hidden tractable slice, "
+     "found none this time): (1) DEPRECIATION -- confirmed same bonus-depreciation/168(k) "
+     "CA-basis problem as Lines 4/5, applied to Schedule F assets via FTB 3885A; needs "
+     "cumulative history, left deferred. (2) PASSIVE-ACTIVITY -- verified NO CA non-conformity "
+     "exists for farming (FTB 3801's exhaustive non-conformity list names only real-estate "
+     "professionals/IRC 469(c)(7); the actual farm-specific federal provision, IRC 469(h)(3) "
+     "retired/disabled farmers, isn't flagged as a CA divergence anywhere and predates every "
+     "conformity-date cutoff; farming also gets no $25k-style special allowance to begin with, "
+     "unlike rental real estate) -- genuinely not tractable, not just deferred. (3) 'NOLs' in "
+     "the line's own framing sentence is boilerplate, not a distinct Line 6 mechanism -- Line 6 "
+     "cites only FTB 3801/3885A, never 3805V; the real NOL addback lives at Line 8a (own "
+     "deferred row) with the $1M-suspension slice already BUILT at Line 9b2. CA's uniform "
+     "no-carryback rule (R&TC 17276) also defeats IRC 172(b)(1)(B)'s farm-specific carryback, "
+     "so nothing farm-specific survives there either. Net: unlike Line 5, no piece of Line 6 is "
+     "buildable -- all three named triggers resolve to 'same basis problem' or 'not actually "
+     "this line, already tracked elsewhere.'"),
     ("I", "B", "7", "Unemployment compensation",
      "subtraction", "common", "Sched CA (540) Pt I Sec B line 7",
      "built", "unemployment_compensation", None),
     ("I", "B", "7", "Paid Family Leave / Family Temporary Disability Insurance",
      "subtraction", "common", "Sched CA (540) Pt I Sec B line 7",
      "built", "paid_family_leave", None),
-    ("I", "B", "8a", "Federal net operating loss addback",
+    ("I", "B", "8a", "Federal net operating loss addback (sole-business-income population)",
      "addition", "moderate", "Sched CA (540) Pt I Sec B line 8a; FTB 3805V",
-     "deferred_new_engine", None, "Requires separate CA NOL computation"),
+     "built", "ca_income_tax_bracket",
+     "Researched 2026-08-15: previous note ('requires separate CA NOL computation') was stale "
+     "-- that computation was built at Line 9b2 (compute_nol_ca_tax) this session. Confirmed "
+     "the addback itself is a trivial dollar-for-dollar restatement (FTB: 'Enter the amount of "
+     "the federal NOL included on line 8a, column A, as a positive number in column C') with "
+     "no partial-addback or percentage scenarios. For the population 9b2 already serves (sole "
+     "business income, no wages/other income), NO new code is needed: compute_nol_ca_tax "
+     "computes taxable income directly from business income rather than through a federal-AGI "
+     "intermediate, so it already implicitly performs the addback+recompute wash -- the "
+     "existing feature's total-tax answer is already mathematically equivalent to running the "
+     "real Line 8a -> Line 9b2 sequence. See the separate 'general wage+NOL population' row "
+     "for the genuinely unbuilt slice."),
+    ("I", "B", "8a-general", "Federal NOL addback for taxpayers with wages/other income (not sole business income)",
+     "addition", "moderate", "Sched CA (540) Pt I Sec B line 8a; FTB 3805V",
+     "deferred_new_engine", None,
+     "compute_nol_ca_tax's NOL_COMPLEXITY_EXCLUDE deliberately excludes wage/salary mentions -- "
+     "for THIS population (wages plus a federal NOL carryover, e.g. from a now-closed prior "
+     "business), the addback genuinely matters and isn't already absorbed. Would require "
+     "generalizing the MTI/suspension test beyond business-income-only to a broader income "
+     "base -- real new scope, not a one-fact extension of the existing feature."),
     ("I", "B", "8b", "California Lottery winnings exclusion",
      "subtraction", "common", "Sched CA (540) Pt I Sec B line 8b",
      "built", "california_lottery_winnings", None),
@@ -249,7 +328,20 @@ ITEMS = [
      "not_applicable", None, None),
     ("I", "B", "8d", "Federal foreign earned income/housing exclusion (Form 2555) addback",
      "addition", "moderate", "Sched CA (540) Pt I Sec B line 8d",
-     "deferred_new_engine", None, "Expat population, needs residency-history facts"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_foreign_earned_income_ca_tax in income_brackets.py. The old "
+     "'needs residency-history facts' note was stale, same failure mode as Line 8a's NOL "
+     "addback note -- Schedule CA (540) is titled 'California Adjustments -- Residents' and "
+     "already presupposes full-year residency (part-year/nonresident lives on the separate "
+     "540NR engine), so within that scope CA taxes ALL worldwide income unconditionally, no "
+     "date-based or partial addback. FTB confirms: flat restatement of the federal-excluded "
+     "amount, no worksheet. Simpler than QSBS -- one addback figure, no offsetting federal "
+     "figure, mirrors HSA investment gain's shape. Two bugs caught proactively before the "
+     "regression sweep (not found live, unlike most prior features): phantom-amount collision "
+     "from literal '2555' in 'Form 2555' (same class as cannabis 280E/QSBS), and an initial "
+     "over-broad COMPLEXITY_EXCLUDE-derived exclude set that would have wrongly deferred on "
+     "self-employment mentions (same lesson as HSA's first attempt -- fixed with a narrower "
+     "purpose-built exclude list before ever running the sweep)."),
     ("I", "B", "8d", "Combat zone extended to Sinai Peninsula (foreign earned income)",
      "addition", "narrow", "Sched CA (540) Pt I Sec B line 8d",
      "not_applicable", None, None),
@@ -261,10 +353,30 @@ ITEMS = [
      "built", "hsa_contributions_and_earnings", "Part of HSA non-conformity cluster, already covered"),
     ("I", "B", "8n", "IRC 951(a) Subpart F income inclusion",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 8n",
-     "deferred_new_engine", None, "CFC-owner population"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_subpart_f_ca_tax in income_brackets.py. FTB's own Line 8n "
+     "text is a flat, unconditional 'California law does not conform... enter the amount on "
+     "line 8n, column B' restatement -- no worksheet, no cap -- so the STATUS/COMPLEXITY-TIER "
+     "was the stale part of this ledger note, not the population framing (unlike Line 8a/8d, "
+     "where the NOTE itself was stale). Mechanically a full cancellation, not a net change: "
+     "federal AGI = other_income + inclusion_amount; the CA subtraction removes the inclusion "
+     "in full, so CA AGI reduces back to exactly other_income, matching CA's baseline of "
+     "taxing CFC earnings only on actual distribution (corroborated by the Line 3 dividends "
+     "instruction). Trusts the taxpayer's stated federal 951(a) inclusion amount as already "
+     "correct -- does not independently verify >=10% CFC-shareholder status. 'CFC-owner "
+     "population'/narrow frequency confirmed accurate, not stale."),
     ("I", "B", "8o", "IRC 951A(a) GILTI inclusion",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 8o",
-     "deferred_new_engine", None, "CFC-owner population"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_gilti_ca_tax in income_brackets.py. Same flat non-conformity "
+     "restatement and full-cancellation mechanic as Subpart F (Line 8n) above, TCJA-era "
+     "(2017) instead of pre-existing law. IRC Section 250's 50% GILTI deduction is a "
+     "non-issue for this single-fact model: it's only available to C corps or individuals "
+     "with an IRC 962 election, so an ordinary individual's federal Schedule 1 line 8o "
+     "already reports the GROSS inclusion with nothing netted out -- the flat full-amount "
+     "subtraction is correct as-is for the standard (non-962-electing) case, which is out of "
+     "scope but explicitly disclosed. 'CFC-owner population'/narrow frequency confirmed "
+     "accurate, not stale."),
     ("I", "B", "8p", "Excess business loss limitation (FTB 3461)",
      "both", "moderate", "Sched CA (540) Pt I Sec B line 8p; FTB 3461",
      "built", "ca_income_tax_bracket",
