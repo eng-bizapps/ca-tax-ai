@@ -858,6 +858,200 @@ ITEMS = [
     ("how much california tax do I owe on $80,000 self-employed with a $6,000 IRA deduction single",
      {"status": "needs_review"}),
 
+    # --- QSBS (Qualified Small Business Stock, IRC 1202/1045) full
+    # addback -- verified against the 2025 FTB Instructions for
+    # California Schedule D (540): "California does not conform to the
+    # qualified small business stock deferral and gain exclusion under
+    # IRC Sections 1045 and 1202. Enter the entire gain realized in
+    # column (e)." A COMPLETE non-conformity (100%, not partial), NOT
+    # affected by SB 711 (specific R&TC 18152.5 decoupling, not a general
+    # conformity-date item -- confirmed since CA still doesn't conform to
+    # OBBBA's 2025 QSBS expansion either). Two stated figures required
+    # (federal taxable gain + the amount excluded/deferred), never one --
+    # deliberately doesn't guess which a single stated figure means. All
+    # tax figures verified directly against the live engine, including a
+    # phantom-amount fix (literal "1202"/"1045" in the question parses as
+    # a bare number via the shared amount regex, same collision class as
+    # cannabis 280E's phantom $280) and a full-pipeline check confirming
+    # no sales-tax routing collision.
+    #
+    # Basic addback: $100,000 federal taxable gain, $400,000 excluded
+    # under Section 1202, single -> CA gain $500,000 -> taxable $494,294
+    # -> $44,121.37.
+    ("how much california tax do I owe on $100,000 federal taxable gain from qsbs stock with $400,000 excluded under section 1202 single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 44121.37}),
+    # same figures, order reversed -- order independence.
+    ("how much california tax do I owe on $400,000 excluded under section 1202 and $100,000 federal taxable gain from qsbs stock single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 44121.37}),
+    # MFJ coverage: $200,000 federal taxable gain, $600,000 excluded,
+    # married filing jointly -> CA gain $800,000 -> taxable $788,588 ->
+    # $66,672.26.
+    ("how much california tax do I owe on $200,000 federal taxable gain from qualified small business stock with $600,000 excluded under section 1202 married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 66672.26}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $100,000 federal taxable gain from qsbs stock with $400,000 excluded under section 1202",
+     {"status": "needs_review", "domain": "income"}),
+    # AMBIGUOUS: only one dollar figure stated, no separate excluded
+    # amount -- correctly defers rather than guessing whether the stated
+    # figure is pre- or post-exclusion.
+    ("how much california tax do I owe on $500,000 in qsbs gain single",
+     {"status": "needs_review"}),
+    # PLAIN CAPITAL-GAINS PATH COLLISION GUARD: before the QSBS guard was
+    # added to detect_compute_signal, a stated "capital gains" figure
+    # alongside a QSBS mention would have been silently answered by the
+    # generic wage/capital-gains path, treating the stated figure as
+    # already-CA-taxable -- WRONG if it's actually the post-exclusion
+    # federal figure. Now correctly defers, mirroring the existing
+    # home-sale (Section 121) carve-out's exact pattern.
+    ("how much california tax do I owe on $500,000 in capital gains from qualified small business stock single",
+     {"status": "needs_review"}),
+
+    # --- HSA-held investment sale gain addback -- verified against the
+    # 2025 FTB Instructions for Schedule CA (540): "the California basis
+    # of the assets listed [below] may be different from the federal
+    # basis... Gain or loss from the sale of investments inside an HSA."
+    # California doesn't recognize HSAs as tax-favored at all, so a
+    # realized gain is CA-taxable the year it occurs with NO federal
+    # counterpart (federally it's invisible inside the tax-advantaged
+    # wrapper) -- unlike QSBS, only ONE adjustment figure needed, no
+    # offsetting amount to add back. Losses are explicitly out of scope
+    # (ordinary capital-loss $3,000/$1,500 annual-limit mechanics apply
+    # instead, nothing HSA-specific about that case). All tax figures
+    # verified directly against the live engine, including confirming
+    # this does NOT collide with the existing hsa_contributions_and_
+    # earnings informational topic (that topic only fires as a fallback,
+    # after every compute path -- including this one -- has had its
+    # chance) and does NOT defer on self-employment mentions the way IRA
+    # deduction intentionally does (HSA gain taxability is orthogonal to
+    # how the other income was earned -- a narrower, purpose-built
+    # HSA_GAIN_COMPLEXITY_EXCLUDE is used instead of the shared
+    # COMPLEXITY_EXCLUDE, confirmed via a self-employment case that now
+    # correctly answers rather than defers).
+    #
+    # Basic addback: $80,000 wages, $5,000 HSA investment gain, single ->
+    # AGI $85,000 -> taxable $79,294 -> $3,812.98.
+    ("how much california tax do I owe on $80,000 in wages with a $5,000 hsa investment gain single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3812.98}),
+    # same figures, HSA gain stated before income -- order independence.
+    ("how much california tax do I owe on a $5,000 hsa investment gain and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3812.98}),
+    # MFJ coverage: $120,000 wages, $10,000 HSA investment gain -> AGI
+    # $130,000 -> taxable $118,588 -> $4,255.14.
+    ("how much california tax do I owe on $120,000 in wages with a $10,000 hsa investment gain married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4255.14}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $5,000 hsa investment gain",
+     {"status": "needs_review", "domain": "income"}),
+    # LOSS phrasing -- deliberately NOT this feature's scope (ordinary
+    # capital-loss mechanics apply instead, nothing HSA-specific about a
+    # loss). Also had to add HSA_LOSS_TERMS to the same three exclude
+    # sets as HSA_INVESTMENT_GAIN_TERMS -- without that, the plain wage
+    # path doesn't recognize "hsa investment loss" as excluded (it
+    # doesn't literally say "capital loss") and silently drops the
+    # stated loss figure, computing on wages alone -- found live via this
+    # exact regression case. Once no compute path claims the question, it
+    # correctly falls through to the PRE-EXISTING hsa_contributions_and_
+    # earnings informational topic (built in an earlier project phase) --
+    # a safe, non-dangerous "yes, taxable" answer with no claimed dollar
+    # figure, not a hard defer.
+    ("how much california tax do I owe on $80,000 in wages with a $5,000 hsa investment loss single",
+     {"status": "answered", "domain": "income", "category": "hsa_contributions_and_earnings"}),
+    # SELF-EMPLOYMENT COMBINATION: unlike IRA deduction, HSA gain
+    # taxability has nothing to do with how the OTHER income was earned
+    # -- correctly ANSWERED (not deferred) here, same figures/result as
+    # the plain wage case above, confirming the SE path steps aside
+    # (SE_COMPLEXITY_EXCLUDE guard) while this path still computes.
+    ("how much california tax do I owe on $80,000 self-employed with a $5,000 hsa investment gain single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3812.98}),
+
+    # --- K-1 pass-through CAPITAL GAIN (Schedule CA Line 7a / Schedule D
+    # Line 2, distinct from the existing ORDINARY K-1 income feature on
+    # Line 5) -- verified against the 2025 FTB Instructions for
+    # California Schedule D (540): "Combine gain(s) and loss(es) from all
+    # California Schedule(s) K-1... Enter the net loss on line 2, column
+    # (d), or the net gain on line 2, column (e)." Reuses
+    # compute_k1_ca_tax's math unchanged (CA taxes capital gains as
+    # ordinary income, no special rate) but with the correct Schedule D
+    # citation instead of Schedule CA Line 5. Needed its OWN trigger
+    # rather than widening K1_TRIGGERS, since K1_COMPLEXITY_EXCLUDE
+    # deliberately excludes "capital gain" from the ordinary K-1 path --
+    # confirmed "$50,000 in K-1 income" (existing) and "$50,000 in K-1
+    # capital gains" (new) produce the IDENTICAL tax figure, just
+    # different citations, since the underlying math is the same. Also
+    # had to insert this BEFORE the existing K1 fallback catch-all in the
+    # dispatcher (not in this session's usual later spot), since
+    # "k-1 capital gain" contains the bare "k-1" substring the fallback
+    # matches on. GAINS only -- losses use the standard capital-loss
+    # annual-limit mechanic instead, explicitly excluded here.
+    #
+    # Basic: $50,000 K-1 capital gain, single -> taxable $44,294 ->
+    # $1,192.53 (same figure as the existing ordinary-K-1-income test
+    # case with identical inputs, confirming the shared math).
+    ("how much california tax do I owe on $50,000 in K-1 capital gains single",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_capital_gain_tax", "tax": 1192.53}),
+    # MFJ coverage: $80,000 K-1 capital gain -> taxable $68,588 ->
+    # $1,471.38.
+    ("how much california tax do I owe on $80,000 in K-1 capital gains married filing jointly",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_capital_gain_tax", "tax": 1471.38}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $50,000 in K-1 capital gains",
+     {"status": "needs_review", "domain": "income"}),
+    # LOSS phrasing -- deliberately NOT this feature's scope (ordinary
+    # capital-loss annual-limit mechanics apply instead) -- correctly
+    # falls through to the generic K1 fallback message rather than
+    # mishandling it as a gain.
+    ("how much california tax do I owe on $50,000 in K-1 capital losses single",
+     {"status": "needs_review"}),
+    # EXISTING ordinary K-1 income path, sanity check unaffected by this
+    # feature -- same figures/result as before this session.
+    ("how much california tax do I owe on $50,000 in K-1 income single",
+     {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 1192.53}),
+
+    # --- Capital loss CARRYOVER from a prior year (Schedule CA Line 7a /
+    # Schedule D (540) Line 6) -- verified against the 2025 FTB
+    # Instructions for California Schedule D (540): resident-all-prior-
+    # years case uses the carryover as-is; a nonresident year anywhere in
+    # the carryover's history requires FTB's own recalculation, out of
+    # scope here. MATH IS IDENTICAL to the existing current-year capital-
+    # loss feature (same $3,000/$1,500-MFS annual limit) -- the real gap
+    # was DISCLOSURE: before this feature, "capital loss carryover"
+    # phrasing already computed the right NUMBER via the generic capital-
+    # loss path (since "capital loss" is a substring), but the generic
+    # path's own answer text wrongly claimed "assumes... no capital loss
+    # carryover from a prior year" -- contradicting what the question
+    # said. This dedicated path (checked BEFORE the generic one, same
+    # ordering fix as K-1 capital gain) gives the ACCURATE resident-all-
+    # prior-years disclosure instead.
+    #
+    # Basic, over the annual limit: $80,000 wages, $10,000 carryover,
+    # single -> same $3,087.57 as the existing current-year-loss test
+    # case with identical inputs, confirming the shared math -- only the
+    # citation/disclosure text differs (verified directly, not asserted
+    # here since the sweep only checks the fields below).
+    ("how much california tax do I owe on $80,000 in wages with a $10,000 capital loss carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3087.57}),
+    # MFJ, UNDER the annual limit: $120,000 wages, $2,000 carryover ->
+    # fully deductible, no further carryforward -> AGI $118,000 -> taxable
+    # $106,588 -> $3,465.06.
+    ("how much california tax do I owe on $120,000 in wages with a $2,000 capital loss carryover married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3465.06}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $10,000 capital loss carryover",
+     {"status": "needs_review", "domain": "income"}),
+    # NONRESIDENT HISTORY -- FTB requires recalculating the carryover as
+    # if CA-resident throughout if any prior year was spent as a
+    # nonresident; this single-question model can't perform that
+    # recalculation, so it correctly defers rather than silently ignoring
+    # the caveat.
+    ("how much california tax do I owe on $80,000 in wages with a $10,000 capital loss carryover single, I was a nonresident of california two years ago",
+     {"status": "needs_review"}),
+    # (The existing generic current-year capital-loss path's own sanity
+    # coverage -- same $80,000/$10,000/single question, no "carryover"
+    # wording -- is already tested earlier in this file; not duplicated
+    # here. Confirmed directly against the live engine that it still
+    # returns its own Line 9 citation and current-year-loss disclosure,
+    # unaffected by this feature.)
+
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given
      {"status": "needs_review"}),

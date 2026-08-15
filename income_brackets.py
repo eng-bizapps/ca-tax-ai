@@ -56,6 +56,20 @@ COMPLEXITY_EXCLUDE = {
     # so it isn't excluded from itself).
     "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
     "deductible ira",
+    # added alongside the HSA-investment-gain feature, same reasoning:
+    # without this, a stated HSA gain alongside wages would be silently
+    # DROPPED by the plain path (_amount() only grabs the first dollar
+    # figure) rather than added to CA income. HSA loss terms included too
+    # -- otherwise a "hsa investment loss" question isn't excluded by
+    # anything (it doesn't literally say "capital loss"), and the plain
+    # path silently drops the loss figure the same way. Found live via
+    # the regression sweep after this feature's own gain-vs-loss guard
+    # (which correctly excludes losses from ITS OWN detection) turned out
+    # not to protect the OTHER paths from the same figure.
+    "hsa investment gain", "hsa investment gains", "hsa capital gain",
+    "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
+    "investments inside my hsa", "hsa investment sale",
+    "hsa investment loss", "hsa capital loss", "loss inside my hsa",
 }
 COMPUTE_TRIGGERS = {
     "tax bracket", "how much tax", "how much california tax",
@@ -203,6 +217,14 @@ SE_COMPLEXITY_EXCLUDE = {
     # a purely personal deduction like this one).
     "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
     "deductible ira",
+    # added alongside the HSA-investment-gain feature, same general-
+    # purpose reasoning: an HSA gain can accompany self-employment income
+    # just as easily as wages. Loss terms included too -- see
+    # COMPLEXITY_EXCLUDE's matching comment for why.
+    "hsa investment gain", "hsa investment gains", "hsa capital gain",
+    "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
+    "investments inside my hsa", "hsa investment sale",
+    "hsa investment loss", "hsa capital loss", "loss inside my hsa",
 }
 
 # Federal Schedule SE mechanics (California has no separate self-employment
@@ -417,6 +439,13 @@ K1_COMPLEXITY_EXCLUDE = {
     # taxed in full, silently ignoring the deduction.
     "ira deduction", "ira contribution", "traditional ira", "deduct my ira",
     "deductible ira",
+    # added alongside the HSA-investment-gain feature, same reasoning: no
+    # entity-level absorption applies to a personal HSA gain either. Loss
+    # terms included too -- see COMPLEXITY_EXCLUDE's matching comment.
+    "hsa investment gain", "hsa investment gains", "hsa capital gain",
+    "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
+    "investments inside my hsa", "hsa investment sale",
+    "hsa investment loss", "hsa capital loss", "loss inside my hsa",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -1487,6 +1516,363 @@ def compute_ira_deduction_ca_tax(conn, income_amount: float, ira_deduction_amoun
             "agi": agi, "standard_deduction": dedu["amount"]}
 
 
+# --- QSBS (Qualified Small Business Stock, IRC Sections 1202/1045) full
+# addback (Ring 3 extension, Schedule CA (540) Line 7a / Schedule D (540)
+# Column (e)) -- verified against FTB's 2025 Instructions for California
+# Schedule D (540) directly:
+#   "Qualified Small Business Stock -- California does not conform to the
+#   qualified small business stock deferral and gain exclusion under IRC
+#   Sections 1045 and 1202. Enter the entire gain realized in column (e)."
+# This is a COMPLETE, unqualified non-conformity, not partial -- corroborated
+# by Cutler v. Franchise Tax Board (2012) and California's subsequent
+# statutory repeal of its own QSBS provisions (R&TC Section 18152.5). Holds
+# regardless of which federal exclusion tier applied (50%/75%/100% by
+# acquisition date, or the OBBBA's newer post-7/4/2025 tier) -- the 2025
+# Schedule CA (540) instructions explicitly list OBBBA's QSBS expansion as a
+# provision California still does not conform to, so the add-back stays
+# 100% no matter which federal rule produced the excluded amount.
+#
+# NOT affected by SB 711 (the Oct 2025 conformity-date change, 2015->2025):
+# this is a specific statutory decoupling (R&TC 18152.5), not a generic
+# "IRC as of date X" conformity gap -- confirmed by the OBBBA cross-
+# reference above (California still doesn't conform to a 2025-enacted
+# federal QSBS change, well after the new 2025 conformity date).
+#
+# TWO STATED FIGURES, deliberately not one: the taxpayer's FEDERAL TAXABLE
+# gain (already reduced by whatever federal Section 1202/1045 exclusion or
+# deferral applied) PLUS the amount excluded/deferred federally -- added
+# back in FULL to reach the CA-taxable gain. Does NOT accept a single
+# "total gain" figure and guess whether it's stated pre- or post-exclusion
+# -- that ambiguity is exactly what this design avoids guessing at, same
+# "never guess a material fact" discipline as everywhere else in this
+# codebase. SCOPE: QSBS gain is treated as the taxpayer's ONLY income (no
+# other adjustments) -- same sole-income-source discipline as the self-
+# employment-only/K-1-only/business-loss-only paths.
+QSBS_CITATION = "FTB 2025 Instructions for California Schedule D (540) -- Column (e)"
+QSBS_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-d-instructions.html"
+
+QSBS_TERMS = {
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "1202 exclusion", "section 1045", "1045 rollover",
+}
+QSBS_EXCLUDED_AMOUNT_TERMS = {
+    "excluded", "exclusion", "deferred gain", "deferred under section 1045",
+    "gain excluded", "amount excluded",
+}
+
+
+def _qsbs_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in QSBS_TERMS):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_qsbs_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'QSBS sale with
+    a stated federal taxable gain and a stated excluded/deferred amount'
+    question. No COMPLEXITY_EXCLUDE check needed -- QSBS_TERMS is specific
+    enough vocabulary that it doesn't need the broader guard, unlike IRA
+    deduction's general-purpose trigger."""
+    q = question.lower()
+    if not _qsbs_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_qsbs_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _qsbs_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_qsbs_ca_tax(conn, federal_taxable_gain: float, excluded_amount: float,
+                          filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """federal_taxable_gain is the gain as it appears on the federal
+    return (already reduced by whatever IRC Section 1202/1045 exclusion
+    or deferral applied). excluded_amount is the amount excluded/deferred
+    federally -- ADDED BACK IN FULL for California (R&TC 18152.5's non-
+    conformity is total, not partial). The sum is the CA-taxable capital
+    gain, treated as the taxpayer's ONLY income (see module note above)."""
+    if federal_taxable_gain is None or federal_taxable_gain < 0:
+        return None
+    if excluded_amount is None or excluded_amount < 0:
+        return None
+    ca_gain = federal_taxable_gain + excluded_amount
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, ca_gain - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "federal_taxable_gain": federal_taxable_gain,
+            "excluded_amount": excluded_amount, "ca_gain": ca_gain,
+            "standard_deduction": dedu["amount"]}
+
+
+# --- HSA-held investment sale gain addback (Ring 3 extension, Schedule CA
+# (540) Line 7a / Schedule D (540)) -- verified against FTB's 2025
+# Instructions for Schedule CA (540) directly: "the California basis of
+# the assets listed [below] may be different from the federal basis due
+# to differences between California and federal laws... Gain or loss from
+# the sale of investments inside an HSA." California does not recognize
+# HSAs as tax-favored AT ALL (same non-conformity family as the existing
+# hsa_contributions_and_earnings topic cluster -- contributions aren't
+# deductible for CA, interest/earnings are taxable as earned rather than
+# tax-deferred) -- consistent with that, a REALIZED gain from selling
+# securities held inside an HSA is taxed by California the same year it
+# occurs, exactly as if the account were an ordinary taxable brokerage
+# account. Federally this gain is INVISIBLE -- not reported anywhere on
+# the federal return, since it stays inside the HSA's federally tax-
+# advantaged wrapper (not taxed unless/until withdrawn for a non-
+# qualified purpose, a separate existing topic). So unlike QSBS (federal
+# reports a REDUCED gain, CA restores the excluded portion), this is a
+# gain with NO federal counterpart at all -- the full stated amount is
+# simply CA taxable income, no offsetting figure needed.
+#
+# SCOPE: GAINS only, not losses -- an HSA investment LOSS is just an
+# ordinary capital loss subject to the EXISTING $3,000/$1,500-MFS annual
+# offset limit (see compute_capital_loss_ca_tax above), with nothing
+# HSA-specific about the mechanic; conflating the two would be scope
+# creep without a real tax-law reason, so HSA-loss phrasing is excluded
+# here rather than mishandled.
+HSA_INVESTMENT_GAIN_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a"
+HSA_INVESTMENT_GAIN_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+HSA_INVESTMENT_GAIN_TERMS = {
+    "hsa investment gain", "hsa investment gains", "hsa capital gain",
+    "gain inside my hsa", "gain inside an hsa", "sold investments in my hsa",
+    "investments inside my hsa", "hsa investment sale",
+}
+HSA_LOSS_TERMS = {"hsa investment loss", "hsa capital loss", "loss inside my hsa"}
+
+# Narrower than COMPLEXITY_EXCLUDE on purpose -- see
+# _hsa_investment_gain_base_signal_ok's comment for why self-employment/
+# business/K-1 vocabulary is deliberately NOT here.
+HSA_GAIN_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "capital loss",
+    "trust", "estate", "gambling", "gambled", "betting", "wagering",
+    "alimony", "rental", "renting", "rented", "pension",
+}
+
+
+def _hsa_investment_gain_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in HSA_INVESTMENT_GAIN_TERMS):
+        return False
+    if any(t in q for t in HSA_LOSS_TERMS):
+        return False   # ordinary capital-loss mechanics apply instead -- see module note
+    # DELIBERATELY NOT COMPLEXITY_EXCLUDE-derived (unlike IRA deduction):
+    # HSA gain taxability has nothing to do with how the OTHER income was
+    # earned -- the CA/federal divergence is entirely about the HSA's own
+    # tax-shelter status, orthogonal to wages vs. self-employment vs. K-1.
+    # A narrower, purpose-built exclude list instead: only genuinely
+    # unrelated complexity (a different loss/deduction mechanism, or a
+    # third fact this 2-figure design can't hold) blocks this path.
+    # Self-employment/business/K-1 mentions are explicitly NOT excluded
+    # here -- confirmed via the self-employment collision test, where the
+    # SE path correctly steps aside (SE_COMPLEXITY_EXCLUDE guard) and
+    # THIS path correctly answers instead, unlike IRA deduction's
+    # intentional full defer on the same combination.
+    if any(t in q for t in HSA_GAIN_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_hsa_investment_gain_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated HSA-held investment gain' question. Mirrors
+    detect_excess_business_loss_signal's shape."""
+    q = question.lower()
+    if not _hsa_investment_gain_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_hsa_investment_gain_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _hsa_investment_gain_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_hsa_investment_gain_ca_tax(conn, income_amount: float, hsa_gain_amount: float,
+                                         filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is OTHER (non-HSA) income -- e.g. wages -- treated as
+    gross income and California AGI before the HSA gain addition (no
+    other adjustments, same simple-case assumption as every other
+    compute path). hsa_gain_amount is the taxpayer's stated realized gain
+    from selling investments held inside an HSA -- ADDED IN FULL to CA
+    income (see module note above for why there's no federal figure to
+    reconcile against)."""
+    if income_amount is None or income_amount < 0:
+        return None
+    if hsa_gain_amount is None or hsa_gain_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = income_amount + hsa_gain_amount
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "income_amount": income_amount, "hsa_gain_amount": hsa_gain_amount,
+            "agi": agi, "standard_deduction": dedu["amount"]}
+
+
+# --- K-1 pass-through CAPITAL GAIN (Ring 3 extension, Schedule CA (540)
+# Line 7a / Schedule D (540) Line 2) -- distinct from K1_CITATION's Line 5
+# (ORDINARY K-1 income). Verified against FTB's 2025 Instructions for
+# California Schedule D (540): "Combine gain(s) and loss(es) from all
+# California Schedule(s) K-1 (100S, 541, 565, and 568)... Enter the net
+# loss on line 2, column (d), or the net gain on line 2, column (e)." The
+# CA-specific figure is printed directly on the taxpayer's California K-1
+# (prepared by the pass-through entity itself, alongside the federal
+# figures) -- same "trust the input" precedent as compute_k1_ca_tax
+# already uses for Line 5. Reuses compute_k1_ca_tax's math UNCHANGED
+# (same taxable-income mechanic) since California taxes capital gains as
+# ordinary income with no special rate -- the only real difference is
+# which line/citation applies, not the arithmetic.
+#
+# WHY THIS NEEDS ITS OWN TRIGGER, not just wider K1_TRIGGERS vocabulary:
+# K1_COMPLEXITY_EXCLUDE deliberately excludes "capital gain" (a plain
+# K-1-income question mentioning a capital gain means real complexity
+# that path doesn't attempt) -- so "$50,000 in K-1 capital gains" is
+# CORRECTLY refused by detect_k1_signal today, not a gap to just widen.
+#
+# SCOPE: GAINS only, mirroring the HSA-investment-gain precedent -- a K-1
+# CAPITAL LOSS is subject to the standard $3,000/$1,500-MFS annual offset
+# limit (see compute_capital_loss_ca_tax), a DIFFERENT mechanic from a
+# straight addback; conflating the two would misstate the loss-limited
+# case as fully deductible. K-1 capital LOSS phrasing is explicitly
+# excluded here rather than mishandled.
+K1_CAPITAL_GAIN_CITATION = "FTB 2025 Instructions for California Schedule D (540) -- Line 2"
+K1_CAPITAL_GAIN_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-d-instructions.html"
+
+K1_CAPITAL_GAIN_TERMS = {
+    "k-1 capital gain", "k1 capital gain", "schedule k-1 capital gain",
+    "schedule k1 capital gain", "k-1 capital gains", "k1 capital gains",
+}
+K1_CAPITAL_LOSS_TERMS = {
+    "k-1 capital loss", "k1 capital loss", "schedule k-1 capital loss",
+    "schedule k1 capital loss", "k-1 capital losses", "k1 capital losses",
+}
+
+
+def _k1_capital_gain_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in K1_CAPITAL_GAIN_TERMS):
+        return False
+    if any(t in q for t in K1_CAPITAL_LOSS_TERMS):
+        return False   # ordinary capital-loss annual-limit mechanics apply instead
+    other_exclude = K1_COMPLEXITY_EXCLUDE - {"capital gain"}
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_k1_capital_gain_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'K-1 capital
+    gain, sole income' question. Mirrors detect_k1_signal's shape."""
+    q = question.lower()
+    if not _k1_capital_gain_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_k1_capital_gain_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _k1_capital_gain_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+# --- Capital loss CARRYOVER from a prior year (Ring 3 extension,
+# Schedule CA (540) Line 7a / Schedule D (540) Line 6) -- verified
+# against FTB's 2025 Instructions for California Schedule D (540): "If
+# you were a resident of California for all prior years, enter your
+# California capital loss carryover from 2024. However, if you were a
+# nonresident of California during any taxable year that generated a
+# portion of your 2024 capital loss carryover, recalculate your 2024
+# capital loss carryover as if you resided in California for all prior
+# years."
+#
+# MATH IS IDENTICAL to a current-year capital loss -- see
+# compute_capital_loss_ca_tax above, whose OWN module note already
+# flagged this exact carryover case as "deliberately left out of scope"
+# when first built: a carryover loss is subject to the SAME
+# $3,000/$1,500-MFS annual offset limit as any capital loss, no special
+# arithmetic. Reuses compute_capital_loss_ca_tax UNCHANGED -- the real
+# gap isn't the math, it's DISCLOSURE: the existing capital-loss answer
+# text says "assumes your stated loss is a CURRENT-YEAR loss with no
+# capital loss carryover from a prior year" -- factually WRONG
+# (contradicts the question) when the taxpayer explicitly states this IS
+# a carryover, even though the computed NUMBER is identical either way.
+# This dedicated path exists to give the ACCURATE disclosure (resident-
+# all-prior-years assumption, not a current-year-loss assumption) rather
+# than a misleading one. Checked BEFORE the generic capital-loss path in
+# the dispatcher (mirrors how K-1 capital gain had to precede the K-1
+# fallback), since "capital loss carryover" contains "capital loss" as a
+# substring and would otherwise be caught by the generic path first.
+#
+# SCOPE: resident-all-prior-years case ONLY, matching FTB's own carve-out
+# -- a taxpayer who was a NONRESIDENT during any year that generated part
+# of the carryover needs a recalculation this single-question model
+# can't perform (requires year-by-year sourcing history), so nonresident/
+# interstate-move mentions are excluded here rather than silently
+# ignored.
+CAPITAL_LOSS_CARRYOVER_CITATION = "FTB 2025 Instructions for California Schedule D (540) -- Line 6"
+CAPITAL_LOSS_CARRYOVER_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-d-instructions.html"
+
+CAPITAL_LOSS_CARRYOVER_TERMS = {
+    "capital loss carryover", "capital losses carryover",
+    "carryover capital loss", "loss carryover from last year",
+    "loss carryover from 2024", "carryover from my schedule d",
+    "capital loss carried over", "carried over from last year",
+}
+CAPITAL_LOSS_CARRYOVER_NONRESIDENT_TERMS = {
+    "nonresident", "non-resident", "part-year resident", "part year resident",
+    "moved to california", "moved from california", "moved out of california",
+    "moved into california",
+}
+
+
+def _capital_loss_carryover_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in CAPITAL_LOSS_CARRYOVER_TERMS):
+        return False
+    if any(t in q for t in CAPITAL_LOSS_CARRYOVER_NONRESIDENT_TERMS):
+        return False   # needs a year-by-year recalculation this model can't perform
+    other_exclude = COMPLEXITY_EXCLUDE - {"capital loss"}
+    if any(t in q for t in other_exclude):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_capital_loss_carryover_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'income with a
+    stated prior-year capital loss carryover' question. Mirrors
+    detect_capital_loss_signal's shape."""
+    q = question.lower()
+    if not _capital_loss_carryover_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_capital_loss_carryover_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _capital_loss_carryover_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
 def detect_filing_status(question: str):
     """Abbreviations (mfj/mfs/hoh/qss) are recognized standalone -- they
     already encode "married"/etc on their own, so requiring the spelled-out
@@ -1531,6 +1917,10 @@ def detect_compute_signal(question: str):
         return None
     if "capital gain" in q and any(t in q for t in HOME_SALE_TERMS):
         return None   # home-sale gain -- Section 121 exclusion, different calc entirely
+    if any(t in q for t in QSBS_TERMS):
+        return None   # QSBS -- a stated gain figure is ambiguous (pre- or post-exclusion?
+                       # see QSBS_TERMS's module note); the dedicated QSBS path asks for
+                       # both figures explicitly rather than guessing which one this is
     if not any(trig in q for trig in COMPUTE_TRIGGERS):
         return None
     return detect_filing_status(question)
@@ -1551,6 +1941,8 @@ def detect_compute_missing_filing_status(question: str) -> bool:
         return False
     if "capital gain" in q and any(t in q for t in HOME_SALE_TERMS):
         return False
+    if any(t in q for t in QSBS_TERMS):
+        return False   # mirrors detect_compute_signal's QSBS guard
     if not any(trig in q for trig in COMPUTE_TRIGGERS):
         return False
     return detect_filing_status(question) is None

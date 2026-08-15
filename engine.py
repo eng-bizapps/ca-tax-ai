@@ -1378,12 +1378,14 @@ def _cannabis_strip_280e_phantom_amounts(question: str, amounts):
     return out
 
 
-def _cannabis_amount_near(question: str, keywords, amounts, window: int = 60):
+def _amount_near_filtered(question: str, keywords, amounts, window: int = 60):
     """Same nearest-keyword-distance logic as _amount_near, but operating
     on a caller-supplied (already phantom-filtered) amounts list instead
-    of calling _amounts() internally -- see
-    _cannabis_strip_280e_phantom_amounts's docstring for why this
-    feature specifically can't reuse _amount_near as-is."""
+    of calling _amounts() internally -- shared by any feature whose own
+    trigger vocabulary contains bare digits that _amounts()'s regex would
+    otherwise misparse as a dollar amount (see
+    _cannabis_strip_280e_phantom_amounts's "280E" case and
+    _qsbs_strip_section_number_phantoms's "Section 1202/1045" case)."""
     ql = question.lower()
     if not amounts:
         return None
@@ -1414,7 +1416,7 @@ def _income_cannabis_280e_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _cannabis_strip_280e_phantom_amounts(question, _amounts(question))
-    expense_amount = _cannabis_amount_near(question, income_brackets.CANNABIS_280E_EXPENSE_TERMS, amounts)
+    expense_amount = _amount_near_filtered(question, income_brackets.CANNABIS_280E_EXPENSE_TERMS, amounts)
     if expense_amount is None:
         return None
     others = [a for a, _, _ in amounts if a != expense_amount]
@@ -1578,6 +1580,212 @@ def _income_ira_deduction_missing_filing_status_answer(question: str, base: dict
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
         "To estimate your California income tax with a traditional IRA deduction, I need your "
+        "filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include your filing "
+        "status.")
+    return result
+
+
+def _qsbs_strip_section_number_phantoms(amounts):
+    """_amounts()'s shared regex (an optional dollar sign, then digits)
+    has no context awareness, so literal "1202" or "1045" in question
+    text -- Sections 1202/1045 are this feature's OWN natural vocabulary,
+    the IRC sections that govern QSBS -- parse as phantom dollar amounts.
+    Same collision class as cannabis 280E's phantom $280 parse (see
+    _cannabis_strip_280e_phantom_amounts), fixed the same way: a local
+    filter scoped to this one feature rather than touching the shared
+    _amounts()/_amount_near() that 20+ other paths depend on. Filters out
+    amounts exactly matching 1202.0 or 1045.0 -- a taxpayer stating an
+    actual dollar figure of precisely $1,202 or $1,045 for a QSBS
+    exclusion is vanishingly unlikely next to the certainty of these
+    numbers appearing as bare statute references in any QSBS question."""
+    return [(a, s, e) for a, s, e in amounts if a not in (1202.0, 1045.0)]
+
+
+def _income_qsbs_answer(conn, question: str, base: dict):
+    """QSBS (Qualified Small Business Stock, IRC Sections 1202/1045) gain
+    -- see income_brackets.compute_qsbs_ca_tax's docstring for the R&TC
+    18152.5 full-non-conformity basis. Uses the 'one other amount'
+    pattern exactly like the excess-business-loss/NOL/IRA-deduction
+    paths, but via the phantom-filtered amounts above instead of
+    _amounts()/_amount_near() directly."""
+    fs = income_brackets.detect_qsbs_signal(question)
+    if not fs:
+        return None
+    amounts = _qsbs_strip_section_number_phantoms(_amounts(question))
+    excluded_amount = _amount_near_filtered(question, income_brackets.QSBS_EXCLUDED_AMOUNT_TERMS, amounts)
+    if excluded_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != excluded_amount]
+    if len(others) != 1:
+        return None
+    federal_taxable_gain = others[0]
+    calc = income_brackets.compute_qsbs_ca_tax(conn, federal_taxable_gain, excluded_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": federal_taxable_gain, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${federal_taxable_gain:,.2f} in federal taxable gain from your Qualified "
+        f"Small Business Stock (QSBS) sale, with ${excluded_amount:,.2f} excluded or deferred "
+        f"federally under IRC Section 1202/1045, filing status {label}: California does NOT "
+        f"conform to the federal QSBS exclusion/deferral ({income_brackets.QSBS_CITATION}) -- "
+        f"the full ${excluded_amount:,.2f} is added back for California, so your "
+        f"California-taxable gain is ${calc['ca_gain']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes the QSBS gain is your only income (no other adjustments) "
+        "-- your actual liability may differ."
+    )
+    return result
+
+
+def _income_qsbs_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_excess_business_loss_missing_filing_status_answer
+    for the QSBS path."""
+    if not income_brackets.detect_qsbs_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax on a QSBS sale, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please ask again and include your filing status.")
+    return result
+
+
+def _income_hsa_investment_gain_answer(conn, question: str, base: dict):
+    """Other income (e.g. wages) + a stated realized gain from selling
+    investments held inside an HSA -- see income_brackets.
+    compute_hsa_investment_gain_ca_tax's docstring for the Schedule CA
+    Line 7a conformity basis (CA doesn't recognize HSA tax-shelter status
+    at all, so the gain is CA-taxable with no federal counterpart to
+    reconcile against). Uses _amount_near/the 'one other amount' pattern
+    exactly like the excess-business-loss/NOL/IRA-deduction paths."""
+    fs = income_brackets.detect_hsa_investment_gain_signal(question)
+    if not fs:
+        return None
+    hsa_gain_amount = _amount_near(question, income_brackets.HSA_INVESTMENT_GAIN_TERMS)
+    if hsa_gain_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != hsa_gain_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_hsa_investment_gain_ca_tax(conn, income_amount, hsa_gain_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in other income (e.g. wages), filing status {label}, "
+        f"and a ${hsa_gain_amount:,.2f} realized gain from selling investments held inside "
+        f"your HSA: California does not recognize HSAs as tax-advantaged "
+        f"({income_brackets.HSA_INVESTMENT_GAIN_CITATION}), so this gain is fully taxable for "
+        "California THIS YEAR, with no federal counterpart -- federally it stays invisible "
+        f"inside the HSA. Your California AGI is about ${calc['agi']:,.2f}; after the standard "
+        f"deduction (${calc['standard_deduction']:,.0f}), your California taxable income is "
+        f"about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes no other adjustments -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_hsa_investment_gain_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_excess_business_loss_missing_filing_status_answer
+    for the HSA-investment-gain path."""
+    if not income_brackets.detect_hsa_investment_gain_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a gain from investments sold inside your "
+        "HSA, I need your filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse. Please ask again and "
+        "include your filing status.")
+    return result
+
+
+def _income_capital_loss_carryover_answer(conn, question: str, base: dict):
+    """Capital loss CARRYOVER from a prior year -- see income_brackets.
+    CAPITAL_LOSS_CARRYOVER_TERMS's module note for why this needs its own
+    detection: the underlying math is IDENTICAL to
+    compute_capital_loss_ca_tax (same annual limit), but that path's own
+    disclosure text wrongly claims a current-year-loss assumption when
+    the question explicitly says otherwise. Checked BEFORE the generic
+    capital-loss path (mirrors K-1 capital gain's ordering fix)."""
+    fs = income_brackets.detect_capital_loss_carryover_signal(question)
+    if not fs:
+        return None
+    loss_amount = _amount_near(question, income_brackets.CAPITAL_LOSS_CARRYOVER_TERMS)
+    if loss_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_capital_loss_ca_tax(conn, income_amount, loss_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["carryover"]:
+        loss_note = (f"${calc['deductible_loss']:,.2f} of your ${loss_amount:,.2f} capital loss "
+                     f"carryover (the annual limit for {label}), with the remaining "
+                     f"${calc['carryover']:,.2f} continuing to carry forward to next year's "
+                     "California return (not reflected in this estimate)")
+    else:
+        loss_note = f"your full ${loss_amount:,.2f} capital loss carryover (under the annual limit)"
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in gross income (also your California AGI before the "
+        f"loss offset, with no other adjustments), filing status {label}, and deducting "
+        f"{loss_note} ({income_brackets.CAPITAL_LOSS_CARRYOVER_CITATION}), plus the standard "
+        f"deduction (${calc['standard_deduction']:,.0f}): your California taxable income is "
+        f"about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you were a California resident for ALL prior years that "
+        "generated this carryover -- if you were a nonresident or part-year resident in any of "
+        "those years, FTB requires recalculating the carryover as if you'd been a CA resident "
+        "throughout, which this estimate does not do -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_capital_loss_carryover_missing_filing_status_answer(question: str, base: dict):
+    """Mirrors _income_capital_loss_missing_filing_status_answer for the
+    carryover-specific path."""
+    if not income_brackets.detect_capital_loss_carryover_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a capital loss carryover, I need your "
         "filing status: single, married filing jointly, married filing separately, head of "
         "household, or qualifying surviving spouse. Please ask again and include your filing "
         "status.")
@@ -2444,6 +2652,61 @@ def _income_k1_fallback_answer(question: str, base: dict):
     return result
 
 
+def _income_k1_capital_gain_answer(conn, question: str, base: dict):
+    """K-1 pass-through CAPITAL GAIN (Schedule CA Line 7a / Schedule D
+    Line 2) -- see income_brackets.K1_CAPITAL_GAIN_TERMS's module note
+    for why this needs its OWN trigger rather than widening K1_TRIGGERS
+    (K1_COMPLEXITY_EXCLUDE deliberately excludes "capital gain" from the
+    ordinary K-1 income path). Reuses compute_k1_ca_tax's math unchanged
+    (same K-1-only, sole-income scope) but overrides the citation to the
+    correct Line 2/Schedule D source rather than Line 5/Schedule CA."""
+    fs = income_brackets.detect_k1_capital_gain_signal(question)
+    if not fs:
+        return None
+    amount = _amount(question)
+    if amount is None:
+        return None
+    calc = income_brackets.compute_k1_ca_tax(conn, amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "k1_pass_through_capital_gain_tax",
+              "amount": amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": income_brackets.K1_CAPITAL_GAIN_CITATION,
+              "source_url": income_brackets.K1_CAPITAL_GAIN_SOURCE_URL}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in K-1 pass-through capital gain (from a partnership, "
+        f"fiduciary, S corporation, or LLC's California Schedule K-1) is your ONLY income, "
+        f"filing status {label}, and the standard deduction (${calc['standard_deduction']:,.0f}): "
+        f"California taxes capital gains as ordinary income with no special rate "
+        f"({income_brackets.K1_CAPITAL_GAIN_CITATION}), so your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California tax is about ${calc['total_tax']:,.2f}."
+        f"{surtax_note} This uses your STATED California K-1 capital gain amount as-is -- it "
+        "does not account for basis, at-risk, or passive-activity-loss limitations, and "
+        "assumes no other income (wages, self-employment, etc.) -- your actual liability may "
+        "differ."
+    )
+    return result
+
+
+def _income_k1_capital_gain_missing_fs_answer(question: str, base: dict):
+    """Mirrors _income_k1_missing_fs_answer for the K-1-capital-gain path."""
+    if not income_brackets.detect_k1_capital_gain_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California tax on K-1 pass-through capital gain, I need your filing "
+        "status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please ask again and include it.")
+    return result
+
+
 def _entity_tax_answer(conn, question: str, base: dict):
     """Ring 3, business entities Phase A -- entity-level California annual/
     minimum tax (S-corps, LLCs, partnerships). Genuinely different from
@@ -3005,6 +3268,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if k1_missing_fs_result:
         return k1_missing_fs_result
 
+    k1_capital_gain_result = _income_k1_capital_gain_answer(conn, question, base)
+    if k1_capital_gain_result:
+        return k1_capital_gain_result
+
+    k1_capital_gain_missing_fs_result = _income_k1_capital_gain_missing_fs_answer(question, base)
+    if k1_capital_gain_missing_fs_result:
+        return k1_capital_gain_missing_fs_result
+
     k1_fallback_result = _income_k1_fallback_answer(question, base)
     if k1_fallback_result:
         return k1_fallback_result
@@ -3092,6 +3363,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if itemized_mfs_result:
         return itemized_mfs_result
 
+    capital_loss_carryover_result = _income_capital_loss_carryover_answer(conn, question, base)
+    if capital_loss_carryover_result:
+        return capital_loss_carryover_result
+
+    missing_capital_loss_carryover_fs_result = _income_capital_loss_carryover_missing_filing_status_answer(question, base)
+    if missing_capital_loss_carryover_fs_result:
+        return missing_capital_loss_carryover_fs_result
+
     capital_loss_result = _income_capital_loss_answer(conn, question, base)
     if capital_loss_result:
         return capital_loss_result
@@ -3139,6 +3418,22 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_ira_fs_result = _income_ira_deduction_missing_filing_status_answer(question, base)
     if missing_ira_fs_result:
         return missing_ira_fs_result
+
+    qsbs_result = _income_qsbs_answer(conn, question, base)
+    if qsbs_result:
+        return qsbs_result
+
+    missing_qsbs_fs_result = _income_qsbs_missing_filing_status_answer(question, base)
+    if missing_qsbs_fs_result:
+        return missing_qsbs_fs_result
+
+    hsa_gain_result = _income_hsa_investment_gain_answer(conn, question, base)
+    if hsa_gain_result:
+        return hsa_gain_result
+
+    missing_hsa_gain_fs_result = _income_hsa_investment_gain_missing_filing_status_answer(question, base)
+    if missing_hsa_gain_fs_result:
+        return missing_hsa_gain_fs_result
 
     caleitc_investment_result = _income_caleitc_investment_answer(conn, question, base)
     if caleitc_investment_result:

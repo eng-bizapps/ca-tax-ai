@@ -85,7 +85,16 @@ ITEMS = [
      "not_applicable", None, None),
     ("I", "A", "3", "CFC dividends / RIC capital gains / pre-1987 S-corp distributions",
      "addition", "narrow", "Sched CA (540) Pt I Sec A line 3",
-     "deferred_new_engine", None, "Business-owner/investor shape"),
+     "not_applicable", None,
+     "Reclassified 2026-08-14 after research: bundling confirmed accurate (FTB 2025 "
+     "instructions list all three verbatim as Column C additions), but each is a genuinely "
+     "narrow population -- CFC dividends (requires owning a controlled foreign corporation), "
+     "RIC undistributed capital gains (requires a Form 2439, rare even among mutual fund "
+     "investors), pre-1987 S-corp distributions (aging/closing population, comparable to the "
+     "1986-87 three-year-rule annuity election item). SB 711's conformity-date change does "
+     "NOT affect any of the three (verified against R&TC 17024.5/17088's actual amended text "
+     "-- these are specific-provision carve-outs, not general date-conformity items). Covered "
+     "by the generic FTB Pub. 1001 disclaimer instead of a dedicated feature."),
     ("I", "A", "4a/4b", "IRA distribution basis/timing differences",
      "both", "moderate", "Sched CA (540) Pt I Sec A line 4a/4b; FTB Pub 1005",
      "deferred_new_engine", None, "Requires historical CA-vs-federal contribution basis, not a single stated fact"),
@@ -101,9 +110,75 @@ ITEMS = [
     ("I", "A", "6", "Social Security / Tier 1 railroad retirement benefits",
      "subtraction", "common", "Sched CA (540) Pt I Sec A line 6",
      "built", "social_security_income", None),
-    ("I", "A", "7a", "Capital gain/loss basis differences (HSA, QSBS, installment sale, pass-through, etc.)",
-     "both", "moderate", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540)",
-     "deferred_new_engine", None, "Routed through a separate schedule; investment-history-dependent"),
+    # Line 7a's original single bundled entry was split 2026-08-14 after research
+    # found NINE distinct FTB-confirmed divergence triggers, not four, with very
+    # different tractability profiles -- see the per-item entries below.
+    ("I", "A", "7a", "QSBS gain exclusion/deferral addback (IRC 1202/1045)",
+     "addition", "narrow", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540) Column (e); R&TC 18152.5",
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: compute_qsbs_ca_tax in income_brackets.py. California does NOT "
+     "conform to the federal QSBS exclusion/deferral AT ALL -- 100% addback, confirmed by "
+     "Cutler v. FTB (2012) and R&TC 18152.5's repeal of CA's own QSBS provisions, unaffected "
+     "by SB 711 (CA still doesn't conform to OBBBA's 2025 QSBS expansion either). Requires "
+     "TWO stated figures (federal taxable gain + excluded amount) rather than guessing which "
+     "a single figure means. Also closed a phantom-amount bug: literal '1202'/'1045' in "
+     "question text parses as a bare number via the shared amount-extraction regex, same "
+     "collision class as cannabis 280E's phantom $280 parse."),
+    ("I", "A", "7a", "HSA-held investment sale gain addback",
+     "addition", "narrow", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540)",
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: compute_hsa_investment_gain_ca_tax in income_brackets.py. CA doesn't "
+     "recognize HSA tax-shelter status at all, so a realized investment-sale gain is fully "
+     "CA-taxable the year it occurs with NO federal counterpart (unlike QSBS, only one "
+     "adjustment figure needed). GAINS only -- losses are ordinary capital losses subject to "
+     "the existing $3,000/$1,500-MFS annual limit, nothing HSA-specific about that case. "
+     "Needed a narrower purpose-built exclude list (HSA_GAIN_COMPLEXITY_EXCLUDE) rather than "
+     "the shared COMPLEXITY_EXCLUDE, since HSA gain taxability is orthogonal to how other "
+     "income was earned (self-employment doesn't disqualify it, unlike IRA deduction). Falls "
+     "through correctly to the pre-existing hsa_contributions_and_earnings informational "
+     "topic when facts are missing or a loss is mentioned."),
+    ("I", "A", "7a", "Pass-through capital gain from CA Schedule K-1 (100S/541/565/568)",
+     "addition", "moderate", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540) Line 2",
+     "built", "k1_pass_through_capital_gain_tax",
+     "Built 2026-08-14: reuses compute_k1_ca_tax's math unchanged (K-1 pass-through income "
+     "already built on Line 5) with the correct Schedule D Line 2 citation instead of Schedule "
+     "CA Line 5 -- CA taxes capital gains as ordinary income, no special rate, so the "
+     "arithmetic is identical, only the citation differs. Needed its own detect function "
+     "(K1_COMPLEXITY_EXCLUDE deliberately excludes 'capital gain' from the ordinary K-1 path) "
+     "wired in BEFORE the existing K1 fallback catch-all, since 'k-1 capital gain' contains "
+     "the bare 'k-1' substring the fallback matches on. GAINS only -- K-1 capital LOSSES use "
+     "the standard $3,000/$1,500-MFS annual-limit mechanic instead, out of scope here."),
+    ("I", "A", "7a", "CA capital loss carryover from prior year's Schedule D (540)",
+     "subtraction", "moderate", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540) Line 6",
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-14: resident-all-prior-years case, reusing compute_capital_loss_ca_tax's "
+     "math UNCHANGED (a carryover loss faces the SAME $3,000/$1,500-MFS annual limit as any "
+     "capital loss -- the real gap was disclosure, not arithmetic: the generic current-year "
+     "path already computed the correct number for carryover-labeled questions since 'capital "
+     "loss' is a substring, but its answer text wrongly claimed a current-year-loss assumption "
+     "-- fixed with a dedicated path giving the accurate resident-all-prior-years disclosure, "
+     "checked BEFORE the generic path in the dispatcher). Nonresident/part-year-resident "
+     "history excluded -- FTB requires a year-by-year recalculation this model can't perform."),
+    ("I", "A", "7a", "Generic CA/federal basis differences (pre-1987, depreciation, inherited property, credits)",
+     "both", "moderate", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540) Column (c)",
+     "deferred_new_engine", None,
+     "Same historical-multi-year-basis-tracking problem as Line 4a/4b's IRA basis -- the "
+     "needed 'California basis' figure isn't something most taxpayers have on hand from any "
+     "single document. Left deferred, not reclassified, after 2026-08-14 research."),
+    ("I", "A", "7a", "Installment sale gain (FTB 3805E) with CA/federal basis difference",
+     "both", "narrow", "Sched CA (540) Pt I Sec A line 7a; FTB 3805E",
+     "deferred_new_engine", None,
+     "Inherits the generic basis-differences problem when a divergence exists; even absent "
+     "one, FTB 3805E is a multi-input form (price/basis/gross-profit-ratio/payments-received) "
+     "rather than a single stated fact."),
+    ("I", "A", "7a", "Gain on personal residence sale where CA/federal depreciation diverged",
+     "both", "narrow", "Sched CA (540) Pt I Sec A line 7a",
+     "deferred_new_engine", None, "Same historical-depreciation-tracking family as the generic basis-differences item."),
+    ("I", "A", "7a", "Kiddie-tax capital gain pass-through (FTB 3803, child's gain reported on parent's return)",
+     "addition", "narrow", "Sched CA (540) Pt I Sec A line 7a",
+     "not_applicable", None,
+     "Single-fact tractable if built, but a narrow election most families don't use -- same "
+     "reasoning that got the Line 3 items reclassified. Judgment call, noted 2026-08-14."),
 
     # ============ PART I, SECTION B -- Additional Income (lines 1-9a) ============
     ("I", "B", "1", "State tax refund",
@@ -462,6 +537,22 @@ def load():
                 "citation=EXCLUDED.citation, status=EXCLUDED.status, "
                 "topic_key=EXCLUDED.topic_key, notes=EXCLUDED.notes",
                 (TAX_YEAR, part, section, line_ref, label, adj, freq, citation, status, topic_key, notes))
+        # Prune orphaned rows: the upsert above is keyed on (tax_year,
+        # line_ref, item_label), so renaming or splitting an item_label
+        # (as happened twice during the 2026-08-14 Line 7a/3 research
+        # passes) leaves the OLD label behind as a stale row with no
+        # DELETE step to clean it up. Recompute the current valid set on
+        # every load and remove anything in this tax_year not in it.
+        current_keys = {(line_ref, label) for _, _, line_ref, label, *_ in ITEMS}
+        existing = conn.execute(
+            "SELECT id, line_ref, item_label FROM schedule_ca_inventory WHERE tax_year=%s",
+            (TAX_YEAR,)).fetchall()
+        orphan_ids = [row_id for row_id, line_ref, label in existing
+                      if (line_ref, label) not in current_keys]
+        if orphan_ids:
+            conn.execute(
+                "DELETE FROM schedule_ca_inventory WHERE id = ANY(%s)", (orphan_ids,))
+            print(f"pruned {len(orphan_ids)} orphaned row(s) (stale item_label from a rename/split)")
     print(f"loaded {len(ITEMS)} inventory items")
     status_report()
 
