@@ -432,7 +432,21 @@ ITEMS = [
      "not_applicable", None, "TY2022-2026"),
     ("I", "B", "8z", "Excess business loss carryover from prior years",
      "subtraction", "moderate", "Sched CA (540) Pt I Sec B line 8z; FTB 3461",
-     "deferred_new_engine", None, "Business-owner shape"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_ebl_carryover_ca_tax in income_brackets.py, extending the "
+     "already-built Line 8p threshold formula rather than new historical-tracking complexity. "
+     "FTB confirms California treats a disallowed excess business loss as a carryover excess "
+     "business loss INSTEAD OF an NOL carryover -- no MTI/suspension-style multi-year "
+     "recomputation to replicate (unlike Line 8a-general's still-deferred NOL carryforward). "
+     "Two cases modeled: full absorption (this year's business income >= carryover, flat "
+     "uncapped subtraction, FTB's own explicit words) and this-year-loss (combines with the "
+     "carryover, reapplies the SAME Line 8p threshold formula). Partial absorption (business "
+     "income positive but less than the carryover) deliberately left unmodeled -- FTB defers "
+     "that case to an unverified Form 3461 PDF worksheet; routes to a specific needs_review "
+     "message rather than guessing. Dispatcher-ordering fix required: 'excess business loss "
+     "carryover' contains 'excess business loss' as a substring, so this had to be checked "
+     "BEFORE the pre-existing Line 8p feature. 'Business-owner shape'/moderate frequency "
+     "confirmed accurate; the deferred status was stale."),
     ("I", "B", "8z", "California Venues Grant (CalOSBA)",
      "subtraction", "one_time", "Sched CA (540) Pt I Sec B line 8z",
      "not_applicable", None, "Pandemic-era, aging out"),
@@ -462,7 +476,19 @@ ITEMS = [
      "not_applicable", None, "Essentially obsolete population"),
     ("I", "B", "8z", "Foreign income of nonresident aliens",
      "both", "narrow", "Sched CA (540) Pt I Sec B line 8z",
-     "deferred_new_engine", None, "NRA filer shape, same class as Form 540NR work"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_nra_foreign_income_ca_tax in income_brackets.py. FTB's own "
+     "Line 8z text is a flat, unconditional, two-directional worldwide-income true-up: "
+     "'Adjust federal income to reflect worldwide income computed under California law. "
+     "Enter losses from foreign sources on line 8z, column B. Enter foreign source income on "
+     "line 8z, column C.' No worksheet, no cap. 'Nonresident alien' here is the FEDERAL "
+     "tax-status term (Form 1040-NR filer), NOT a California-residency term -- confirmed by "
+     "its other uses on the same resident-only instructions page -- so this is NOT the "
+     "540NR/nonresident engine's job (confirmed via grep: income_nonresident.py has zero "
+     "existing handling for this). The 'same class as Form 540NR work' framing was the stale "
+     "part of this ledger note; 'NRA filer shape'/narrow frequency was accurate. Requires an "
+     "explicit federal-NRA self-identification phrase to trigger (not just any 'foreign "
+     "income' mention, which is far too generic on its own)."),
     ("I", "B", "8z", "Cost-share payments to forest landowners",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec B line 8z",
      "not_applicable", None, None),
@@ -480,7 +506,20 @@ ITEMS = [
      "not_applicable", None, "Historical, closing population"),
     ("I", "B", "9b1", "Disaster loss deduction (FTB 3805V)",
      "subtraction", "moderate", "Sched CA (540) Pt I Sec B line 9b1; FTB 3805V",
-     "deferred_new_engine", None, "Requires declared-disaster-county + loss facts"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: compute_disaster_loss_carryover_ca_tax in income_brackets.py, mirroring "
+     "compute_nol_ca_tax's shape MINUS the $1M suspension branch (disaster loss carryovers are "
+     "explicitly exempt from the 2024-2027 NOL suspension rule per FTB's own suspension text). "
+     "FTB's own Line 9b1 instruction is a flat 'copy this cell from your own 3805V, Part III "
+     "line 2 column (f)' pass-through -- the SAME cell Line 9b2's NOL carryover pulls from, "
+     "just a different loss type. The original ledger note ('requires declared-disaster-county "
+     "+ loss facts') was stale, same pattern as Line 8a/8d -- the per-item casualty-loss facts "
+     "(FMV, insurance, $100/10%-AGI floors) were already baked in when the loss ORIGINATED at "
+     "the separate, still-deferred Part II Line 15 (Casualty/theft loss); this feature never "
+     "touches that computation, only the already-limited leftover carryover balance in a later "
+     "year. Broader population than NOL carryover -- applies against ANY income (wages "
+     "included), not just business income, per FTB's own 'there is income' (not 'business "
+     "income') wording."),
     ("I", "B", "9b2", "NOL deduction (FTB 3805V)",
      "subtraction", "moderate", "Sched CA (540) Pt I Sec B line 9b2; FTB 3805V",
      "built", "ca_income_tax_bracket",
@@ -546,7 +585,25 @@ ITEMS = [
      "not_applicable", None, None),
     ("I", "C", "24", "Foreign housing deduction (Form 2555)",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec C line 24j",
-     "deferred_new_engine", None, "Expat population"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15: extended compute_foreign_earned_income_ca_tax (Line 8d) with an "
+     "optional housing_deduction_amount param rather than a new function, since the two "
+     "commonly co-occur for self-employed expats (IRC 911(c) housing deduction available IN "
+     "ADDITION TO the 911(a) earned-income exclusion). FTB's Line 24j text is a flat 'enter "
+     "the amount from column A in column B' restatement, same non-conformity as Line 8d's "
+     "exclusion -- no cap table, trust-the-input applies. NOTE: despite living in Section C's "
+     "'column B' (labeled subtraction), tracing the arithmetic through Form 540's own Line "
+     "26/27 chain confirms the NET effect on CA taxable income is an ADDBACK (same direction "
+     "as Line 8d), not a literal subtraction -- Section C's column B/C encode subtraction/"
+     "addition to the DEDUCTION total, opposite-signed from Section A/B's income-total "
+     "convention; the ledger's 'subtraction' tag reflects the column label only. Two bugs "
+     "found and fixed during verification: (1) a shared 'form 2555' substring between the "
+     "exclusion and housing-deduction term sets could double-count a single housing figure as "
+     "both an exclusion and a deduction (fixed: only search for an exclusion amount when an "
+     "exclusion-specific term is present, not bare 'form 2555' already claimed by a housing "
+     "phrase); (2) a sales-domain cross-routing collision for the 'both stated together' "
+     "phrasing -- same class as cannabis 280E/military retirement -- fixed with an "
+     "early-intercept guard in _answer()."),
 
     # ============ PART II -- Itemized Deduction Adjustments ============
     ("II", None, "1-4", "Self-employed health insurance moved into medical expenses (worker reclassification)",
@@ -599,7 +656,24 @@ ITEMS = [
      "not_applicable", None, "Very narrow, aging population"),
     ("II", None, "15", "Casualty/theft loss (CA allows without federal 'declared disaster' restriction)",
      "both", "moderate", "Sched CA (540) Pt II line 15",
-     "deferred_new_engine", None, "Needs disaster-declaration + loss-amount facts"),
+     "built", "ca_income_tax_bracket",
+     "Built 2026-08-15 (last item in the completeness ledger): extended compute_itemized_ca_tax "
+     "with an optional casualty_loss_amount param (8th and final optional itemized-deduction "
+     "figure). FTB: 'California allows personal casualty and theft loss and disaster loss "
+     "deductions' regardless of a federal disaster declaration -- federal law (post-TCJA) only "
+     "allows the deduction for federally-declared-disaster losses. Two-fact design, a "
+     "deliberate middle ground: IRS Pub. 547's THREE floors are the $100-per-event floor and "
+     "insurance-reimbursement netting (both per-event data this system can't collect in one "
+     "question -- pushed onto the taxpayer's stated pre-floor total, same trust boundary as "
+     "charitable_amount/capital_loss) and the 10%-of-AGI floor (applied to the yearly TOTAL, "
+     "not per-event -- COMPUTED here via compute_casualty_loss_floor rather than trusted, "
+     "since it's the one piece a taxpayer's self-reported final number is most likely to get "
+     "wrong). Requires itemizing, same as every other Part II adjustment -- no standalone "
+     "trigger, wired into the existing _income_itemized_answer dispatcher alongside SALT/"
+     "mortgage/misc/charitable/SALT-cap-addback. No sales-domain routing collision found "
+     "(checked, unlike the Line 24j housing-deduction build immediately before this one). "
+     "$100/10% floors confirmed current for TY2025 -- OBBBA's casualty-loss changes take "
+     "effect TY2026 forward and leave these figures unchanged even then."),
     ("II", None, "16", "Unreimbursed impairment-related work expenses",
      "subtraction", "narrow", "Sched CA (540) Pt II line 16",
      "not_applicable", None, None),

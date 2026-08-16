@@ -87,6 +87,21 @@ COMPLEXITY_EXCLUDE = {
     "gilti", "global intangible low-taxed income", "global intangible low taxed income",
     "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
     "form 8992",
+    # added alongside the NRA foreign-income true-up feature (Line 8z),
+    # same general-purpose reasoning: a federal-nonresident-alien self-
+    # identification alongside a foreign-source income/loss figure can
+    # accompany any other income type -- without this, the figure would
+    # be silently dropped by the plain path.
+    "nonresident alien", "non-resident alien", "federal nonresident alien",
+    "form 1040-nr", "1040-nr", "1040nr",
+    # added alongside the disaster loss carryover feature, same general-
+    # purpose reasoning -- a stated carryover figure can accompany any
+    # other income type.
+    "disaster loss carryover", "disaster loss deduction",
+    # added alongside the foreign housing deduction extension (Line
+    # 24j), same reasoning as the foreign earned income exclusion above.
+    "foreign housing deduction", "housing deduction from form 2555",
+    "form 2555 housing deduction", "housing deduction under form 2555",
 }
 COMPUTE_TRIGGERS = {
     "tax bracket", "how much tax", "how much california tax",
@@ -269,6 +284,19 @@ SE_COMPLEXITY_EXCLUDE = {
     "gilti", "global intangible low-taxed income", "global intangible low taxed income",
     "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
     "form 8992",
+    # added alongside the NRA foreign-income true-up feature, same
+    # general-purpose reasoning as IRA deduction/HSA gain -- a foreign-
+    # source income/loss figure can accompany self-employment income
+    # just as easily as wages.
+    "nonresident alien", "non-resident alien", "federal nonresident alien",
+    "form 1040-nr", "1040-nr", "1040nr",
+    # added alongside the disaster loss carryover feature, same
+    # general-purpose reasoning as IRA deduction/HSA gain.
+    "disaster loss carryover", "disaster loss deduction",
+    # added alongside the foreign housing deduction extension (Line
+    # 24j), same reasoning as the foreign earned income exclusion above.
+    "foreign housing deduction", "housing deduction from form 2555",
+    "form 2555 housing deduction", "housing deduction under form 2555",
 }
 
 # Federal Schedule SE mechanics (California has no separate self-employment
@@ -523,6 +551,19 @@ K1_COMPLEXITY_EXCLUDE = {
     "gilti", "global intangible low-taxed income", "global intangible low taxed income",
     "irc section 951a", "irc 951a", "section 951a inclusion", "951a inclusion",
     "form 8992",
+    # added alongside the NRA foreign-income true-up feature, same
+    # reasoning as IRA deduction: no entity-level absorption applies to
+    # this personal worldwide-income true-up either.
+    "nonresident alien", "non-resident alien", "federal nonresident alien",
+    "form 1040-nr", "1040-nr", "1040nr",
+    # added alongside the disaster loss carryover feature, same
+    # reasoning as IRA deduction: no entity-level absorption applies to
+    # this personal carryover deduction either.
+    "disaster loss carryover", "disaster loss deduction",
+    # added alongside the foreign housing deduction extension (Line
+    # 24j), same reasoning as the foreign earned income exclusion above.
+    "foreign housing deduction", "housing deduction from form 2555",
+    "form 2555 housing deduction", "housing deduction under form 2555",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -834,6 +875,68 @@ SALT_CAP_ADDBACK_TERMS = {
     "state and local tax cap", "over the federal salt limit",
 }
 
+# Optional eighth figure (Schedule CA (540) Part II Line 15): verified
+# against FTB's own text -- "Under federal law, the personal casualty
+# and theft loss deduction is suspended, with exception for personal
+# casualty gains... California law does not conform. California allows
+# personal casualty and theft loss and disaster loss deductions. If you
+# have personal casualty and theft loss and/or disaster loss, complete
+# another federal Form 4684, Casualties and Thefts, using California
+# amounts." Post-TCJA federal law only allows this deduction for losses
+# in a FEDERALLY DECLARED disaster area; California allows it
+# regardless -- an ordinary theft/accident loss with no disaster
+# declaration at all. Same non-conformity direction as mortgage_
+# interest_addback/misc_itemized_expenses/salt_cap_addback -- ADDED to
+# the itemized total.
+#
+# TWO-FACT DESIGN (a deliberate middle ground, not blind trust-the-input
+# and not a full per-event rebuild): IRS Pub. 547 confirms the federal
+# Form 4684 computation has THREE floors -- (1) a $100-per-casualty-
+# EVENT floor, (2) netting against insurance/other reimbursement PER
+# EVENT, both requiring per-event data this system genuinely cannot
+# collect in one question (same conclusion already reached for the
+# disaster-loss-carryover feature's ORIGINATING computation -- see that
+# module's note: "this feature does NOT touch that per-item Form 4684
+# computation... those floors were already baked into the loss when it
+# originated") -- and (3) a 10%-of-AGI floor applied to the YEARLY TOTAL
+# of all events combined, which is NOT per-event and depends on exactly
+# two clean facts this system already asks for (a stated loss total,
+# AGI). (1) and (2) stay pushed onto the taxpayer's single stated
+# figure (casualty_loss_amount is defined as ALREADY net of the $100
+# floor and insurance reimbursement -- same trust boundary as
+# charitable_amount/capital_loss elsewhere in this codebase); (3) is
+# computed here rather than trusted, since it's the one piece a
+# taxpayer's self-reported "final number" is most likely to get wrong
+# (confusing federal vs. CA AGI, or an arithmetic slip on a subtraction
+# most people do by hand) -- directly mirroring compute_charitable_cap/
+# compute_misc_itemized_reinstatement's existing shape (stated pre-floor
+# amount in, system-computed AGI-based floor applied, deduction out).
+#
+# $100/10% FLOORS CONFIRMED CURRENT FOR TY2025 (verified directly, not
+# assumed): OBBBA's casualty-loss changes (expanding eligible disasters
+# from federal-only to federal-or-state-declared) take effect for tax
+# years beginning after 12/31/2025 -- i.e. TY2026 forward, not TY2025 --
+# and even then leave the $100/10% figures themselves unchanged
+# ("deduction limits remain in place").
+CASUALTY_LOSS_AGI_FLOOR_RATE = 0.10
+CASUALTY_LOSS_TERMS = {
+    "casualty loss", "theft loss", "casualty and theft loss",
+    "casualty/theft loss", "casualty or theft loss",
+}
+
+
+def compute_casualty_loss_floor(casualty_loss_amount: float, agi: float):
+    """Schedule CA (540) Part II Line 15 -- floors the taxpayer's stated
+    casualty/theft loss (already net of the federal $100-per-event floor
+    and any insurance/other reimbursement -- see module note above) at
+    10% of AGI (IRS Pub. 547's "10% Rule", applied to the yearly TOTAL
+    of all events combined, not per-event). Returns the amount to ADD to
+    the itemized total (0 if the 10% floor isn't cleared)."""
+    if casualty_loss_amount is None or agi is None or casualty_loss_amount < 0 or agi < 0:
+        return None
+    floor = agi * CASUALTY_LOSS_AGI_FLOOR_RATE
+    return max(0.0, casualty_loss_amount - floor)
+
 
 def _itemized_base_signal_ok(q: str) -> bool:
     if not any(t in q for t in ITEMIZED_TERMS):
@@ -919,7 +1022,7 @@ def compute_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
                               filing_status: str, tax_year: int = DEFAULT_TAX_YEAR,
                               salt_amount: float = None, mortgage_interest_addback: float = None,
                               misc_itemized_expenses: float = None, charitable_amount: float = None,
-                              salt_cap_addback: float = None):
+                              salt_cap_addback: float = None, casualty_loss_amount: float = None):
     """income_amount is treated as both gross wage income and California AGI
     (no other adjustments -- same simple-case assumption as the plain
     wage-earner compute path). Applies the Line 29 phase-out worksheet when
@@ -949,8 +1052,14 @@ def compute_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
     SALT_CAP_ADDBACK_TERMS's docstring for why this is trusted directly
     rather than derived from a property-tax/income-tax split -- added
     BACK to the itemized total, same direction as mortgage_interest_
-    addback. If none of these are given, itemized_amount is trusted as
-    already CA-conforming, same as before these parameters existed."""
+    addback. `casualty_loss_amount`, if given, is the taxpayer's stated
+    personal casualty/theft loss (Schedule CA Line 15) ALREADY net of
+    the federal $100-per-event floor and insurance reimbursement -- see
+    compute_casualty_loss_floor for the 10%-of-AGI floor this function
+    applies -- the floored amount is added to the itemized total, same
+    direction as mortgage_interest_addback. If none of these are given,
+    itemized_amount is trusted as already CA-conforming, same as before
+    these parameters existed."""
     if income_amount is None or itemized_amount is None or income_amount < 0 or itemized_amount < 0:
         return None
     if salt_amount is not None:
@@ -979,6 +1088,12 @@ def compute_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
         if salt_cap_addback < 0:
             return None
         itemized_amount = itemized_amount + salt_cap_addback
+    casualty_deductible = None
+    if casualty_loss_amount is not None:
+        if casualty_loss_amount < 0:
+            return None
+        casualty_deductible = compute_casualty_loss_floor(casualty_loss_amount, income_amount)
+        itemized_amount = itemized_amount + casualty_deductible
     dedu = standard_deduction(conn, filing_status, tax_year)
     if not dedu:
         return None
@@ -995,6 +1110,7 @@ def compute_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
             "misc_itemized_expenses": misc_itemized_expenses, "misc_reinstated": misc_reinstated,
             "charitable_amount": charitable_amount, "charitable_disallowed": charitable_disallowed,
             "salt_cap_addback": salt_cap_addback,
+            "casualty_loss_amount": casualty_loss_amount, "casualty_deductible": casualty_deductible,
             "phaseout": phaseout, "ca_itemized_amount": ca_itemized_amount,
             "standard_deduction": dedu["amount"], "used_itemized": used_itemized,
             "deduction_used": deduction_used}
@@ -1219,6 +1335,164 @@ def compute_excess_business_loss_ca_tax(conn, income_amount: float, business_los
             "standard_deduction": dedu["amount"]}
 
 
+# --- Excess business loss CARRYOVER absorption (Schedule CA (540) Line
+# 8z) -- verified against FTB's 2025 Schedule CA (540) instructions:
+# "Excess business losses carryover from prior years -- If in the
+# current year, the taxpayer has enough business income to fully offset
+# all of the excess business loss carryover from prior year, then the
+# carryover balance is applied to offset the business income. Refer to
+# form FTB 3461 instructions for line 14b and line 15 for further
+# instructions. Enter the excess business losses carryover from prior
+# years on line 8z, column B..." Cross-referenced against Line 8p's own
+# instruction above: "any disallowed loss will be treated as a carryover
+# excess business loss INSTEAD OF an NOL carryover" -- so, unlike NOL
+# carryforward (Line 8a-general, still deferred: a real MTI/suspension
+# multi-year recomputation), there is nothing analogous to replicate
+# here. This is genuinely a "trust the stated prior-year balance"
+# extension of the ALREADY-BUILT Line 8p threshold formula, same "trust
+# the input" precedent as capital-loss carryover (CAPITAL_LOSS_CARRYOVER
+# above).
+#
+# TWO CASES MODELED, per FTB's own text:
+#   FULL ABSORPTION (this year's business INCOME >= the stated carryover
+#     balance): FTB's own words describe exactly this case -- a flat,
+#     uncapped, dollar-for-dollar Line 8z subtraction of the whole
+#     carryover balance. No threshold test applies (the taxpayer isn't
+#     generating a NEW excess this year, just using up an old one).
+#   THIS-YEAR LOSS (the current year's business result is ITSELF a
+#     loss): the current-year loss and the carryover balance combine,
+#     then get run through the EXACT SAME threshold formula already
+#     verified for Line 8p (compute_excess_business_loss) -- Form 3461
+#     Part III reapplies that identical cap to the combined figure, per
+#     FTB's own cross-reference. Reuses existing, already-verified code
+#     rather than new guesswork.
+# ONE CASE DELIBERATELY LEFT OUT (returns None; caller routes to a
+# specific needs_review message, not a guess): this year's business
+# INCOME is positive but LESS than the carryover balance (partial
+# absorption). FTB's Line 8z paragraph doesn't spell out this middle
+# case in its own text -- it defers to "form FTB 3461 instructions for
+# line 14b and line 15," a PDF worksheet not independently fetched this
+# session (see [[claude-desktop-pdf-navigation-crash]] for why direct
+# FTB PDF navigation is avoided). Rather than guess at an unverified
+# worksheet's arithmetic, this stays unmodeled.
+EBL_CARRYOVER_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 8z"
+EBL_CARRYOVER_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+EBL_CARRYOVER_TERMS = {
+    "excess business loss carryover", "excess business losses carryover",
+    "business loss carryover from prior year", "business loss carryover",
+    "prior year excess business loss", "carryover excess business loss",
+    "excess business loss carryover from prior years",
+}
+# Anchor phrases for THIS YEAR's business result, split by sign -- which
+# set matches determines is_loss_year, and the SAME set anchors the
+# proximity search for that dollar figure. Deliberately distinct wording
+# from EBL_CARRYOVER_TERMS above (no "business loss carryover"-style
+# substring overlap), since a single question states BOTH this year's
+# result AND the prior-year carryover as separate dollar figures.
+EBL_CARRYOVER_INCOME_TERMS = {
+    "business income this year", "business profit this year",
+    "this year's business income", "this year's business profit",
+    "current year business income", "current year business profit",
+}
+EBL_CARRYOVER_LOSS_TERMS = {
+    "business loss this year", "another business loss this year",
+    "this year's business loss", "current year business loss",
+}
+EBL_CARRYOVER_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "alimony",
+    "gambling", "gambled", "betting", "wagering",
+    "capital gain", "capital loss", "stock", "rsu",
+}
+
+
+def _ebl_carryover_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in EBL_CARRYOVER_TERMS):
+        return False
+    if any(t in q for t in EBL_CARRYOVER_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_ebl_carryover_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    + this year's business result + a stated prior-year excess-business-
+    loss carryover balance' question."""
+    q = question.lower()
+    if not _ebl_carryover_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_ebl_carryover_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _ebl_carryover_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_ebl_carryover_is_loss_year(question: str) -> bool:
+    """True iff the question describes THIS YEAR's business result as a
+    loss (routes to the combine-and-recap branch) rather than income
+    (the full-absorption branch, the default when absent)."""
+    q = question.lower()
+    return any(t in q for t in EBL_CARRYOVER_LOSS_TERMS)
+
+
+def compute_ebl_carryover_ca_tax(conn, other_income: float, business_result: float,
+                                   carryover_balance: float, is_loss_year: bool,
+                                   filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income is non-business income (e.g. wages), treated as
+    AGI-equivalent before this adjustment (no other adjustments, same
+    simplification used throughout). business_result is this year's
+    business INCOME (if is_loss_year is False) or this year's business
+    LOSS (if True) -- always stated as a positive figure, sign implied
+    by is_loss_year. carryover_balance is the stated prior-year excess-
+    business-loss carryover (a positive figure). Returns None for the
+    partial-absorption case (income year, business_result <
+    carryover_balance) that FTB defers to an unverified PDF worksheet --
+    see module note above; the caller routes that to a dedicated
+    needs_review message rather than treating it the same as a genuine
+    extraction failure."""
+    if other_income is None or other_income < 0:
+        return None
+    if business_result is None or business_result < 0:
+        return None
+    if carryover_balance is None or carryover_balance <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    if is_loss_year:
+        combined_loss = business_result + carryover_balance
+        ebl = compute_excess_business_loss(combined_loss, filing_status)
+        if not ebl:
+            return None
+        agi = max(0.0, other_income - ebl["allowed_loss"])
+        taxable_income = max(0.0, agi - dedu["amount"])
+        calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+        if not calc:
+            return None
+        return {**calc, "other_income": other_income, "business_result": business_result,
+                "carryover_balance": carryover_balance, "is_loss_year": True,
+                "combined_loss": combined_loss, "threshold": ebl["threshold"],
+                "allowed_loss": ebl["allowed_loss"],
+                "new_excess_business_loss": ebl["excess_business_loss"],
+                "agi": agi, "standard_deduction": dedu["amount"]}
+    if business_result < carryover_balance:
+        return None
+    agi = max(0.0, other_income + business_result - carryover_balance)
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "business_result": business_result,
+            "carryover_balance": carryover_balance, "is_loss_year": False,
+            "agi": agi, "standard_deduction": dedu["amount"]}
+
+
 # --- CA NOL (net operating loss) carryover deduction SUSPENSION (Ring 3
 # extension, R&TC Section 17276.24 / FTB Form 3805V) -- verified against
 # FTB's 2025 Instructions for Form 3805V
@@ -1357,6 +1631,119 @@ def compute_nol_ca_tax(conn, business_income: float, nol_carryover_amount: float
             "suspended": suspended, "nol_deduction": nol_deduction,
             "remaining_carryover": remaining_carryover, "mti": mti,
             "standard_deduction": dedu["amount"]}
+
+
+# --- California disaster loss carryover deduction (Schedule CA (540)
+# Line 9b1, FTB Form 3805V) -- verified against FTB's 2025 Schedule CA
+# (540) instructions: "If you have a California disaster loss carryover
+# deduction and there is income in the current taxable year, enter the
+# total amount of disaster loss carryover deduction from your 2025 form
+# FTB 3805V, Part III, line 2, column (f), as a positive number in
+# column B." A flat "copy this cell from your own 3805V" pass-through --
+# pulls from the EXACT SAME Part III, line 2, column (f) cell as Line
+# 9b2's NOL carryover deduction (compute_nol_ca_tax above), just for a
+# different loss type.
+#
+# ORIGIN OF THE CARRYOVER (not re-derived here, same "trust the input"
+# precedent as the NOL carryover and capital-loss-carryover features):
+# a disaster loss is a personal casualty/theft loss (FTB: "Disaster
+# losses are casualty losses sustained as the result of a disaster... "
+# declared by the President or Governor) that EXCEEDED that year's
+# income when originally claimed at Schedule CA Part II Line 15 (a
+# SEPARATE, still-deferred ledger item -- this feature does NOT touch
+# that per-item Form 4684 computation at all; it only fires in a LATER
+# year on the already-limited leftover balance). Building this does not
+# require Line 15's per-item mechanics (FMV before/after, insurance
+# reimbursement, the $100-per-event/10%-of-AGI floors) -- those floors
+# were already baked into the loss when it originated.
+#
+# SIMPLER THAN NOL CARRYOVER (compute_nol_ca_tax above), not harder:
+# disaster loss carryovers are EXPLICITLY EXEMPT from the 2024-2027 $1M
+# NOL suspension rule regardless of income -- FTB's own suspension text
+# (quoted at NOL_THRESHOLD's module note) carves out "taxpayers ... with
+# disaster loss carryovers." So there is no suspended branch here at
+# all: deduction = min(carryover_amount, MTI), remainder carries
+# forward (up to 20 years for post-2011 declared disasters, disclosed
+# not tracked). Also broader than NOL's population: FTB's own line text
+# says "there is income in the current taxable year" -- NOT "business
+# income" specifically -- so this applies against ANY income (wages
+# included), unlike NOL carryover's sole-business-income scope.
+DISASTER_LOSS_CARRYOVER_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 9b1"
+DISASTER_LOSS_CARRYOVER_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+DISASTER_LOSS_CARRYOVER_TERMS = {
+    "disaster loss carryover", "disaster loss deduction",
+    "disaster loss carryover deduction", "california disaster loss carryover",
+}
+# Narrower than COMPLEXITY_EXCLUDE on purpose -- same lesson as HSA
+# investment gain/foreign earned income/Subpart F/GILTI: this deduction
+# is unconditional regardless of how the OTHER income was earned, so a
+# bare self-employment mention is not a genuine reason to defer.
+DISASTER_LOSS_CARRYOVER_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "dependent", "trust", "estate", "gambling", "gambled", "betting",
+    "wagering", "alimony", "pension", "rental", "renting", "rented",
+    "stock", "rsu",
+}
+
+
+def _disaster_loss_carryover_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in DISASTER_LOSS_CARRYOVER_TERMS):
+        return False
+    if any(t in q for t in DISASTER_LOSS_CARRYOVER_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_disaster_loss_carryover_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'other income
+    with a stated California disaster loss carryover deduction'
+    question."""
+    q = question.lower()
+    if not _disaster_loss_carryover_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_disaster_loss_carryover_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _disaster_loss_carryover_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_disaster_loss_carryover_ca_tax(conn, income_amount: float,
+                                             disaster_loss_carryover_amount: float,
+                                             filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as gross income and California AGI
+    before this deduction (no other adjustments, same simplification
+    used throughout). disaster_loss_carryover_amount is the taxpayer's
+    stated California disaster loss carryover deduction from FTB 3805V,
+    Part III, line 2, column (f) (the SAME cell NOL carryover pulls
+    from -- see module note above). Unlike compute_nol_ca_tax, there is
+    NO $1M suspension test here -- disaster loss carryovers are
+    explicitly exempt -- so deduction = min(carryover_amount, MTI),
+    remainder carries forward, no suspended branch."""
+    if income_amount is None or income_amount < 0:
+        return None
+    if disaster_loss_carryover_amount is None or disaster_loss_carryover_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    mti = max(0.0, income_amount - dedu["amount"])
+    deduction = min(disaster_loss_carryover_amount, mti)
+    remaining_carryover = disaster_loss_carryover_amount - deduction
+    taxable_income = max(0.0, mti - deduction)
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "income_amount": income_amount,
+            "disaster_loss_carryover_amount": disaster_loss_carryover_amount,
+            "deduction": deduction, "remaining_carryover": remaining_carryover,
+            "mti": mti, "standard_deduction": dedu["amount"]}
 
 
 # --- cannabis 280E business-expense decoupling (Ring 3 extension, R&TC
@@ -2226,6 +2613,52 @@ FOREIGN_EARNED_INCOME_TERMS = {
     "form 2555", "foreign housing exclusion", "excluded foreign earned income",
     "excluded under form 2555",
 }
+# --- Foreign housing DEDUCTION (Schedule CA (540) Line 24j, distinct
+# from the exclusion above) -- verified against FTB's 2025 Schedule CA
+# (540) instructions: "j. Housing deduction from federal Form 2555 -- If
+# you claimed the foreign housing deduction for federal purposes, enter
+# the amount from column A in column B." IRC 911(c)'s housing DEDUCTION
+# (the self-employed counterpart to 911(a)/(c)'s housing EXCLUSION,
+# available to employees only) is claimed as an above-the-line federal
+# deduction on Schedule 1, not an exclusion -- mechanically different
+# federal treatment of a conceptually similar cost, so it needed its own
+# verification rather than assuming it shares Line 8d's non-conformity
+# automatically.
+#
+# SAME NON-CONFORMITY, SAME NET DIRECTION AS THE EXCLUSION -- but
+# arrived at differently: Line 24j lives in Schedule CA Part I SECTION
+# C ("Other Adjustments to Income"), not Section B where Line 8d sits.
+# Section C's column B/C encode "subtraction/addition to the DEDUCTION
+# total," which is the OPPOSITE sign convention from Section A/B's
+# "subtraction/addition to the INCOME total" -- tracing the arithmetic
+# through Form 540's own Line 14/15/16 chain (Section C Line 26 sums
+# column B, Line 27 = Line 10 minus Line 26, which then feeds Form 540's
+# "California Adjustments -- Subtractions" line) confirms that a LARGER
+# Line 24j column-B entry produces a SMALLER net subtraction at the
+# bottom of the form -- i.e. disallowing the deduction RAISES CA taxable
+# income, the exact same net effect as Line 8d's exclusion addback, even
+# though it's entered in a column literally labeled "B" (subtraction).
+# The ledger's own "subtraction" adjustment_type tag reflects the form's
+# column LABEL, not the AGI-direction -- this is implemented as an
+# ADDBACK (added to other_income), matching that direction, not a
+# literal subtraction.
+#
+# CO-OCCURS WITH THE EXCLUSION FOR THE MODAL SELF-EMPLOYED-EXPAT CASE
+# (not mutually exclusive -- IRC 911(c)'s housing deduction is available
+# IN ADDITION TO the 911(a) earned-income exclusion for self-employment
+# earnings), so this extends compute_foreign_earned_income_ca_tax with
+# an optional parameter rather than a fully separate function/feature --
+# same idiom as the SALT-cap/mortgage-interest optional params already
+# bolted onto compute_itemized_ca_tax. Flat, unconditional, no cap-table
+# replication (FTB doesn't ask for IRS Pub 54's per-location housing-
+# cost-limitation table -- "trust the input," same as the exclusion).
+FOREIGN_HOUSING_DEDUCTION_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section C, Line 24j"
+FOREIGN_HOUSING_DEDUCTION_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+FOREIGN_HOUSING_DEDUCTION_TERMS = {
+    "foreign housing deduction", "housing deduction from form 2555",
+    "form 2555 housing deduction", "housing deduction under form 2555",
+}
 # Narrower than COMPLEXITY_EXCLUDE on purpose -- see
 # _foreign_earned_income_base_signal_ok's comment for why self-employment
 # vocabulary is deliberately NOT here.
@@ -2238,7 +2671,7 @@ FOREIGN_EARNED_INCOME_COMPLEXITY_EXCLUDE = {
 
 
 def _foreign_earned_income_base_signal_ok(q: str) -> bool:
-    if not any(t in q for t in FOREIGN_EARNED_INCOME_TERMS):
+    if not any(t in q for t in FOREIGN_EARNED_INCOME_TERMS | FOREIGN_HOUSING_DEDUCTION_TERMS):
         return False
     # DELIBERATELY NOT COMPLEXITY_EXCLUDE-derived (same lesson as HSA
     # investment gain, not IRA deduction): the Form 2555 addback is
@@ -2256,9 +2689,9 @@ def _foreign_earned_income_base_signal_ok(q: str) -> bool:
 
 def detect_foreign_earned_income_signal(question: str):
     """Returns filing_status iff this looks like a genuine 'other income
-    with a stated Form 2555 excluded amount' question. Mirrors
-    detect_hsa_investment_gain_signal's shape (single addback figure, no
-    offsetting figure needed)."""
+    with a stated Form 2555 excluded amount and/or foreign housing
+    deduction amount' question. Mirrors detect_hsa_investment_gain_
+    signal's shape (addback figure(s), no offsetting figure needed)."""
     q = question.lower()
     if not _foreign_earned_income_base_signal_ok(q):
         return None
@@ -2273,27 +2706,39 @@ def detect_foreign_earned_income_missing_filing_status(question: str) -> bool:
 
 
 def compute_foreign_earned_income_ca_tax(conn, other_income: float, excluded_amount: float,
-                                           filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+                                           filing_status: str, tax_year: int = DEFAULT_TAX_YEAR,
+                                           housing_deduction_amount: float = 0.0):
     """other_income is the taxpayer's other (non-foreign-excluded) CA
     income -- e.g. wages -- treated as gross income/AGI before the
     addback (no other adjustments, same simplification used throughout
     this codebase). excluded_amount is the amount excluded federally
-    under Form 2555 -- ADDED IN FULL to CA income, since California taxes
+    under Form 2555's foreign earned income/housing EXCLUSION (Schedule
+    CA Line 8d) -- ADDED IN FULL to CA income, since California taxes
     full-year residents on all worldwide income with no exception (see
-    module note above)."""
+    module note above). housing_deduction_amount (optional, Schedule CA
+    Line 24j) is the amount DEDUCTED federally under Form 2555's foreign
+    housing DEDUCTION -- also added in full, same non-conformity, same
+    net direction (see the Line 24j module note above for why an
+    entry in the form's "column B" still nets to an addback). The two
+    federal mechanics commonly co-occur for self-employed expats but are
+    independent -- either may be zero, but at least one must be
+    positive."""
     if other_income is None or other_income < 0:
         return None
-    if excluded_amount is None or excluded_amount <= 0:
+    excluded_amount = excluded_amount or 0.0
+    housing_deduction_amount = housing_deduction_amount or 0.0
+    if excluded_amount <= 0 and housing_deduction_amount <= 0:
         return None
     dedu = standard_deduction(conn, filing_status, tax_year)
     if not dedu:
         return None
-    agi = other_income + excluded_amount
+    agi = other_income + excluded_amount + housing_deduction_amount
     taxable_income = max(0.0, agi - dedu["amount"])
     calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
     if not calc:
         return None
     return {**calc, "other_income": other_income, "excluded_amount": excluded_amount,
+            "housing_deduction_amount": housing_deduction_amount,
             "agi": agi, "standard_deduction": dedu["amount"]}
 
 
@@ -2487,6 +2932,129 @@ def compute_gilti_ca_tax(conn, other_income: float, inclusion_amount: float,
         return None
     return {**calc, "other_income": other_income, "inclusion_amount": inclusion_amount,
             "federal_agi": federal_agi, "agi": agi, "standard_deduction": dedu["amount"]}
+
+
+# --- Foreign income of nonresident aliens -- worldwide-income true-up
+# (Schedule CA (540) Line 8z) -- verified against FTB's 2025 Schedule CA
+# (540) instructions: "Foreign income of nonresident aliens -- Adjust
+# federal income to reflect worldwide income computed under California
+# law. Enter losses from foreign sources on line 8z, column B. Enter
+# foreign source income on line 8z, column C." A flat, unconditional,
+# two-directional restatement -- no worksheet, no cap, no netting
+# mentioned.
+#
+# "NONRESIDENT ALIEN" HERE IS THE FEDERAL TAX-STATUS TERM (IRC 7701(b),
+# Form 1040-NR filer), NOT a California-residency term -- confirmed by
+# its OTHER two uses on this SAME resident-only instructions page (the
+# Line 2a/19a alimony paragraphs: "If you are a nonresident alien and
+# received alimony..."), and this document is titled "California
+# Adjustments -- Residents" throughout. The population is a full-year CA
+# RESIDENT who is ALSO a federal nonresident alien (e.g. someone who
+# hasn't met the federal substantial-presence/green-card test despite
+# being CA-domiciled). Because a federal 1040-NR generally reports only
+# U.S.-source/effectively-connected income, California -- which taxes
+# residents on WORLDWIDE income -- needs this line to true up the
+# difference. Confirmed (not assumed) this doesn't belong to or
+# duplicate the separate income_nonresident.py (Form 540NR/Schedule CA
+# (540NR)) engine -- CA-residency and federal-NRA status are independent
+# axes, and grepping that module found zero existing "nonresident
+# alien"/"foreign income"/"1040-NR" handling.
+#
+# Requires an EXPLICIT federal-NRA self-identification phrase in the
+# question (not just any "foreign income" mention) -- deliberately
+# narrow, same discipline as the two-fact features elsewhere in this
+# codebase, because "foreign income" alone is far too generic a phrase
+# to safely trigger a worldwide-income recharacterization on its own.
+NRA_FOREIGN_INCOME_CITATION = "FTB 2025 Schedule CA (540) Instructions -- Part I, Section B, Line 8z"
+NRA_FOREIGN_INCOME_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+NRA_SELF_ID_TERMS = {
+    "nonresident alien", "non-resident alien", "federal nonresident alien",
+    "form 1040-nr", "1040-nr", "1040nr",
+}
+NRA_FOREIGN_INCOME_AMOUNT_TERMS = {
+    "foreign source income", "foreign income", "income from foreign sources",
+}
+NRA_FOREIGN_LOSS_AMOUNT_TERMS = {
+    "foreign source loss", "foreign source losses", "foreign loss", "foreign losses",
+    "loss from foreign sources",
+}
+NRA_FOREIGN_INCOME_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "dependent", "trust", "estate", "gambling", "gambled", "betting",
+    "wagering", "alimony", "pension", "rental", "renting", "rented",
+    "stock", "rsu",
+}
+
+
+def _nra_foreign_income_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in NRA_SELF_ID_TERMS):
+        return False
+    if not any(t in q for t in NRA_FOREIGN_INCOME_AMOUNT_TERMS | NRA_FOREIGN_LOSS_AMOUNT_TERMS):
+        return False
+    if any(t in q for t in NRA_FOREIGN_INCOME_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_nra_foreign_income_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'CA-resident,
+    federal-nonresident-alien, other income plus a stated foreign-source
+    income or loss figure' question."""
+    q = question.lower()
+    if not _nra_foreign_income_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_nra_foreign_income_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _nra_foreign_income_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_nra_foreign_income_is_loss(question: str) -> bool:
+    """True iff the foreign-source figure is described as a LOSS
+    (subtraction, column B) rather than income (addition, column C).
+    The loss/income term sets are disjoint vocabulary (no shared stem
+    the way HSA gain/loss share "hsa investment"), so a plain substring
+    check on the loss set alone is unambiguous."""
+    q = question.lower()
+    return any(t in q for t in NRA_FOREIGN_LOSS_AMOUNT_TERMS)
+
+
+def compute_nra_foreign_income_ca_tax(conn, other_income: float, foreign_amount: float,
+                                        is_loss: bool, filing_status: str,
+                                        tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income is the taxpayer's other (U.S.-source/effectively-
+    connected) income already reported federally -- e.g. wages -- treated
+    as AGI-equivalent before this adjustment (no other adjustments, same
+    simplification used throughout). foreign_amount is the stated
+    foreign-source income (is_loss False, ADDED -- federal Form 1040-NR
+    generally excludes non-ECI foreign income entirely, so California
+    adds it back to reach worldwide income) or foreign-source loss
+    (is_loss True, SUBTRACTED, floored at zero -- symmetric treatment,
+    same floor pattern as every other subtraction path in this module)."""
+    if other_income is None or other_income < 0:
+        return None
+    if foreign_amount is None or foreign_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    if is_loss:
+        agi = max(0.0, other_income - foreign_amount)
+    else:
+        agi = other_income + foreign_amount
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "other_income": other_income, "foreign_amount": foreign_amount,
+            "is_loss": is_loss, "agi": agi, "standard_deduction": dedu["amount"]}
 
 
 def detect_filing_status(question: str):

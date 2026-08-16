@@ -568,6 +568,55 @@ ITEMS = [
     # taxable=74000 -> tax=3320.64.
     ("how much tax do I owe on $100,000 in wages with $30,000 in itemized deductions, $12,000 of which was state income tax, and $8,000 that was over the federal salt limit, filing single",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3320.64}),
+    # Casualty/theft loss (Schedule CA Part II Line 15), the 8th and final
+    # itemized-deduction figure, closing out the completeness ledger --
+    # verified against FTB's Line 15 text: "Under federal law, the
+    # personal casualty and theft loss deduction is suspended, with
+    # exception for personal casualty gains... Federal law allows a
+    # deduction for personal casualty and theft loss incurred in a
+    # federally declared disaster. California law does not conform.
+    # California allows personal casualty and theft loss and disaster
+    # loss deductions." A two-fact design (deliberate middle ground, not
+    # blind trust-the-input, not a full per-event rebuild): the stated
+    # casualty_loss_amount is trusted as ALREADY net of the federal
+    # $100-per-event floor and insurance reimbursement (same trust
+    # boundary as charitable_amount/capital_loss elsewhere), but the
+    # 10%-of-AGI floor (IRS Pub. 547's "10% Rule") is COMPUTED here
+    # rather than trusted, since it's the one piece a taxpayer's
+    # self-reported "final number" is most likely to get wrong.
+    #
+    # Basic: $100,000 wages, $20,000 other itemized, $25,000 casualty
+    # loss, single -> 10% AGI floor = $10,000 -> $15,000 deductible ->
+    # itemized total $35,000 -> taxable $65,000 -> $2,584.05.
+    ("how much california tax do I owe on $100,000 in wages with $20,000 in itemized deductions and a $25,000 casualty loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2584.05}),
+    # same figures, casualty loss stated first -- order independence.
+    ("how much california tax do I owe on a $25,000 casualty loss, $20,000 in itemized deductions, and $100,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2584.05}),
+    # BELOW the 10%-AGI floor ($5,000 loss < $10,000 floor at $100,000
+    # AGI): no deduction applies, itemized total stays $20,000 -> taxable
+    # $80,000 -> $3,878.64.
+    ("how much california tax do I owe on $100,000 in wages with $20,000 in itemized deductions and a $5,000 casualty loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3878.64}),
+    # alternate trigger phrasing ("theft loss" instead of "casualty
+    # loss") -- same figures as the basic case -> $2,584.05.
+    ("how much california tax do I owe on $100,000 in wages with $20,000 in itemized deductions and a $25,000 theft loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2584.05}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $100,000 in wages with $20,000 in itemized deductions and a $25,000 casualty loss",
+     {"status": "needs_review", "domain": "income"}),
+    # combined with a THIRD optional itemized figure (charitable
+    # contributions, under California's 50%-of-AGI cap so no
+    # disallowance) -- exercises 3 simultaneous tagged figures + income
+    # without collision, same result as the basic case since the
+    # charitable amount is fully allowed -> $2,584.05.
+    ("how much california tax do I owe on $100,000 in wages with $20,000 in itemized deductions, a $25,000 casualty loss, and $10,000 in charitable contributions single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2584.05}),
+    # MFJ coverage: $150,000 wages, $30,000 other itemized, $30,000
+    # casualty loss -> 10% AGI floor $15,000 -> $15,000 deductible ->
+    # itemized total $45,000 -> taxable $105,000 -> $4,368.10.
+    ("how much california tax do I owe on $150,000 in wages with $30,000 in itemized deductions and a $30,000 casualty loss married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4368.10}),
     # a third, unrelated dollar amount makes the question ambiguous (which
     # figure is income?) -- correctly defers rather than guessing.
     ("how much california tax do I owe on $80,000 in wages with $12,000 in itemized deductions and $5,000 in bonus filing single",
@@ -1274,6 +1323,250 @@ ITEMS = [
     # SELF-EMPLOYMENT COMBINATION: same unconditional precedent as above.
     ("how much california tax do I owe on $80,000 self-employed with $50,000 in gilti single",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+
+    # --- Excess business loss CARRYOVER absorption (Schedule CA Line 8z)
+    # -- verified against the 2025 FTB Instructions for Schedule CA
+    # (540): "If in the current year, the taxpayer has enough business
+    # income to fully offset all of the excess business loss carryover
+    # from prior year, then the carryover balance is applied to offset
+    # the business income." Cross-referenced against Line 8p's own text
+    # ("any disallowed loss will be treated as a carryover excess
+    # business loss INSTEAD OF an NOL carryover") -- unlike NOL
+    # carryforward, there's no MTI/suspension multi-year recomputation
+    # here, so this is a genuine "trust the stated carryover balance"
+    # extension of the already-built Line 8p threshold formula, not new
+    # historical-tracking complexity. Two cases modeled: FULL ABSORPTION
+    # (this year's business income >= carryover, flat uncapped
+    # subtraction) and THIS-YEAR LOSS (combines with the carryover and
+    # reapplies the SAME Line 8p threshold formula to the combined
+    # figure). The one case NOT modeled -- business income positive but
+    # LESS than the carryover (partial absorption) -- routes to a
+    # dedicated needs_review message rather than guessing at FTB's
+    # unverified Form 3461 PDF worksheet.
+    #
+    # Dispatcher-ordering note: "excess business loss carryover" contains
+    # "excess business loss" as a substring, so this feature's checks had
+    # to be inserted BEFORE the pre-existing Line 8p checks (same "move
+    # the check earlier" pattern as K-1 capital gain/real-estate-
+    # professional) -- without that ordering, Line 8p's own detector
+    # would swallow carryover-phrased questions first.
+    #
+    # Full absorption: $80,000 wages, $600,000 business income this year,
+    # $400,000 carryover, single -> AGI $280,000 (600k income - 400k
+    # carryover, absorbed in full, uncapped) -> taxable $274,294 ->
+    # $21,947.98.
+    ("how much california tax do I owe on $80,000 in wages, $600,000 in business income this year, and a $400,000 excess business loss carryover from prior years, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 21947.98}),
+    # same figures, carryover stated first -- order independence.
+    ("how much california tax do I owe on a $400,000 excess business loss carryover from prior years, $600,000 in business income this year, and $80,000 in wages, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 21947.98}),
+    # THIS-YEAR LOSS branch: $80,000 wages, $100,000 business loss this
+    # year, $400,000 carryover, single -> combined loss $500,000, capped
+    # at the $313,000 threshold -> allowed loss $313,000, new carryover
+    # $187,000 -> AGI floored at $0 (80,000-313,000) -> taxable $0 ->
+    # $0.00.
+    ("how much california tax do I owe on $80,000 in wages, a $100,000 business loss this year, and a $400,000 excess business loss carryover from prior years, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
+    # PARTIAL ABSORPTION (business income positive but less than the
+    # carryover) -> the one deliberately-unmodeled case, specific
+    # needs_review message (not a generic defer, not a guessed number).
+    ("how much california tax do I owe on $80,000 in wages, $200,000 in business income this year, and a $400,000 excess business loss carryover from prior years, single",
+     {"status": "needs_review", "domain": "income"}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages, $600,000 in business income this year, and a $400,000 excess business loss carryover from prior years",
+     {"status": "needs_review", "domain": "income"}),
+    # MFJ coverage: $120,000 wages, $700,000 business income this year,
+    # $500,000 carryover -> AGI $320,000 -> taxable $308,588 ->
+    # $21,575.96.
+    ("how much california tax do I owe on $120,000 in wages, $700,000 in business income this year, and a $500,000 excess business loss carryover from prior years, married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 21575.96}),
+    # NON-REGRESSION CHECK: a plain excess-business-loss question with NO
+    # "carryover" wording must still route to the PRE-EXISTING Line 8p
+    # feature unaffected by this dispatcher reordering. $80,000 wages,
+    # $700,000 business loss, single -> $313,000 allowed, AGI floored at
+    # $0 -> $0.00 (same math as Line 8p's own existing test coverage).
+    ("how much california tax do I owe on $80,000 in wages with a $700,000 excess business loss single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
+
+    # --- Foreign income of nonresident aliens -- worldwide-income
+    # true-up (Schedule CA Line 8z) -- verified against the 2025 FTB
+    # Instructions for Schedule CA (540): "Foreign income of nonresident
+    # aliens -- Adjust federal income to reflect worldwide income
+    # computed under California law. Enter losses from foreign sources
+    # on line 8z, column B. Enter foreign source income on line 8z,
+    # column C." A flat, unconditional, two-directional restatement.
+    # "Nonresident alien" here is the FEDERAL tax-status term (Form
+    # 1040-NR filer), confirmed by its other uses on the same
+    # resident-only instructions page -- the population is a full-year
+    # CA resident who is also a federal nonresident alien. Requires an
+    # explicit self-identification phrase to trigger, since "foreign
+    # income" alone is too generic.
+    #
+    # Addition case: $80,000 wages, $50,000 foreign source income, single
+    # -> AGI $130,000 -> taxable $124,294 -> $7,997.98 (same wash shape
+    # as the FEIE addback above, opposite legal direction -- FEIE adds
+    # back an exclusion federal already gave; this adds back income
+    # federal never taxed at all for an NRA filer).
+    ("how much california tax do I owe on $80,000 in wages with $50,000 in foreign source income as a nonresident alien single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # same figures, foreign income stated first -- order independence.
+    ("how much california tax do I owe on $50,000 in foreign source income as a nonresident alien and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # Subtraction case (LOSS from foreign sources): $80,000 wages,
+    # $30,000 foreign source loss, single -> AGI $50,000 -> taxable
+    # $44,294 -> $1,192.53.
+    ("how much california tax do I owe on $80,000 in wages with a $30,000 foreign source loss as a nonresident alien single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1192.53}),
+    # alternate self-ID phrasing ("form 1040-nr" instead of "nonresident
+    # alien") -- also exercises the "1040" phantom-amount guard (literal
+    # "1040" in "1040-nr" would otherwise parse as a bare number). Same
+    # figures as the basic addition case -> $7,997.98.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 in foreign income, I file form 1040-nr, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # MFJ coverage: $120,000 wages, $60,000 foreign source income ->
+    # AGI $180,000 -> taxable $168,588 -> $8,555.96.
+    ("how much california tax do I owe on $120,000 in wages with $60,000 in foreign source income as a nonresident alien married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 8555.96}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 in foreign source income as a nonresident alien",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: unconditional regardless of how the
+    # OTHER income was earned, same precedent as FEIE/Subpart F/GILTI.
+    ("how much california tax do I owe on $80,000 self-employed with $50,000 in foreign source income as a nonresident alien single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+
+    # --- California disaster loss carryover deduction (Schedule CA Line
+    # 9b1, FTB Form 3805V) -- verified against the 2025 FTB Instructions
+    # for Schedule CA (540): "If you have a California disaster loss
+    # carryover deduction and there is income in the current taxable
+    # year, enter the total amount of disaster loss carryover deduction
+    # from your 2025 form FTB 3805V, Part III, line 2, column (f)..." A
+    # flat "copy this cell from your own 3805V" pass-through -- pulls
+    # from the SAME Part III cell as Line 9b2's NOL carryover (already
+    # built). SIMPLER than NOL carryover, not harder: disaster loss
+    # carryovers are explicitly EXEMPT from the 2024-2027 $1M NOL
+    # suspension rule regardless of income, so there's no suspended
+    # branch here -- deduction = min(carryover, MTI), remainder carries
+    # forward. Also broader population than NOL (applies against ANY
+    # income, not just business income) -- confirmed via FTB's own line
+    # text ("there is income," not "business income"). Original ledger
+    # note ("requires declared-disaster-county + loss facts") was
+    # stale, same pattern as Line 8a/8d -- the per-item casualty-loss
+    # facts (FMV, insurance, floors) were already baked in when the loss
+    # ORIGINATED at the separate, still-deferred Part II Line 15; this
+    # feature only absorbs the already-computed leftover balance.
+    #
+    # Full absorption: $80,000 wages, $50,000 carryover, single -> MTI
+    # $74,294 -> full $50,000 deductible -> taxable $24,294 -> $375.09.
+    ("how much california tax do I owe on $80,000 in wages with a $50,000 disaster loss carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 375.09}),
+    # same figures, carryover stated first -- order independence.
+    ("how much california tax do I owe on a $50,000 disaster loss carryover and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 375.09}),
+    # PARTIAL deduction: carryover ($90,000) exceeds MTI ($74,294) -->
+    # deduction capped at MTI, taxable income floored at $0 -> $0.00,
+    # remainder ($15,706) continues to carry forward.
+    ("how much california tax do I owe on $80,000 in wages with a $90,000 disaster loss carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
+    # NOT SUSPENDED even at very high income ($2,000,000 -- well above
+    # the $1M NOL-suspension threshold): unlike NOL carryover, disaster
+    # loss carryover is exempt from suspension entirely, so the full
+    # $50,000 remains fully deductible -> taxable $1,944,294 ->
+    # $229,427.72 (includes the $1M+ Behavioral Health Services surtax).
+    ("how much california tax do I owe on $2,000,000 in wages with a $50,000 disaster loss carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 229427.72}),
+    # MFJ coverage: $120,000 wages, $60,000 carryover -> MTI $108,588 ->
+    # full $60,000 deductible -> taxable $48,588 -> $750.18.
+    ("how much california tax do I owe on $120,000 in wages with a $60,000 disaster loss carryover married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 750.18}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $50,000 disaster loss carryover",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: unconditional regardless of how the
+    # OTHER income was earned, same precedent as NOL/FEIE/Subpart F.
+    ("how much california tax do I owe on $80,000 self-employed with a $50,000 disaster loss carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 375.09}),
+    # NON-REGRESSION CHECK: a plain NOL-carryover question (bare "nol
+    # carryover" wording, no "disaster") must still route to the
+    # PRE-EXISTING Line 9b2 NOL feature unaffected by this new dispatcher
+    # insertion. $80,000 business income, $50,000 NOL carryover, single
+    # -> same figures as the disaster-loss case above (coincidentally
+    # identical tax, $375.09, since neither is suspended/capped here) --
+    # confirms NOL_COMPLEXITY_EXCLUDE's pre-existing "disaster loss"
+    # exclusion correctly keeps the two features from colliding in
+    # either direction.
+    ("how much california tax do I owe on $80,000 in business income with a $50,000 nol carryover single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 375.09}),
+
+    # --- Foreign housing DEDUCTION (Schedule CA Line 24j, Form 2555) --
+    # distinct from the foreign earned income/housing EXCLUSION (Line
+    # 8d, already built above) -- IRC 911(c)'s housing DEDUCTION is the
+    # self-employed counterpart, claimed as an above-the-line federal
+    # deduction rather than an exclusion. Verified against the 2025 FTB
+    # Instructions for Schedule CA (540): "j. Housing deduction from
+    # federal Form 2555 -- If you claimed the foreign housing deduction
+    # for federal purposes, enter the amount from column A in column
+    # B." Same non-conformity, same NET ADDBACK direction as Line 8d
+    # (tracing Section C's column arithmetic through Form 540's own
+    # Line 26/27 chain confirms a larger column-B entry here REDUCES
+    # the subtraction at the bottom of the form, i.e. RAISES CA taxable
+    # income -- the ledger's "subtraction" tag reflects the column
+    # label, not the AGI direction). Extends
+    # compute_foreign_earned_income_ca_tax with an optional
+    # housing_deduction_amount parameter rather than a separate
+    # function, since the two commonly co-occur for self-employed
+    # expats (911(c) housing deduction available IN ADDITION TO the
+    # 911(a) earned-income exclusion).
+    #
+    # TWO REAL BUGS FOUND AND FIXED before locking in these values:
+    # (1) a naive "remove the housing anchor, then search the remainder
+    # for the exclusion anchor" approach still double-counted a single
+    # housing-deduction figure as BOTH an exclusion and a deduction for
+    # "...a $30,000 form 2555 housing deduction..." phrasing, because
+    # the bare "form 2555" substring (shared between both term sets)
+    # still found the one REMAINING amount within its proximity window
+    # even though it was semantically unrelated -- fixed by only
+    # searching for an exclusion amount when an EXCLUSION-SPECIFIC term
+    # is present (not just bare "form 2555" already claimed by a
+    # housing phrase). (2) a genuine sales-domain cross-routing
+    # collision -- same class as cannabis 280E/military retirement --
+    # where a "both exclusion and housing deduction stated together"
+    # question was confidently misrouted to the sales domain for one
+    # capitalization but not another (an embedding-space quirk); fixed
+    # with an early-intercept guard in _answer() mirroring the existing
+    # cannabis-280E/military-retirement precedent.
+    #
+    # Housing-deduction-only: $80,000 wages, $30,000 housing deduction,
+    # single -> AGI $110,000 -> taxable $104,294 -> $6,137.98.
+    ("how much california tax do I owe on $80,000 in wages with a $30,000 foreign housing deduction single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # same figures, housing deduction stated first -- order independence.
+    ("how much california tax do I owe on a $30,000 foreign housing deduction and $80,000 in wages single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # BOTH exclusion AND housing deduction stated together (the modal
+    # self-employed-expat case): $80,000 wages, $50,000 excluded under
+    # Form 2555, $30,000 foreign housing deduction, single -> AGI
+    # $160,000 -> taxable $154,294 -> $10,787.98. Also the case that
+    # exercised the sales-domain routing-collision fix above.
+    ("how much california tax do I owe on $80,000 in wages with $50,000 excluded under form 2555 and a $30,000 foreign housing deduction single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 10787.98}),
+    # AMBIGUOUS PHRASING regression guard: "form 2555 housing deduction"
+    # contains the bare "form 2555" substring shared with the exclusion
+    # term set -- must be treated as housing-deduction-ONLY (not
+    # double-counted), same result as the housing-only case above.
+    ("how much california tax do I owe on $80,000 in wages with a $30,000 form 2555 housing deduction single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with a $30,000 foreign housing deduction",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COMBINATION: unconditional regardless of how the
+    # OTHER income was earned, same precedent as the exclusion/FEIE.
+    ("how much california tax do I owe on $80,000 self-employed with a $30,000 foreign housing deduction single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # MFJ coverage: $120,000 wages, $40,000 housing deduction -> AGI
+    # $160,000 -> taxable $148,588 -> $6,695.96.
+    ("how much california tax do I owe on $120,000 in wages with a $40,000 foreign housing deduction married filing jointly",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6695.96}),
 
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given

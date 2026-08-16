@@ -969,17 +969,17 @@ def _income_itemized_answer(conn, question: str, base: dict):
     conformity basis (greater-of comparison, AGI-limitation PHASE-OUT
     worksheet, MFS exclusion). Uses _amount_near (not _amount) to pull the
     itemized-tagged figure (and, optionally, SALT/mortgage-addback/misc-
-    itemized/charitable/SALT-cap-addback-tagged figures -- see
-    _tagged_amount) out separately from the income figure, same distance-
-    based approach as the mixed wage+SE path; if more than one
+    itemized/charitable/SALT-cap-addback/casualty-loss-tagged figures --
+    see _tagged_amount) out separately from the income figure, same
+    distance-based approach as the mixed wage+SE path; if more than one
     unaccounted-for amount remains, the question is ambiguous and this
-    defers rather than guessing which one is income. All 5 optional
+    defers rather than guessing which one is income. All 6 optional
     figures are additive -- see income_brackets.SALT_TERMS /
     MORTGAGE_INTEREST_ADDBACK_TERMS / MISC_ITEMIZED_TERMS /
-    CHARITABLE_TERMS / SALT_CAP_ADDBACK_TERMS. Each of the (up to) 7
-    figures has its OWN distinct, non-overlapping anchor phrase, unlike
-    FYTC's shared-anchor collision earlier this session, so the same
-    exclude-based extraction scales safely."""
+    CHARITABLE_TERMS / SALT_CAP_ADDBACK_TERMS / CASUALTY_LOSS_TERMS. Each
+    of the (up to) 8 figures has its OWN distinct, non-overlapping anchor
+    phrase, unlike FYTC's shared-anchor collision earlier this session,
+    so the same exclude-based extraction scales safely."""
     fs = income_brackets.detect_itemized_signal(question)
     if not fs:
         return None
@@ -1002,6 +1002,9 @@ def _income_itemized_answer(conn, question: str, base: dict):
     salt_cap_addback = _tagged_amount(question, income_brackets.SALT_CAP_ADDBACK_TERMS, claimed)
     if salt_cap_addback is not None:
         claimed.add(salt_cap_addback)
+    casualty_loss_amount = _tagged_amount(question, income_brackets.CASUALTY_LOSS_TERMS, claimed)
+    if casualty_loss_amount is not None:
+        claimed.add(casualty_loss_amount)
     others = [a for a, _, _ in _amounts(question) if a not in claimed]
     if len(others) != 1:
         return None
@@ -1009,7 +1012,8 @@ def _income_itemized_answer(conn, question: str, base: dict):
     calc = income_brackets.compute_itemized_ca_tax(
         conn, income_amount, itemized_amount, fs, salt_amount=salt_amount,
         mortgage_interest_addback=mortgage_addback, misc_itemized_expenses=misc_expenses,
-        charitable_amount=charitable_amount, salt_cap_addback=salt_cap_addback)
+        charitable_amount=charitable_amount, salt_cap_addback=salt_cap_addback,
+        casualty_loss_amount=casualty_loss_amount)
     if not calc:
         return None
     label = income_brackets.FILING_STATUS_LABELS[fs]
@@ -1069,6 +1073,22 @@ def _income_itemized_answer(conn, question: str, base: dict):
             f"does not conform to that cap, so your stated ${salt_cap_addback:,.2f} that was cut "
             f"off by the federal limit was added BACK to your itemized total (Schedule CA (540) "
             f"Line 5e).")
+    casualty_note = ""
+    if casualty_loss_amount is not None:
+        floor = income_amount * income_brackets.CASUALTY_LOSS_AGI_FLOOR_RATE
+        if calc["casualty_deductible"] > 0:
+            casualty_note = (
+                f" Federal law only allows a personal casualty/theft loss deduction for losses "
+                f"in a federally declared disaster area; California does not conform and allows "
+                f"the deduction regardless. Of your stated ${casualty_loss_amount:,.2f} loss "
+                f"(already net of the federal $100-per-event floor and any insurance "
+                f"reimbursement), ${floor:,.2f} (10% of your AGI) is not deductible, leaving "
+                f"${calc['casualty_deductible']:,.2f} added to your itemized total (Schedule CA "
+                f"(540) Line 15).")
+        else:
+            casualty_note = (
+                f" Your stated ${casualty_loss_amount:,.2f} casualty/theft loss does not exceed "
+                f"the 10%-of-AGI floor (${floor:,.2f} here), so no deduction applies.")
     phaseout_note = ""
     if calc["phaseout"]:
         phaseout_note = (
@@ -1096,7 +1116,8 @@ def _income_itemized_answer(conn, question: str, base: dict):
         f"taxable income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket "
         f"is {calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
         f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
-        f"{surtax_note}{salt_note}{mortgage_note}{misc_note}{charitable_note}{salt_cap_note}{phaseout_note} This assumes your stated itemized-deduction "
+        f"{surtax_note}{salt_note}{mortgage_note}{misc_note}{charitable_note}{salt_cap_note}"
+        f"{casualty_note}{phaseout_note} This assumes your stated itemized-deduction "
         "total otherwise already reflects California's rules -- your actual liability may differ."
     )
     return result
@@ -1202,6 +1223,142 @@ def _income_capital_loss_missing_filing_status_answer(question: str, base: dict)
         "status: single, married filing jointly, married filing separately, head of "
         "household, or qualifying surviving spouse (the annual loss-offset limit is smaller "
         "for married filing separately). Please ask again and include your filing status.")
+    return result
+
+
+def _ebl_carryover_extract_amounts(question: str):
+    """Returns (other_income, business_result, carryover_balance,
+    is_loss_year) or None if any of the three required dollar figures
+    can't be unambiguously extracted. Two proximity anchors (carryover
+    balance, then this year's business result via the income/loss-
+    specific term set) plus a single leftover amount for other_income --
+    the same "N anchors + 1 remainder" pattern as QSBS/excess-business-
+    loss's "one other amount" extraction, generalized to three figures
+    instead of two."""
+    amounts = _amounts(question)
+    carryover_balance = _amount_near_filtered(question, income_brackets.EBL_CARRYOVER_TERMS, amounts)
+    if carryover_balance is None:
+        return None
+    remaining = [(a, s, e) for a, s, e in amounts if a != carryover_balance]
+    is_loss_year = income_brackets.detect_ebl_carryover_is_loss_year(question)
+    business_terms = (income_brackets.EBL_CARRYOVER_LOSS_TERMS if is_loss_year
+                       else income_brackets.EBL_CARRYOVER_INCOME_TERMS)
+    business_result = _amount_near_filtered(question, business_terms, remaining)
+    if business_result is None:
+        return None
+    others = [a for a, _, _ in remaining if a != business_result]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    return other_income, business_result, carryover_balance, is_loss_year
+
+
+def _income_ebl_carryover_answer(conn, question: str, base: dict):
+    """Other income + this year's business result + a stated prior-year
+    excess-business-loss carryover balance -- see
+    income_brackets.compute_ebl_carryover_ca_tax's docstring for the
+    Schedule CA Line 8z conformity basis and the two modeled cases.
+    Checked BEFORE _income_excess_business_loss_answer in the dispatcher
+    -- "excess business loss carryover" contains "excess business loss"
+    as a substring, so without this ordering the EXISTING Line 8p
+    detector would swallow carryover-phrased questions first (same "move
+    the check earlier" fix as K-1 capital gain/real-estate-professional's
+    dispatcher placement)."""
+    fs = income_brackets.detect_ebl_carryover_signal(question)
+    if not fs:
+        return None
+    extracted = _ebl_carryover_extract_amounts(question)
+    if extracted is None:
+        return None
+    other_income, business_result, carryover_balance, is_loss_year = extracted
+    calc = income_brackets.compute_ebl_carryover_ca_tax(
+        conn, other_income, business_result, carryover_balance, is_loss_year, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if is_loss_year:
+        if calc["new_excess_business_loss"]:
+            carryover_note = (
+                f"your ${business_result:,.2f} business loss this year combines with your "
+                f"${carryover_balance:,.2f} prior-year carryover for a ${calc['combined_loss']:,.2f} "
+                f"total, of which ${calc['allowed_loss']:,.2f} is deductible this year (the "
+                f"{income_brackets.DEFAULT_TAX_YEAR} excess business loss threshold for {label} is "
+                f"${calc['threshold']:,.0f}), with the remaining ${calc['new_excess_business_loss']:,.2f} "
+                "carrying forward again as a NEW excess business loss carryover (not reflected in "
+                "this estimate)")
+        else:
+            carryover_note = (
+                f"your ${business_result:,.2f} business loss this year combines with your "
+                f"${carryover_balance:,.2f} prior-year carryover for a ${calc['combined_loss']:,.2f} "
+                f"total, fully deductible this year (under the ${calc['threshold']:,.0f} excess "
+                f"business loss threshold for {label}, so the limitation does not apply)")
+    else:
+        carryover_note = (
+            f"your ${business_result:,.2f} in business income this year fully absorbs your "
+            f"${carryover_balance:,.2f} prior-year excess business loss carryover, deducted in "
+            "full and uncapped (California treats this carryover as separate from an NOL "
+            "carryover, so no threshold applies to simply using up an existing carryover)")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (e.g. wages), filing status {label}, and "
+        f"{carryover_note} ({income_brackets.EBL_CARRYOVER_CITATION}): your California AGI is "
+        f"about ${calc['agi']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated figures are the correct aggregate business "
+        "result and carryover balance (not independently re-derived from Form 3461 components) "
+        "-- your actual liability may differ."
+    )
+    return result
+
+
+def _income_ebl_carryover_partial_answer(question: str, base: dict):
+    """Specific clarifying message for the ONE case Line 8z's own text
+    doesn't spell out -- this year's business income is positive but
+    LESS than the stated carryover balance (partial absorption). FTB
+    defers this to an unverified Form 3461 PDF worksheet (see the module
+    note on income_brackets.compute_ebl_carryover_ca_tax) -- rather than
+    guess at that arithmetic, this gets its own message instead of a
+    silent wrong number or a generic defer."""
+    fs = income_brackets.detect_ebl_carryover_signal(question)
+    if not fs:
+        return None
+    extracted = _ebl_carryover_extract_amounts(question)
+    if extracted is None:
+        return None
+    other_income, business_result, carryover_balance, is_loss_year = extracted
+    if is_loss_year or business_result >= carryover_balance:
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        f"Your ${business_result:,.2f} in business income this year isn't enough to fully "
+        f"offset your ${carryover_balance:,.2f} prior-year excess business loss carryover. "
+        "FTB's Schedule CA (540) instructions refer this partial-absorption case to Form FTB "
+        "3461's own worksheet (lines 14b-17), which this assistant hasn't independently "
+        "verified -- rather than guess at that computation, please consult a tax professional "
+        "or FTB Form 3461's instructions directly for this specific case."
+    )
+    return result
+
+
+def _income_ebl_carryover_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_ebl_carryover_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an excess business loss carryover from a "
+        "prior year, I need your filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse.")
     return result
 
 
@@ -1350,6 +1507,75 @@ def _income_nol_missing_filing_status_answer(question: str, base: dict):
         "filing status: single, married filing jointly, married filing separately, head of "
         "household, or qualifying surviving spouse. Please ask again and include your filing "
         "status.")
+    return result
+
+
+def _income_disaster_loss_carryover_answer(conn, question: str, base: dict):
+    """Other income + a stated California disaster loss carryover
+    deduction -- see income_brackets.compute_disaster_loss_carryover_ca_
+    tax's docstring for the Schedule CA Line 9b1 basis (a flat "copy this
+    cell from your own 3805V" pass-through, no suspension test unlike
+    NOL carryover). Uses _amount_near/the 'one other amount' pattern
+    exactly like the NOL/excess-business-loss paths."""
+    fs = income_brackets.detect_disaster_loss_carryover_signal(question)
+    if not fs:
+        return None
+    carryover_amount = _amount_near(question, income_brackets.DISASTER_LOSS_CARRYOVER_TERMS)
+    if carryover_amount is None:
+        return None
+    others = [a for a, _, _ in _amounts(question) if a != carryover_amount]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_disaster_loss_carryover_ca_tax(conn, income_amount, carryover_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["remaining_carryover"]:
+        carryover_note = (
+            f"${calc['deduction']:,.2f} of your ${carryover_amount:,.2f} disaster loss "
+            "carryover is deductible this year (capped at your Modified Taxable Income of "
+            f"${calc['mti']:,.2f}, not a percentage -- and unlike an ordinary NOL carryover, "
+            "this deduction is NEVER suspended regardless of your income), with the remaining "
+            f"${calc['remaining_carryover']:,.2f} continuing to carry forward")
+    else:
+        carryover_note = (
+            f"your full ${carryover_amount:,.2f} disaster loss carryover is deductible this "
+            "year (within your Modified Taxable Income, and never subject to the NOL "
+            "suspension rule)")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in other income (e.g. wages), treated as your California "
+        f"AGI before this deduction, filing status {label}: {carryover_note} "
+        f"({income_brackets.DISASTER_LOSS_CARRYOVER_CITATION}). After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated figure is the correct disaster loss carryover "
+        "amount from your own Form FTB 3805V, Part III, line 2, column (f) (not independently "
+        "re-derived from the original casualty-loss facts) and no other adjustments -- your "
+        "actual liability may differ."
+    )
+    return result
+
+
+def _income_disaster_loss_carryover_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_disaster_loss_carryover_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a disaster loss carryover deduction, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse.")
     return result
 
 
@@ -1964,26 +2190,65 @@ def _foreign_earned_income_strip_form_number_phantoms(amounts):
 
 def _income_foreign_earned_income_answer(conn, question: str, base: dict):
     """Other income (e.g. wages) + a stated Form 2555 foreign earned
-    income/housing exclusion amount -- see income_brackets.
-    compute_foreign_earned_income_ca_tax's docstring for the Schedule CA
-    Line 8d conformity basis (California doesn't conform to IRC 911 at
-    all for this resident-population form -- flat, unconditional
-    addback). Uses the 'one other amount' pattern exactly like the HSA-
-    investment-gain path, but via the phantom-filtered amount helpers
-    (shared with QSBS/cannabis) instead of _amounts()/_amount_near()
-    directly."""
+    income/housing EXCLUSION amount (Line 8d) and/or a stated foreign
+    housing DEDUCTION amount (Line 24j) -- see income_brackets.
+    compute_foreign_earned_income_ca_tax's docstring for the conformity
+    basis of both (California doesn't conform to IRC 911 at all for
+    this resident-population form -- flat, unconditional addback either
+    way). Extracts the housing-DEDUCTION anchor FIRST and removes it
+    from the amounts list before searching for the exclusion anchor --
+    necessary because "form 2555" (a bare FOREIGN_EARNED_INCOME_TERMS
+    trigger) is also a substring of several FOREIGN_HOUSING_DEDUCTION_
+    TERMS phrases (e.g. "form 2555 housing deduction"), so without this
+    ordering a single stated housing-deduction figure could get
+    double-counted as BOTH an exclusion and a deduction. Falls back
+    correctly to the original single-anchor behavior when only one of
+    the two is mentioned (housing_deduction_amount/excluded_amount
+    defaults to 0.0 when its anchor isn't found).
+
+    REMOVING the housing anchor from the amounts list is not sufficient
+    on its own to prevent double-counting -- found live via testing
+    "...a $30,000 form 2555 housing deduction single": after the
+    $30,000 is correctly claimed by the housing search, the ONLY
+    remaining amount ($80,000, the wage figure) can still fall within
+    _amount_near_filtered's proximity window of the bare "form 2555"
+    substring even though it's semantically unrelated (the window is a
+    fixed character radius, not a phrase-boundary check). Fixed by only
+    attempting the exclusion-amount search when the question contains
+    an EXCLUSION-SPECIFIC term (not just the bare "form 2555" shared
+    with the housing phrase), or bare "form 2555" appears WITHOUT any
+    housing wording at all -- i.e. "form 2555" alone never triggers a
+    second, spurious search once a housing anchor has already claimed
+    the question's one housing-flavored mention of that form number."""
     fs = income_brackets.detect_foreign_earned_income_signal(question)
     if not fs:
         return None
     amounts = _foreign_earned_income_strip_form_number_phantoms(_amounts(question))
-    excluded_amount = _amount_near_filtered(question, income_brackets.FOREIGN_EARNED_INCOME_TERMS, amounts)
-    if excluded_amount is None:
+    q = question.lower()
+    has_housing_terms = any(t in q for t in income_brackets.FOREIGN_HOUSING_DEDUCTION_TERMS)
+    housing_deduction_amount = 0.0
+    if has_housing_terms:
+        found = _amount_near_filtered(question, income_brackets.FOREIGN_HOUSING_DEDUCTION_TERMS, amounts)
+        if found is not None:
+            housing_deduction_amount = found
+            amounts = [(a, s, e) for a, s, e in amounts if a != found]
+    excluded_amount = 0.0
+    exclusion_specific_terms = income_brackets.FOREIGN_EARNED_INCOME_TERMS - {"form 2555"}
+    has_exclusion_specific_terms = any(t in q for t in exclusion_specific_terms)
+    has_bare_form_2555 = "form 2555" in q
+    if has_exclusion_specific_terms or (has_bare_form_2555 and not has_housing_terms):
+        found = _amount_near_filtered(question, income_brackets.FOREIGN_EARNED_INCOME_TERMS, amounts)
+        if found is not None:
+            excluded_amount = found
+            amounts = [(a, s, e) for a, s, e in amounts if a != found]
+    if excluded_amount <= 0 and housing_deduction_amount <= 0:
         return None
-    others = [a for a, _, _ in amounts if a != excluded_amount]
+    others = [a for a, _, _ in amounts]
     if len(others) != 1:
         return None
     other_income = others[0]
-    calc = income_brackets.compute_foreign_earned_income_ca_tax(conn, other_income, excluded_amount, fs)
+    calc = income_brackets.compute_foreign_earned_income_ca_tax(
+        conn, other_income, excluded_amount, fs, housing_deduction_amount=housing_deduction_amount)
     if not calc:
         return None
     label = income_brackets.FILING_STATUS_LABELS[fs]
@@ -1996,13 +2261,28 @@ def _income_foreign_earned_income_answer(conn, question: str, base: dict):
     if calc["surtax"]:
         surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
                        f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if excluded_amount > 0 and housing_deduction_amount > 0:
+        addback_note = (
+            f"${excluded_amount:,.2f} excluded from federal income under Form 2555's foreign "
+            f"earned income and housing exclusion ({income_brackets.FOREIGN_EARNED_INCOME_CITATION}), "
+            f"plus a ${housing_deduction_amount:,.2f} foreign housing deduction also claimed "
+            f"federally under Form 2555 ({income_brackets.FOREIGN_HOUSING_DEDUCTION_CITATION})"
+        )
+    elif housing_deduction_amount > 0:
+        addback_note = (
+            f"a ${housing_deduction_amount:,.2f} foreign housing deduction claimed federally "
+            f"under Form 2555 ({income_brackets.FOREIGN_HOUSING_DEDUCTION_CITATION})"
+        )
+    else:
+        addback_note = (
+            f"${excluded_amount:,.2f} excluded from federal income under Form 2555 (foreign "
+            f"earned income and housing exclusion) ({income_brackets.FOREIGN_EARNED_INCOME_CITATION})"
+        )
     result["answer_text"] = (
         f"Assuming ${other_income:,.2f} in other income (e.g. wages), filing status {label}, "
-        f"and ${excluded_amount:,.2f} excluded from federal income under Form 2555 (foreign "
-        f"earned income and housing exclusion): California does NOT conform to this federal "
-        f"exclusion ({income_brackets.FOREIGN_EARNED_INCOME_CITATION}) -- as a California "
-        "resident, the full excluded amount is added back and taxed. Your California AGI is "
-        f"about ${calc['agi']:,.2f}; after the standard deduction "
+        f"and {addback_note}: California does NOT conform to either federal mechanism -- as a "
+        "California resident, the full amount(s) are added back and taxed. Your California AGI "
+        f"is about ${calc['agi']:,.2f}; after the standard deduction "
         f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
         f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
         f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
@@ -2022,9 +2302,9 @@ def _income_foreign_earned_income_missing_filing_status_answer(question: str, ba
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
         "To estimate your California income tax with a Form 2555 foreign earned income "
-        "exclusion, I need your filing status: single, married filing jointly, married filing "
-        "separately, head of household, or qualifying surviving spouse. Please ask again and "
-        "include your filing status.")
+        "exclusion and/or foreign housing deduction, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or qualifying "
+        "surviving spouse. Please ask again and include your filing status.")
     return result
 
 
@@ -2177,6 +2457,87 @@ def _income_gilti_missing_filing_status_answer(question: str, base: dict):
         "inclusion, I need your filing status: single, married filing jointly, married filing "
         "separately, head of household, or qualifying surviving spouse. Please ask again and "
         "include your filing status.")
+    return result
+
+
+def _nra_strip_1040nr_phantoms(amounts):
+    """Literal "1040" in "1040-nr"/"1040nr" (this feature's own trigger
+    vocabulary -- the federal nonresident-alien return form number)
+    parses as a phantom $1,040.00 dollar amount via _amounts()'s shared
+    regex (same collision class as cannabis "280E", QSBS "1202"/"1045",
+    Form 2555's "2555", Subpart F/GILTI's "951"/"8992"). Local filter
+    scoped to this feature."""
+    return [(a, s, e) for a, s, e in amounts if a != 1040.0]
+
+
+def _income_nra_foreign_income_answer(conn, question: str, base: dict):
+    """Other income + a stated foreign-source income or loss figure for
+    a CA-resident federal-nonresident-alien filer -- see
+    income_brackets.compute_nra_foreign_income_ca_tax's docstring for the
+    Schedule CA Line 8z worldwide-income-true-up conformity basis.
+    Phantom-filtered for literal "1040" the same way QSBS/cannabis/Form
+    2555/Subpart F/GILTI are."""
+    fs = income_brackets.detect_nra_foreign_income_signal(question)
+    if not fs:
+        return None
+    is_loss = income_brackets.detect_nra_foreign_income_is_loss(question)
+    amounts = _nra_strip_1040nr_phantoms(_amounts(question))
+    terms = (income_brackets.NRA_FOREIGN_LOSS_AMOUNT_TERMS if is_loss
+             else income_brackets.NRA_FOREIGN_INCOME_AMOUNT_TERMS)
+    foreign_amount = _amount_near_filtered(question, terms, amounts)
+    if foreign_amount is None:
+        return None
+    others = [a for a, _, _ in amounts if a != foreign_amount]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_nra_foreign_income_ca_tax(
+        conn, other_income, foreign_amount, is_loss, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if is_loss:
+        adj_note = (f"a ${foreign_amount:,.2f} loss from foreign sources, which California "
+                    "SUBTRACTS to reflect your worldwide income")
+    else:
+        adj_note = (f"${foreign_amount:,.2f} in foreign-source income not reported on your "
+                    "federal Form 1040-NR (which generally covers only U.S.-source/effectively-"
+                    "connected income), which California ADDS BACK to reflect your worldwide "
+                    "income")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other U.S.-source income already reported on your "
+        f"federal return (e.g. wages), filing status {label}, and {adj_note} "
+        f"({income_brackets.NRA_FOREIGN_INCOME_CITATION}) -- since California taxes full-year "
+        "residents on WORLDWIDE income regardless of federal nonresident-alien status: your "
+        f"California AGI is about ${calc['agi']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes you are a full-year California RESIDENT (this line doesn't "
+        "apply the same way on a nonresident/part-year Form 540NR return) and no other "
+        "adjustments -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_nra_foreign_income_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_nra_foreign_income_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with foreign-source income or losses as a "
+        "federal nonresident alien, I need your filing status: single, married filing jointly, "
+        "married filing separately, head of household, or qualifying surviving spouse.")
     return result
 
 
@@ -3710,6 +4071,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_gilti_fs_result:
         return missing_gilti_fs_result
 
+    nra_foreign_income_result = _income_nra_foreign_income_answer(conn, question, base)
+    if nra_foreign_income_result:
+        return nra_foreign_income_result
+
+    missing_nra_foreign_income_fs_result = _income_nra_foreign_income_missing_filing_status_answer(question, base)
+    if missing_nra_foreign_income_fs_result:
+        return missing_nra_foreign_income_fs_result
+
     # Real-estate-professional (IRC 469(c)(7) non-conformity) checked
     # HERE, BEFORE fiduciary trust/estate tax below -- found live via
     # testing: fiduciary_tax.detect_fiduciary_type deliberately matches
@@ -3816,6 +4185,24 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_capital_loss_fs_result:
         return missing_capital_loss_fs_result
 
+    # Excess business loss CARRYOVER (Line 8z) checked HERE, BEFORE the
+    # plain Line 8p excess-business-loss check below -- "excess business
+    # loss carryover" contains "excess business loss" as a substring, so
+    # without this ordering the plain Line 8p detector would swallow
+    # carryover-phrased questions first (same "move the check earlier"
+    # fix as K-1 capital gain/real-estate-professional's placement).
+    ebl_carryover_result = _income_ebl_carryover_answer(conn, question, base)
+    if ebl_carryover_result:
+        return ebl_carryover_result
+
+    ebl_carryover_partial_result = _income_ebl_carryover_partial_answer(question, base)
+    if ebl_carryover_partial_result:
+        return ebl_carryover_partial_result
+
+    missing_ebl_carryover_fs_result = _income_ebl_carryover_missing_filing_status_answer(question, base)
+    if missing_ebl_carryover_fs_result:
+        return missing_ebl_carryover_fs_result
+
     excess_business_loss_result = _income_excess_business_loss_answer(conn, question, base)
     if excess_business_loss_result:
         return excess_business_loss_result
@@ -3831,6 +4218,14 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_nol_fs_result = _income_nol_missing_filing_status_answer(question, base)
     if missing_nol_fs_result:
         return missing_nol_fs_result
+
+    disaster_loss_carryover_result = _income_disaster_loss_carryover_answer(conn, question, base)
+    if disaster_loss_carryover_result:
+        return disaster_loss_carryover_result
+
+    missing_disaster_loss_carryover_fs_result = _income_disaster_loss_carryover_missing_filing_status_answer(question, base)
+    if missing_disaster_loss_carryover_fs_result:
+        return missing_disaster_loss_carryover_fs_result
 
     cannabis_280e_result = _income_cannabis_280e_answer(conn, question, base)
     if cannabis_280e_result:
@@ -4101,6 +4496,29 @@ def _answer(question: str, compose: bool = True, location: str = None,
                 cannabis_result = _answer_income(iconn, question, compose, qv_cannabis)
             if cannabis_result:
                 return cannabis_result
+
+        # Foreign earned income exclusion / foreign housing deduction
+        # (Form 2555, Schedule CA Lines 8d/24j): same collision class as
+        # cannabis 280E/military retirement above -- found live via
+        # direct testing after the Line 24j housing-deduction extension
+        # was added. A "both exclusion AND housing deduction stated
+        # together" question was confidently (and nonsensically)
+        # answered by the sales domain ("tangible personal property
+        # purchased abroad") for one capitalization of an otherwise-
+        # identical question that answered correctly for another
+        # capitalization -- an embedding-space routing quirk (sales
+        # tries first by default), not a logic bug in the income-domain
+        # answer itself (confirmed: calling the income-domain function
+        # directly always returns the correct result regardless of
+        # capitalization). Without this intercept, some phrasings of
+        # this question would never even reach the income domain.
+        if (income_brackets.detect_foreign_earned_income_signal(question)
+                or income_brackets.detect_foreign_earned_income_missing_filing_status(question)):
+            qv_foreign_income = _embed(question)
+            with income_db.get_conn() as iconn:
+                foreign_income_result = _answer_income(iconn, question, compose, qv_foreign_income)
+            if foreign_income_result:
+                return foreign_income_result
 
         branches, qv = [], None
         route_dist = None
