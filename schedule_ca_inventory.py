@@ -729,9 +729,15 @@ def load():
         # passes) leaves the OLD label behind as a stale row with no
         # DELETE step to clean it up. Recompute the current valid set on
         # every load and remove anything in this tax_year not in it.
+        # AND part IN ('I','II') matters as of 2026-08-15: form540_inventory.py
+        # (Phase 3 of the Income Coverage Blueprint) reuses this SAME table for
+        # Form 540's own lines/credits, tagged part='540' -- without this
+        # filter, this module's own orphan-pruning/status/list queries would
+        # silently pick up and mix in that other module's rows.
         current_keys = {(line_ref, label) for _, _, line_ref, label, *_ in ITEMS}
         existing = conn.execute(
-            "SELECT id, line_ref, item_label FROM schedule_ca_inventory WHERE tax_year=%s",
+            "SELECT id, line_ref, item_label FROM schedule_ca_inventory "
+            "WHERE tax_year=%s AND part IN ('I','II')",
             (TAX_YEAR,)).fetchall()
         orphan_ids = [row_id for row_id, line_ref, label in existing
                       if (line_ref, label) not in current_keys]
@@ -746,7 +752,8 @@ def load():
 def status_report():
     conn = db.get_conn()
     rows = conn.execute(
-        "SELECT status, count(*) FROM schedule_ca_inventory WHERE tax_year=%s "
+        "SELECT status, count(*) FROM schedule_ca_inventory "
+        "WHERE tax_year=%s AND part IN ('I','II') "
         "GROUP BY status ORDER BY count(*) DESC", (TAX_YEAR,)).fetchall()
     total = sum(r[1] for r in rows)
     print(f"\n=== SCHEDULE CA {TAX_YEAR} INVENTORY ({total} items) ===")
@@ -757,7 +764,8 @@ def status_report():
 
 def list_items(status_filter=None):
     conn = db.get_conn()
-    q = "SELECT part, section, line_ref, item_label, status, topic_key FROM schedule_ca_inventory WHERE tax_year=%s"
+    q = ("SELECT part, section, line_ref, item_label, status, topic_key FROM schedule_ca_inventory "
+         "WHERE tax_year=%s AND part IN ('I','II')")
     params = [TAX_YEAR]
     if status_filter:
         q += " AND status=%s"

@@ -7,6 +7,7 @@ For every question:
   4. Gemini composes the answer         (language, from facts only)
   5. guard: no rule -> "Needs review"   (safety)
 """
+import json
 import re
 
 import google.generativeai as genai
@@ -836,6 +837,1175 @@ def _income_missing_filing_status_answer(question: str, amount, base: dict):
     return result
 
 
+def _income_exemption_credit_answer(conn, question: str, base: dict):
+    """Wage income + a stated exemption-credit question (Form 540 Lines
+    7-10) -- see income_brackets.compute_exemption_credit_ca_tax's
+    docstring for the credit-vs-deduction mechanic and the phase-out.
+    Mirrors _income_compute_answer's plain-wage scope exactly (same
+    EXEMPTION_CREDIT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE), plus one
+    optional dependent-count fact.
+
+    Extraction note: a stated dependent count (e.g. "2 dependents") is a
+    real, small digit that can appear BEFORE the income figure in some
+    phrasings ("with 2 dependents, how much tax do I owe on $80,000...")
+    -- unlike the plain compute path's single _amount() (first-match)
+    call, this can't safely assume the income figure is whichever number
+    appears first. Extracts the dependent count first, removes that
+    specific value from the full amounts list, then requires exactly
+    one remaining amount for income -- same "N anchors + 1 remainder"
+    discipline as the multi-figure paths built earlier this session."""
+    fs = income_brackets.detect_exemption_credit_signal(question)
+    if not fs:
+        return None
+    dependent_count = income_brackets.detect_exemption_credit_dependent_count(question)
+    amounts = _amounts(question)
+    if dependent_count is not None:
+        removed = False
+        remaining = []
+        for a, s, e in amounts:
+            if not removed and a == float(dependent_count):
+                removed = True
+                continue
+            remaining.append((a, s, e))
+        amounts = remaining
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    amount = others[0]
+    calc = income_brackets.compute_exemption_credit_ca_tax(
+        conn, amount, fs, dependent_count=dependent_count or 0)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000, unaffected by this credit) "
+                       f"({calc['surtax_citation']}).")
+    exemption = calc["exemption"]
+    dep_note = ""
+    if exemption["dependent_count"]:
+        dep_note = (f" plus ${exemption['dependent_group']:,.2f} for "
+                    f"{exemption['dependent_count']} dependent exemption(s)")
+    phaseout_note = ""
+    if exemption["phaseout_applied"]:
+        phaseout_note = (
+            f" Your income is above California's exemption-credit phase-out threshold "
+            f"(${exemption['threshold']:,.0f} for your filing status), reducing each "
+            f"exemption unit by ${exemption['reduction_per_unit']:,.2f} under the Line 32 AGI "
+            "Limitation Worksheet.")
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in wage income, filing status {label}"
+        f"{', with ' + str(exemption['dependent_count']) + ' dependent(s)' if exemption['dependent_count'] else ''}: "
+        f"your California exemption credit is ${exemption['total']:,.2f} "
+        f"(${exemption['personal_group']:,.2f} personal exemption credit{dep_note}), "
+        f"subtracted directly from your computed tax ({income_brackets.EXEMPTION_CREDIT_CITATION})."
+        f"{phaseout_note} Before this credit, your California tax on ${amount:,.2f} of wage "
+        f"income (after the standard deduction of ${calc['standard_deduction']:,.0f}) would be "
+        f"about ${calc['bracket_tax_before_credit']:,.2f}; after the credit, your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f}.{surtax_note} This does NOT include the Blind or Senior "
+        "Exemption Credits (not modeled in this version -- state them explicitly and ask again "
+        "if applicable) and assumes wage-only income with no other adjustments -- your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_exemption_credit_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_exemption_credit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California exemption credit, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or qualifying "
+        "surviving spouse. Please ask again and include it.")
+    return result
+
+
+def _use_tax_is_ambiguous(question: str) -> bool:
+    """True iff this question is clearly ATTEMPTING a use-tax
+    computation but can't safely use the flat AGI lookup -- either an
+    explicit over-cap PHRASE (income_brackets.detect_use_tax_over_cap)
+    or TWO OR MORE stated dollar figures. Found live via testing: a
+    specific item price ("I bought a $2,000 TV") isn't caught by
+    phrase-matching alone (no "over $1,000"-style wording present), but
+    the lookup table only ever needs ONE figure (AGI) -- a second
+    stated amount most likely describes an individual purchase price,
+    which this feature can't safely fold into the flat lookup without
+    knowing whether it clears FTB's $1,000-per-item cap. Conservative
+    by design: two-or-more amounts defers, rather than guessing which
+    one is AGI.
+
+    Deliberately NOT true for ZERO amounts -- found live via testing:
+    "What is use tax?" (a plain informational question, no computation
+    attempted at all) was being swept into this ambiguous-defer path by
+    an earlier version that used != 1 instead of >= 2, which incorrectly
+    intercepted it with a compute-flavored clarifying message instead of
+    letting it fall through to the pre-existing informational answer
+    that already covers this topic reasonably."""
+    if income_brackets.detect_use_tax_over_cap(question):
+        return True
+    return len(_amounts(question)) >= 2
+
+
+def _income_use_tax_answer(question: str, base: dict):
+    """Form 540 Line 91 Estimated Use Tax Lookup Table -- see
+    income_brackets.compute_estimated_use_tax's docstring for the AGI-
+    band mechanic and the $1,000-per-item scope cap. No filing status
+    needed (the table is AGI-only); a single stated dollar figure
+    (California AGI) is the only input -- see _use_tax_is_ambiguous for
+    why a second stated figure routes elsewhere instead of guessing."""
+    if not income_brackets.detect_use_tax_signal(question):
+        return None
+    if _use_tax_is_ambiguous(question):
+        return None
+    ca_agi = _amount(question)
+    if ca_agi is None:
+        return None
+    use_tax = income_brackets.compute_estimated_use_tax(ca_agi)
+    if use_tax is None:
+        return None
+    result = {**base, "status": "answered", "category": "estimated_use_tax",
+              "amount": ca_agi, "tax": use_tax,
+              "citation": income_brackets.USE_TAX_CITATION,
+              "source_url": income_brackets.USE_TAX_SOURCE_URL}
+    result["answer_text"] = (
+        f"Assuming ${ca_agi:,.2f} in California Adjusted Gross Income (Form 540 Line 17), your "
+        f"estimated use tax under FTB's Estimated Use Tax Lookup Table is ${use_tax:,.2f} "
+        f"({income_brackets.USE_TAX_CITATION}). This lookup table only covers individual, "
+        "non-business items you purchased for LESS than $1,000 each (from an out-of-state or "
+        "online retailer that didn't collect California tax) -- if you bought anything for "
+        "$1,000 or more, or anything for business use, that item needs the separate Use Tax "
+        "Worksheet (actual price x your district's tax rate) instead, added to this estimate "
+        "for anything under $1,000. Report this amount on Form 540, Line 91."
+    )
+    return result
+
+
+def _income_use_tax_over_cap_answer(question: str, base: dict):
+    """Specific clarifying message for cases _use_tax_is_ambiguous flags
+    -- an explicit $1,000+/business-purchase phrase, OR a second stated
+    dollar figure this feature can't confidently separate from AGI --
+    rather than silently misapplying the flat AGI lookup table."""
+    if not income_brackets.detect_use_tax_signal(question):
+        return None
+    if not _use_tax_is_ambiguous(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "FTB's Estimated Use Tax Lookup Table only covers individual, non-business items "
+        "purchased for LESS than $1,000 each, based on your California AGI alone. Your "
+        "question mentions more than one dollar figure -- if one of them is the price of a "
+        "specific purchase, an item priced at $1,000 or more (or any business purchase) "
+        "requires the separate Use Tax Worksheet instead -- the actual purchase price "
+        "multiplied by your district's sales/use tax rate (not a flat AGI-based estimate) -- "
+        "which this assistant doesn't yet compute. If your purchases are all under $1,000 "
+        "each, please ask again stating ONLY your California AGI."
+    )
+    return result
+
+
+def _other_state_tax_credit_extract_amounts(question: str):
+    """Returns (income_amount, double_taxed_income, other_state_agi,
+    other_state_tax_paid) or None if the three anchored figures and the
+    single remainder can't be unambiguously extracted -- the "N anchors
+    + 1 remainder" pattern (N=3 here, the most anchors used by any
+    feature this session) established for the Line 8z EBL-carryover
+    build, but using _amount_after_filtered_span (forward-only) instead
+    of _amount_near_filtered_span -- see that function's module note for
+    why: with 4 dollar figures packed close together, undirected
+    nearest-distance can pick a PRECEDING amount over the one the anchor
+    phrase actually describes. Anchor phrasing is deliberately state-name-
+    AGNOSTIC ("other state AGI", not "Oregon AGI") -- this feature can't
+    parse arbitrary US state names, so it requires the taxpayer to
+    phrase it generically (disclosed in the missing-info message, not
+    silently unsupported)."""
+    amounts = _amounts(question)
+    match = _amount_after_filtered_span(question, income_brackets.DOUBLE_TAXED_INCOME_TERMS, amounts)
+    if match is None:
+        return None
+    double_taxed_income = match[0]
+    remaining = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(question, income_brackets.OTHER_STATE_AGI_TERMS, remaining)
+    if match is None:
+        return None
+    other_state_agi = match[0]
+    remaining = _remove_amount_span(remaining, match)
+    match = _amount_after_filtered_span(question, income_brackets.OTHER_STATE_TAX_PAID_TERMS, remaining)
+    if match is None:
+        return None
+    other_state_tax_paid = match[0]
+    remaining = _remove_amount_span(remaining, match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    return income_amount, double_taxed_income, other_state_agi, other_state_tax_paid
+
+
+def _income_other_state_tax_credit_answer(conn, question: str, base: dict):
+    """Other State Tax Credit (Schedule S (540)) -- see
+    income_brackets.compute_other_state_tax_credit_ca_tax's docstring
+    for the two-sided proration/lesser-of mechanic and why "CA tax
+    liability" is computed, not asked as a stated fact. The most
+    complex extraction built this session: 4 dollar figures (income,
+    double-taxed income, other-state AGI, other-state tax paid) plus
+    filing status."""
+    fs = income_brackets.detect_other_state_tax_credit_signal(question)
+    if not fs:
+        return None
+    extracted = _other_state_tax_credit_extract_amounts(question)
+    if extracted is None:
+        return None
+    income_amount, double_taxed_income, other_state_agi, other_state_tax_paid = extracted
+    calc = income_brackets.compute_other_state_tax_credit_ca_tax(
+        conn, income_amount, fs, double_taxed_income, other_state_agi, other_state_tax_paid)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000, unaffected by this credit) "
+                       f"({calc['surtax_citation']}).")
+    credit = calc["credit"]
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income (also your CA AGI), filing "
+        f"status {label}, ${double_taxed_income:,.2f} of income taxed by both California and "
+        f"the other state, a ${other_state_agi:,.2f} other-state AGI, and ${other_state_tax_paid:,.2f} "
+        f"in tax paid to the other state: your Other State Tax Credit is ${credit['credit']:,.2f} "
+        f"({income_brackets.OTHER_STATE_TAX_CREDIT_CITATION}) -- the LESSER of your CA-side "
+        f"proration (${credit['ca_side']:,.2f}, {credit['ca_ratio']*100:.2f}% of your CA tax "
+        f"liability) and your other-state-side proration (${credit['other_side']:,.2f}, "
+        f"{credit['other_ratio']*100:.2f}% of the tax you paid there). Before this credit, your "
+        f"California tax would be about ${calc['bracket_tax_before_credit']:,.2f}; after the "
+        f"credit, your estimated {income_brackets.DEFAULT_TAX_YEAR} California income tax is "
+        f"about ${calc['total_tax']:,.2f}.{surtax_note} This assumes the SAME double-taxed-"
+        "income figure applies to both California's and the other state's share (Schedule S's "
+        "own Part I sometimes splits these into two different amounts); does not check whether "
+        "the other state already gives ITS OWN residents a credit for CA tax paid (which would "
+        "disallow this credit entirely per FTB's anti-double-benefit rule); and doesn't apply "
+        "against California AMT (not modeled in this system). Your actual liability may differ."
+    )
+    return result
+
+
+def _income_other_state_tax_credit_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_other_state_tax_credit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Other State Tax Credit, I need your filing status: single, married "
+        "filing jointly, married filing separately, head of household, or qualifying surviving "
+        "spouse. Please also state your California income, your double-taxed income, the other "
+        "state's AGI, and the tax you paid to the other state.")
+    return result
+
+
+def _pte_strip_form_number_phantoms(amounts):
+    """Literal "3804" in "form 3804-cr" (this feature's own trigger
+    vocabulary) parses as a phantom $3,804.00 dollar amount -- same
+    collision class as cannabis 280E/QSBS/Form 2555/Subpart F-GILTI/
+    NRA's "1040". Local filter scoped to this feature."""
+    return [(a, s, e) for a, s, e in amounts if a != 3804.0]
+
+
+def _income_pte_credit_answer(conn, question: str, base: dict):
+    """PTE Elective Tax Credit (FTB 3804-CR) -- see
+    income_brackets.compute_pte_credit_ca_tax's docstring for the
+    current-year-absorption-only mechanic and why "CA tax liability" is
+    computed, not asked as a stated fact. Extracts the OPTIONAL prior-
+    year-carryover anchor FIRST and removes it from the amounts list
+    before searching for the REQUIRED K-1 credit anchor -- necessary
+    because "PTE credit carryover" contains "PTE credit" as a literal
+    substring; by the time the second search runs, the narrowed amounts
+    list makes this unambiguous regardless of the anchor-text overlap."""
+    fs = income_brackets.detect_pte_credit_signal(question)
+    if not fs:
+        return None
+    amounts = _pte_strip_form_number_phantoms(_amounts(question))
+    prior_year_carryover = None
+    carryover_match = _amount_near_filtered_span(question, income_brackets.PTE_CREDIT_CARRYOVER_TERMS, amounts)
+    if carryover_match is not None:
+        prior_year_carryover = carryover_match[0]
+        amounts = _remove_amount_span(amounts, carryover_match)
+    k1_match = _amount_near_filtered_span(question, income_brackets.PTE_CREDIT_TERMS, amounts)
+    if k1_match is None:
+        return None
+    k1_credit_amount = k1_match[0]
+    remaining = _remove_amount_span(amounts, k1_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_pte_credit_ca_tax(
+        conn, income_amount, fs, k1_credit_amount, prior_year_carryover=prior_year_carryover or 0.0)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000, unaffected by this credit) "
+                       f"({calc['surtax_citation']}).")
+    credit = calc["credit"]
+    carryover_note = ""
+    if prior_year_carryover:
+        carryover_note = f" plus your ${prior_year_carryover:,.2f} carryover from a prior year"
+    remaining_note = ""
+    if credit["remaining_carryover"]:
+        remaining_note = (f" The remaining ${credit['remaining_carryover']:,.2f} (your credit "
+                          "exceeds your CA tax liability) carries forward for up to 5 years, "
+                          "not tracked in this estimate.")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, filing status {label}, and a "
+        f"${k1_credit_amount:,.2f} Pass-Through Entity Elective Tax Credit reported on your "
+        f"K-1{carryover_note}: your total available credit is ${credit['total_available']:,.2f}, "
+        f"of which ${credit['credit_used']:,.2f} is usable this year (capped at your own CA tax "
+        f"liability -- this credit is nonrefundable) ({income_brackets.PTE_CREDIT_CITATION})."
+        f"{remaining_note} Before this credit, your California tax would be about "
+        f"${calc['bracket_tax_before_credit']:,.2f}; after the credit, your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f}.{surtax_note} This assumes the stated K-1 credit figure is "
+        "already correct (the 9.3% rate is computed entirely at the entity level, not re-"
+        "derived here); does not account for Schedule P's credit-ordering against OTHER "
+        "nonrefundable credits you might also claim (e.g. the Other State Tax Credit); and "
+        "doesn't model the AMT/TMT interaction (not computed in this system). Your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_pte_credit_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_pte_credit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Pass-Through Entity Elective Tax Credit, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California income and your K-1 "
+        "PTE credit amount.")
+    return result
+
+
+def _income_late_penalty_reasonable_cause_answer(question: str, base: dict):
+    """Dedicated informational redirect for a reasonable-cause/penalty-
+    abatement question -- FTB decides this case by case, so this
+    assistant deliberately does NOT compute a waived/reduced penalty.
+    Checked BEFORE the normal penalty computation, same "specific
+    redirect instead of a generic defer" pattern as Roth IRA's."""
+    if not income_brackets.detect_late_penalty_reasonable_cause_mention(question):
+        return None
+    result = {**base, "status": "answered", "category": "late_penalty_reasonable_cause"}
+    result["answer_text"] = (
+        "California's late-filing and late-payment penalties (R&TC Sections 19131 and 19132) "
+        "can be waived if you show the failure was due to reasonable cause and not willful "
+        "neglect -- but this is a case-by-case determination FTB makes based on your specific "
+        "facts and circumstances (illness, disaster, bad professional advice, etc.), not "
+        "something this assistant can compute or predict for you. If you believe you qualify, "
+        "you'll need to explain your situation directly to FTB, typically with your return or "
+        "in response to a penalty notice. Separately, FTB also offers a one-time Timeliness "
+        "Penalty Abatement (R&TC Section 19132.5) for taxpayers who haven't previously used it "
+        "and have all other returns/payments current -- also not modeled here. If you want an "
+        "estimate of the penalty itself (assuming no abatement), ask again without mentioning "
+        "reasonable cause or abatement, stating your unpaid balance and how many months late."
+    )
+    return result
+
+
+def _income_late_penalty_answer(question: str, base: dict):
+    """Late-filing/late-payment penalties (Form 540 Line 112) -- see
+    income_brackets.compute_late_penalties's docstring for the core
+    formulas, the required offset, and what's deliberately out of
+    scope. No filing status needed. "N months late" is a COUNT, not a
+    dollar figure -- extracted and stripped from the amounts list
+    before extracting the unpaid-balance dollar figure, same "count vs.
+    dollar figure" distinction as the exemption credit's dependent
+    count."""
+    if not income_brackets.detect_late_penalty_signal(question):
+        return None
+    months_late = income_brackets.detect_late_penalty_months_late(question)
+    if months_late is None:
+        return None
+    amounts = [(a, s, e) for a, s, e in _amounts(question) if a != months_late]
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    unpaid_balance = others[0]
+    calc = income_brackets.compute_late_penalties(unpaid_balance, months_late)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "late_filing_payment_penalty",
+              "amount": unpaid_balance, "tax": calc["total_penalty"],
+              "citation": income_brackets.LATE_PENALTY_CITATION,
+              "source_url": income_brackets.LATE_PENALTY_SOURCE_URL}
+    offset_note = ""
+    if calc["late_payment_assessed"] < calc["late_payment_computed"]:
+        offset_note = (
+            f" Your late-payment penalty computes to ${calc['late_payment_computed']:,.2f} "
+            f"before the required offset against your late-filing penalty -- since California "
+            "reduces the late-payment penalty dollar-for-dollar by the late-filing penalty for "
+            f"the same period, only ${calc['late_payment_assessed']:,.2f} of it is actually "
+            "assessed on top."
+        )
+    result["answer_text"] = (
+        f"Assuming a ${unpaid_balance:,.2f} unpaid balance and a return filed/paid "
+        f"{calc['months_late_int']} month(s) late (any partial month counts as a full month): "
+        f"your late-filing penalty is ${calc['late_filing_penalty']:,.2f} (5% per month, capped "
+        f"at 25% of the balance).{offset_note} Your total penalty is about "
+        f"${calc['total_penalty']:,.2f} ({income_brackets.LATE_PENALTY_CITATION}). This does "
+        "NOT include mandatory interest (which compounds daily at a rate that changes every "
+        "six months, not modeled here), the separate $135-minimum-penalty rule that can apply "
+        "if you filed more than 60 days past California's automatic extended due date "
+        "(October 15), or any reasonable-cause/abatement relief you might qualify for -- your "
+        "actual amount owed will be higher once interest is added, and could be lower if "
+        "relief applies. Assumes you filed and fully paid at the same time."
+    )
+    return result
+
+
+def _early_distribution_strip_form_number_phantoms(amounts):
+    """Literal "3805" in "form 3805p"/"ftb 3805p" (this feature's own
+    trigger vocabulary) parses as a phantom $3,805.00 dollar amount --
+    same collision class as cannabis 280E/QSBS/Form 2555/Subpart F-
+    GILTI/NRA's "1040"/PTE credit's "3804". Local filter scoped to this
+    feature."""
+    return [(a, s, e) for a, s, e in amounts if a != 3805.0]
+
+
+def _income_early_distribution_answer(question: str, base: dict):
+    """California additional tax on early retirement distributions (FTB
+    3805P Part I) -- see income_brackets.compute_early_distribution_tax's
+    docstring for the 2.5%/6% mechanic and why exception-flavored
+    questions and non-Part-I account types are deliberately excluded
+    from income_brackets.detect_early_distribution_signal rather than
+    guessed at here."""
+    if not income_brackets.detect_early_distribution_signal(question):
+        return None
+    q = question.lower()
+    is_simple_early = any(t in q for t in income_brackets.EARLY_DISTRIBUTION_SIMPLE_TERMS)
+    amounts = _early_distribution_strip_form_number_phantoms(_amounts(question))
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    taxable_distribution = others[0]
+    calc = income_brackets.compute_early_distribution_tax(taxable_distribution, is_simple_early)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "early_distribution_tax",
+              "amount": taxable_distribution, "tax": calc["tax"],
+              "citation": income_brackets.EARLY_DISTRIBUTION_CITATION,
+              "source_url": income_brackets.EARLY_DISTRIBUTION_SOURCE_URL}
+    rate_note = (f"{calc['rate']*100:g}%" + (" (the SIMPLE-IRA-within-first-2-years rate)"
+                 if is_simple_early else " (the standard rate)"))
+    result["answer_text"] = (
+        f"Assuming ${taxable_distribution:,.2f} as the TAXABLE portion of an early retirement "
+        f"distribution (before age 59½, already net of any basis/rollovers), California's "
+        f"additional tax is ${calc['tax']:,.2f} -- {rate_note} of the taxable amount "
+        f"({income_brackets.EARLY_DISTRIBUTION_CITATION}). This is IN ADDITION TO the separate "
+        "federal 10% early-withdrawal penalty and to regular California income tax on the "
+        "distribution. This only covers IRA/qualified-plan/annuity distributions with NO "
+        "exception claimed -- California's exception list mostly but NOT fully matches the "
+        "federal list (two federal exceptions -- phased-retirement annuity payments and "
+        "automatic-enrollment permissible withdrawals -- are confirmed NOT recognized for "
+        "California), so if any exception might apply to you, ask again mentioning it "
+        "specifically and this assistant will flag it instead of guessing. Also doesn't cover "
+        "Archer MSA, Medicare Advantage MSA, Coverdell, or ABLE account distributions, which "
+        "use different rates entirely."
+    )
+    return result
+
+
+def _income_early_distribution_exception_answer(question: str, base: dict):
+    """Specific clarifying message when exception-flavored language is
+    present -- California's exception list is confirmed to diverge from
+    federal's on at least 2 of 25+ codes, so this assistant does not
+    guess whether a specific exception applies for California."""
+    if not income_brackets.detect_early_distribution_exception_mention(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California's additional tax on early retirement distributions (FTB 3805P) has its own "
+        "exception list, and FTB's own instructions confirm it does NOT fully match the federal "
+        "exception list used for the 10% federal penalty -- for example, two federal exceptions "
+        "(phased-retirement annuity payments to federal employees, and automatic-enrollment "
+        "permissible withdrawals) are federally valid but explicitly NOT recognized for "
+        "California. Because a wrong guess here could understate what you owe, this assistant "
+        "doesn't compute an exception-based outcome -- please check FTB Form 3805P's current "
+        "exception-code list directly, or consult a tax professional, to confirm whether your "
+        "specific circumstance qualifies for California."
+    )
+    return result
+
+
+def _income_early_distribution_other_account_answer(question: str, base: dict):
+    """Specific clarifying message when a non-Part-I account type is
+    mentioned (Archer MSA, Medicare Advantage MSA, Coverdell, ABLE,
+    HSA) -- these use different rates (12.5%, 50%, or have no CA analog
+    at all) this module does not compute."""
+    if not income_brackets.detect_early_distribution_other_account_mention(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "The 2.5% additional-tax rate only applies to IRA/qualified-retirement-plan/annuity "
+        "distributions (FTB 3805P Part I). Archer MSA non-qualified distributions use a "
+        "different 12.5% California rate (R&TC Section 17215), and Medicare Advantage MSA "
+        "non-qualified distributions use a 50% rate -- neither is computed by this assistant. "
+        "California also does not conform to federal HSA law, so HSA distributions aren't "
+        "addressed by this form at all. Please consult FTB Form 3805P's instructions directly "
+        "for these account types."
+    )
+    return result
+
+
+def _cdc_strip_form_number_phantoms(amounts):
+    """Literal "3506" in "form 3506" (this feature's own trigger
+    vocabulary) parses as a phantom $3,506.00 dollar amount -- same
+    collision class as cannabis 280E/QSBS/Form 2555/Subpart F-GILTI/
+    NRA's "1040"/PTE credit's "3804"/early-distribution's "3805". Local
+    filter scoped to this feature."""
+    return [(a, s, e) for a, s, e in amounts if a != 3506.0]
+
+
+def _income_cdc_credit_answer(question: str, base: dict):
+    """Child and Dependent Care Expenses Credit (FTB 3506) -- see
+    income_brackets.compute_cdc_credit's docstring for the equivalence
+    conditions the "federal credit x Line 9 percentage" shortcut relies
+    on, and why out-of-scope questions are deliberately excluded from
+    income_brackets.detect_cdc_credit_signal rather than guessed at
+    here."""
+    if not income_brackets.detect_cdc_credit_signal(question):
+        return None
+    amounts = _cdc_strip_form_number_phantoms(_amounts(question))
+    credit_match = _amount_near_filtered_span(question, income_brackets.CDC_CREDIT_FEDERAL_CREDIT_TERMS, amounts)
+    if credit_match is None:
+        return None
+    federal_credit_amount = credit_match[0]
+    remaining = _remove_amount_span(amounts, credit_match)
+    agi_match = _amount_near_filtered_span(question, income_brackets.CDC_CREDIT_FEDERAL_AGI_TERMS, remaining)
+    if agi_match is None:
+        return None
+    federal_agi = agi_match[0]
+    calc = income_brackets.compute_cdc_credit(federal_credit_amount, federal_agi)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "cdc_credit",
+              "amount": federal_credit_amount, "credit": None,
+              "citation": income_brackets.CDC_CREDIT_CITATION,
+              "source_url": income_brackets.CDC_CREDIT_SOURCE_URL}
+    if calc["disqualified"]:
+        result["answer_text"] = (
+            f"With a federal AGI of ${federal_agi:,.2f}, you do NOT qualify for California's "
+            "Child and Dependent Care Expenses Credit -- FTB caps eligibility at $100,000 "
+            "federal AGI as a hard cutoff, not a gradually-reduced percentage "
+            f"({income_brackets.CDC_CREDIT_CITATION})."
+        )
+        return result
+    result["credit"] = calc["credit"]
+    result["answer_text"] = (
+        f"Assuming a ${federal_credit_amount:,.2f} federal Child and Dependent Care Credit and "
+        f"a ${federal_agi:,.2f} federal AGI: your California credit is ${calc['credit']:,.2f} "
+        f"({calc['pct']*100:g}% of your federal credit) ({income_brackets.CDC_CREDIT_CITATION}). "
+        "This shortcut is only exactly correct for a full-year California resident with ALL "
+        "care provided in California and no employer dependent-care benefits received -- FTB "
+        "Form 3506 is actually a full parallel worksheet (qualifying expenses x this same "
+        "federal-AGI chart, replicating the federal Form 2441 formula, then x this California-"
+        "specific percentage), and it never literally reads your federal credit amount as an "
+        "input. This credit is nonrefundable with NO carryover -- any amount you can't use this "
+        "year is simply lost, not tracked forward. Your actual credit may differ if any care "
+        "was provided outside California or your circumstances differ from this common case."
+    )
+    return result
+
+
+def _income_cdc_credit_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message for cases where the federal-credit
+    shortcut this module relies on doesn't hold -- nonresident/part-
+    year residency, out-of-state care, or employer dependent-care
+    benefits, each of which requires FTB 3506's own full worksheet
+    (different qualifying-expense/earned-income figures than federal),
+    not a guessed percentage-of-federal-credit computation."""
+    if not income_brackets.detect_cdc_credit_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California's Child and Dependent Care Expenses Credit (FTB Form 3506) restricts "
+        "qualifying expenses to care provided IN California and, for nonresidents/part-year "
+        "residents, CA-source earned income only -- both genuinely different from the federal "
+        "credit calculation, and if you received employer dependent-care benefits (W-2 box 10) "
+        "there's an additional worksheet involved. This assistant only computes the common "
+        "case (full-year CA resident, all care provided in California, no employer benefits) "
+        "using a shortcut (federal credit amount x FTB's percentage table) that isn't valid "
+        "for your situation. Please consult FTB Form 3506's instructions directly, or a tax "
+        "professional, for an accurate figure."
+    )
+    return result
+
+
+def _income_adoption_credit_answer(conn, question: str, base: dict):
+    """Child Adoption Costs Credit (Form 540 Credit Chart code 197) -- see
+    income_brackets.compute_adoption_credit_ca_tax's docstring for the
+    cap-at-CA-tax-liability/carryover mechanic. Extracts the qualifying-
+    costs anchor first, remainder is treated as income -- same "N anchors
+    + 1 remainder" pattern as the PTE credit and Line 8z EBL carryover."""
+    fs = income_brackets.detect_adoption_credit_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    costs_match = _amount_near_filtered_span(question, income_brackets.ADOPTION_CREDIT_COST_TERMS, amounts)
+    if costs_match is None:
+        return None
+    qualifying_costs = costs_match[0]
+    remaining = _remove_amount_span(amounts, costs_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_adoption_credit_ca_tax(conn, income_amount, fs, qualifying_costs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "adoption_credit",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000, unaffected by this credit) "
+                       f"({calc['surtax_citation']}).")
+    credit = calc["credit"]
+    remaining_note = ""
+    if credit["remaining_carryover"]:
+        remaining_note = (f" The remaining ${credit['remaining_carryover']:,.2f} (your credit "
+                          "exceeds your CA tax liability) carries forward indefinitely until "
+                          "used, not tracked in this estimate.")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, filing status {label}, and "
+        f"${qualifying_costs:,.2f} in qualifying adoption costs (agency/Department of Social "
+        f"Services fees, unreimbursed medical expenses, and family travel expenses) for a child "
+        f"adopted from California public agency custody: your available credit is "
+        f"${credit['credit_available']:,.2f} (50% of costs, capped at $2,500 per child), of "
+        f"which ${credit['credit_used']:,.2f} is usable this year (capped at your own CA tax "
+        f"liability -- this credit is nonrefundable) ({income_brackets.ADOPTION_CREDIT_CITATION})."
+        f"{remaining_note} Before this credit, your California tax would be about "
+        f"${calc['bracket_tax_before_credit']:,.2f}; after the credit, your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f}.{surtax_note} This assumes the child is also a US citizen "
+        "or legal resident (the credit's second eligibility gate); doesn't aggregate costs "
+        "across a prior unsuccessful adoption attempt, if one applies; doesn't account for a "
+        "Schedule CA (540) Line 27 addback if you also itemized these same costs on federal "
+        "Schedule A; and doesn't model Schedule P's credit-ordering against other nonrefundable "
+        "credits you might also claim. If you adopted more than one child this year, each has "
+        "its own separate $2,500 cap -- ask about each child's costs separately. Your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_adoption_credit_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_adoption_credit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Child Adoption Costs Credit, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or qualifying "
+        "surviving spouse. Please also state your California income and your total qualifying "
+        "adoption costs.")
+    return result
+
+
+def _income_adoption_credit_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when the question itself states an
+    eligibility-disqualifying fact (private/international/out-of-state/
+    stepparent adoption) -- FTB's own text confirms this credit does NOT
+    apply outside CA-public-agency custody, so this is a genuine
+    disqualification, not a guessed defer."""
+    if not income_brackets.detect_adoption_credit_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California's Child Adoption Costs Credit only applies to a child who was in the "
+        "custody of a California public agency or political subdivision (e.g. adopted through "
+        "the county/state foster care system) -- FTB's own instructions state it explicitly "
+        "does NOT apply to a child adopted from another country, from another state, or through "
+        "a private/independent/stepparent adoption. Based on what you described, this credit "
+        "does not apply to your situation."
+    )
+    return result
+
+
+def _income_adoption_credit_ambiguous_eligibility_answer(question: str, base: dict):
+    """When adoption-credit vocabulary is present but the question states
+    neither a public-agency signal nor an out-of-scope term, ask
+    specifically about the eligibility gate rather than silently
+    assuming it's satisfied -- this credit's restriction to CA-public-
+    agency custody is narrow enough that guessing "yes" would risk
+    overstating the credit for the more common private-adoption case."""
+    if not income_brackets.detect_adoption_credit_ambiguous_eligibility(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California's Child Adoption Costs Credit only applies to a child who was in the "
+        "custody of a California public agency or political subdivision (e.g. adopted through "
+        "the county/state foster care system) -- it does NOT apply to private, international, "
+        "out-of-state, or stepparent adoptions. Was your child adopted through California's "
+        "public foster care/agency system? If so, please also state your total qualifying "
+        "adoption costs (agency fees, unreimbursed medical expenses, family travel expenses), "
+        "your California income, and your filing status."
+    )
+    return result
+
+
+def _catc_strip_form_number_phantoms(amounts):
+    """Literal "3592" in "form 3592" (this feature's own trigger
+    vocabulary) parses as a phantom $3,592.00 dollar amount -- same
+    collision class as cannabis 280E/QSBS/Form 2555/Subpart F-GILTI/
+    NRA's "1040"/PTE credit's "3804"/early-distribution's "3805"/CDC
+    credit's "3506". Local filter scoped to this feature."""
+    return [(a, s, e) for a, s, e in amounts if a != 3592.0]
+
+
+def _income_catc_credit_answer(conn, question: str, base: dict):
+    """College Access Tax Credit (FTB Form 3592) -- see
+    income_brackets.compute_catc_credit_ca_tax's docstring for the
+    CEFA-certification/allocation-pool caveats and the cap-at-CA-tax-
+    liability/6-year-carryover mechanic. Reuses this feature's own
+    trigger vocabulary as the contribution-amount anchor, same "anchor
+    doubles as trigger" pattern as the PTE credit's K-1 amount."""
+    fs = income_brackets.detect_catc_credit_signal(question)
+    if not fs:
+        return None
+    amounts = _catc_strip_form_number_phantoms(_amounts(question))
+    contribution_match = _amount_near_filtered_span(question, income_brackets.CATC_TERMS, amounts)
+    if contribution_match is None:
+        return None
+    contribution_amount = contribution_match[0]
+    remaining = _remove_amount_span(amounts, contribution_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_catc_credit_ca_tax(conn, income_amount, fs, contribution_amount)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "catc_credit",
+              "amount": income_amount, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000, unaffected by this credit) "
+                       f"({calc['surtax_citation']}).")
+    credit = calc["credit"]
+    remaining_note = ""
+    if credit["remaining_carryover"]:
+        remaining_note = (f" The remaining ${credit['remaining_carryover']:,.2f} (your credit "
+                          "exceeds your CA tax liability) carries forward for up to 6 years, "
+                          "not tracked in this estimate.")
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, filing status {label}, and a "
+        f"${contribution_amount:,.2f} contribution to the College Access Tax Credit Fund: your "
+        f"available credit is ${credit['credit_available']:,.2f} (50% of your contribution), of "
+        f"which ${credit['credit_used']:,.2f} is usable this year (capped at your own CA tax "
+        f"liability -- this credit is nonrefundable) ({income_brackets.CATC_CITATION})."
+        f"{remaining_note} Before this credit, your California tax would be about "
+        f"${calc['bracket_tax_before_credit']:,.2f}; after the credit, your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f}.{surtax_note} This assumes your FULL contribution was "
+        "already reserved and certified by CEFA (the California Educational Facilities "
+        "Authority) -- this credit isn't automatic just because you donated; it requires "
+        "applying to CEFA, receiving a reservation, contributing that exact amount, and "
+        "receiving a certification, and the statewide $500 million/year pool is allocated "
+        "first-come-first-served. Doesn't account for a separate $5,000,000 aggregate business-"
+        "credit ceiling that applies for 2024-2026 tax years, or a Schedule CA (540) addback if "
+        "you also deducted this contribution on federal Schedule A. Your actual liability may "
+        "differ, especially if CEFA certified less than your full intended contribution."
+    )
+    return result
+
+
+def _income_catc_credit_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_catc_credit_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your College Access Tax Credit, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or qualifying "
+        "surviving spouse. Please also state your California income and your contribution "
+        "amount to the College Access Tax Credit Fund.")
+    return result
+
+
+def _income_isr_penalty_answer(question: str, base: dict):
+    """Individual Shared Responsibility Penalty (Form 540 Line 92, FTB
+    3853) -- see income_brackets.compute_isr_penalty's docstring for the
+    verified 2025 formula and its scope. Household adult/child counts are
+    COUNTS, not dollar figures -- stripped from the amounts list before
+    extracting household income, same "count vs. dollar figure"
+    distinction as the exemption credit's dependent count / late
+    penalty's months-late."""
+    fs = income_brackets.detect_isr_penalty_signal(question)
+    if not fs:
+        return None
+    n_adults = income_brackets.detect_isr_penalty_household_adults(question)
+    if n_adults is None:
+        return None
+    amounts = [(a, s, e) for a, s, e in _amounts(question) if a != float(n_adults)]
+    n_children = income_brackets.detect_isr_penalty_household_children(question) or 0
+    if n_children:
+        amounts = [(a, s, e) for a, s, e in amounts if a != float(n_children)]
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    household_income = others[0]
+    calc = income_brackets.compute_isr_penalty(fs, n_adults, n_children, household_income)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "isr_penalty",
+              "amount": household_income, "tax": calc["penalty"],
+              "citation": income_brackets.ISR_PENALTY_CITATION,
+              "source_url": income_brackets.ISR_PENALTY_SOURCE_URL}
+    if calc["exempt_below_threshold"]:
+        result["answer_text"] = (
+            f"With a household of {n_adults} adult(s) and {n_children} child(ren), filing status "
+            f"{label}, and ${household_income:,.2f} in household income: you do NOT owe a "
+            f"California Individual Shared Responsibility Penalty -- your household income is at "
+            f"or below your ${calc['filing_threshold']:,.2f} filing threshold, which zeroes out "
+            f"the penalty entirely ({income_brackets.ISR_PENALTY_CITATION}). This assumes you (and "
+            "your spouse/RDP, if applicable) were under 65 -- a higher filing threshold applies "
+            "at 65+, which could change this result. Your actual liability may differ."
+        )
+        return result
+    result["answer_text"] = (
+        f"With a household of {n_adults} adult(s) and {n_children} child(ren) uninsured the "
+        f"entire year, filing status {label}, and ${household_income:,.2f} in household income "
+        f"(above your ${calc['filing_threshold']:,.2f} filing threshold): your estimated "
+        f"California Individual Shared Responsibility Penalty is ${calc['penalty']:,.2f} -- the "
+        f"GREATER of a flat ${calc['flat_dollar']:,.2f} ($950/adult + $475/child, capped at "
+        f"$2,850) or {income_brackets.ISR_PENALTY_INCOME_RATE*100:g}% of income over your filing "
+        f"threshold (${calc['pct_income']:,.2f}), capped at the average statewide bronze-plan "
+        f"premium for your household size (${calc['avg_premium_cap']:,.2f}) "
+        f"({income_brackets.ISR_PENALTY_CITATION}). This assumes: nobody in your household turned "
+        "18 during the year (the per-person rate would otherwise need to change mid-year); you "
+        "claimed no coverage exemption (hardship, unaffordability, religious, tribal, "
+        "incarceration, short coverage gap, etc.); you (and your spouse/RDP, if applicable) were "
+        "under 65 (a higher filing threshold applies at 65+); and your household income doesn't "
+        "need to include a dependent's own income or California tax-exempt interest. Your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_isr_penalty_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_isr_penalty_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California Individual Shared Responsibility Penalty, I need your "
+        "filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please also state the number of adults and "
+        "children in your household, and your household income.")
+    return result
+
+
+def _income_isr_penalty_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when exemption/hardship/partial-year/
+    65+/mid-year-18th-birthday language is present -- each genuinely
+    changes the computation (or requires a case-by-case FTB
+    determination via a Marketplace-granted exemption certificate) in a
+    way this scoped build does not attempt."""
+    if not income_brackets.detect_isr_penalty_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only estimates California's Individual Shared Responsibility Penalty for "
+        "the common case: uninsured the ENTIRE tax year, no coverage exemption claimed, nobody in "
+        "the household turning 18 during the year, and everyone under 65. Coverage exemptions "
+        "(income below filing threshold, unaffordable coverage, hardship, religious conscience, "
+        "tribal membership, incarceration, a short coverage gap of 3 months or less, etc.) each "
+        "have their own rules -- some require a Marketplace-granted Exemption Certificate Number "
+        "that FTB does not compute. Please consult FTB Form 3853's instructions directly, or a "
+        "tax professional, for an accurate figure based on your specific situation."
+    )
+    return result
+
+
+def _income_isr_penalty_ambiguous_coverage_answer(question: str, base: dict):
+    """When ISR-penalty vocabulary is present but the question states
+    neither a full-year-uninsured confirmation nor an out-of-scope term,
+    ask specifically rather than assuming full-year coverage status
+    either way -- guessing "uninsured all year" would risk overstating
+    the penalty for someone who actually had partial-year coverage."""
+    if not income_brackets.detect_isr_penalty_ambiguous_coverage(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Were you (and everyone in your household) uninsured for the ENTIRE tax year, with no "
+        "health coverage exemption claimed? This assistant only estimates California's Individual "
+        "Shared Responsibility Penalty for that specific common case. If so, please also state the "
+        "number of adults and children in your household, your household income, and your filing "
+        "status."
+    )
+    return result
+
+
+def _income_amt_screen_answer(conn, question: str, base: dict):
+    """California AMT "screen" (Schedule P (540), Form 540 Line 61) --
+    see income_brackets.compute_amt_screen_ca_tax's docstring for why
+    AMTI collapses to CA AGI for this narrow population (standard
+    deduction, wage-only, zero preference items) and why this is a real
+    formula computation, not a hard-coded "always zero" assumption."""
+    fs = income_brackets.detect_amt_screen_signal(question)
+    if not fs:
+        return None
+    amount = _amount(question)
+    if amount is None:
+        return None
+    calc = income_brackets.compute_amt_screen_ca_tax(conn, amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": amount, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_SCREEN_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${amount:,.2f} in California income, filing status {label}, the standard "
+            "deduction (not itemizing), and no AMT preference items (no incentive stock options, "
+            "passive activity, private activity bond interest, depreciation adjustments, or "
+            "similar): you do NOT owe California Alternative Minimum Tax. Your Tentative Minimum "
+            f"Tax is ${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI minus a "
+            f"${calc['exemption']:,.2f} exemption), which is below your regular California tax of "
+            f"${calc['regular_tax']:,.2f} -- AMT only applies when TMT EXCEEDS regular tax "
+            f"({income_brackets.AMT_SCREEN_CITATION}). For this narrow population (standard "
+            "deduction, wage-only income, zero preference items), California's exemption amount "
+            "and rate structure mean this is essentially always true. If you itemize deductions, "
+            "exercised incentive stock options, have passive activity or depreciation "
+            "adjustments, or hold private activity bonds, this simplified check does not apply to "
+            "you -- consult Schedule P (540)'s full worksheet or a tax professional."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${amount:,.2f} in California income, filing status {label}, the standard "
+        "deduction, and no AMT preference items: your Tentative Minimum Tax is "
+        f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} "
+        f"exemption), which EXCEEDS your regular California tax of ${calc['regular_tax']:,.2f} -- "
+        f"you owe an estimated ${calc['amt_owed']:,.2f} in California Alternative Minimum Tax "
+        f"({income_brackets.AMT_SCREEN_CITATION}). This is an unusual result for a standard-"
+        "deduction, preference-item-free filer -- double-check your figures, and consult Schedule "
+        "P (540) or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_screen_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_screen_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California Alternative Minimum Tax exposure, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California income. (This assistant "
+        "only handles the common case: standard deduction, wage-only income, no AMT preference "
+        "items.)")
+    return result
+
+
+def _income_amt_screen_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when itemizing/ISO/passive-activity/
+    depreciation/private-activity-bond/NOL language is present -- these
+    genuinely require the full ~11-category AMTI build this scoped
+    screen does not attempt."""
+    if not income_brackets.detect_amt_screen_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "California's Alternative Minimum Tax (Schedule P (540)) requires a full preference-item "
+        "computation for anyone who itemizes deductions, exercised incentive stock options, has "
+        "passive activity or depreciation adjustments, holds private activity bonds, or has "
+        "certain other preference items -- this assistant only handles the much narrower common "
+        "case (standard deduction, wage-only income, zero preference items), where AMT is "
+        "essentially always $0. Based on what you described, that simplified check doesn't apply "
+        "to your situation. Please consult Schedule P (540)'s full worksheet, or a tax "
+        "professional, for an accurate figure."
+    )
+    return result
+
+
+def _amount_after_filtered_span(question: str, keywords, amounts, window: int = 80):
+    """Forward-only counterpart to _amount_near_filtered_span -- see that
+    function's docstring for why returning (and removing by) a span
+    instead of a bare value is necessary. Pair with _remove_amount_span."""
+    ql = question.lower()
+    if not amounts:
+        return None
+    best = None
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = ql.find(kw, start)
+            if idx == -1:
+                break
+            for amount, a_start, a_end in amounts:
+                if a_start < idx:
+                    continue
+                dist = a_start - idx
+                if dist <= window and (best is None or dist < best[1]):
+                    best = ((amount, a_start, a_end), dist)
+            start = idx + len(kw)
+    return best[0] if best else None
+
+
+def _income_underpayment_answer(conn, question: str, base: dict):
+    """Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (FTB
+    5805 Side 2 Part II) -- see income_brackets.compute_underpayment_penalty_ca_tax's
+    docstring for the verified 5-step mechanic and its scope. Extracts
+    withholding, then prior-year tax, then prior-year AGI as anchors
+    (each removed from the amounts list BY POSITION before the next
+    search), with the sole remaining figure treated as current-year
+    income -- same "N anchors + 1 remainder" pattern as OSTC/PTE/Line
+    8z, but using _amount_after_filtered_span (which returns the
+    matched tuple's own position) rather than removing "by value" --
+    with 4 dollar figures this close together, two DIFFERENT stated
+    facts can share the same dollar value (found live: "prior year tax
+    was $15,000 ... withholding was $15,000"), and removing by value
+    (or by first-list-order occurrence of that value) can strip the
+    WRONG occurrence, misattributing the real one to a later anchor.
+    Forward-only matching is safe here because this feature's phrasing
+    convention is always "X was $Y" (amount follows the anchor)."""
+    fs = income_brackets.detect_underpayment_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_WITHHOLDING_TERMS, amounts)
+    if match is None:
+        return None
+    withholding = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_TAX_TERMS, amounts)
+    if match is None:
+        return None
+    prior_year_tax = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS, amounts)
+    if match is None:
+        return None
+    prior_year_agi = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_underpayment_penalty_ca_tax(
+        conn, income_amount, fs, prior_year_tax, prior_year_agi, withholding)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    penalty = calc["penalty"]
+    result = {**base, "status": "answered", "category": "underpayment_penalty",
+              "amount": income_amount, "tax": penalty["penalty"],
+              "citation": income_brackets.UNDERPAYMENT_CITATION,
+              "source_url": income_brackets.UNDERPAYMENT_SOURCE_URL}
+    common_facts = (
+        f"With ${income_amount:,.2f} in California income (current-year tax "
+        f"${calc['current_year_tax']:,.2f}), filing status {label}, ${calc['prior_year_tax']:,.2f} "
+        f"in prior-year CA tax, ${calc['prior_year_agi']:,.2f} in prior-year CA AGI, and "
+        f"${calc['withholding']:,.2f} in California withholding"
+    )
+    if penalty["reason"] == "de_minimis_balance":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- your "
+            "balance due (current-year tax minus withholding) is under the $500 ($250 if married "
+            f"filing separately) de minimis threshold ({income_brackets.UNDERPAYMENT_CITATION})."
+        )
+        return result
+    if penalty["reason"] == "zero_prior_year_liability":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- you had "
+            f"no California tax liability last year ({income_brackets.UNDERPAYMENT_CITATION})."
+        )
+        return result
+    if penalty["reason"] == "safe_harbor_met":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- your "
+            f"withholding meets the required annual payment safe harbor (${penalty['required_annual_payment']:,.2f}, "
+            "the LESSER of 90% of your current-year tax or 100%/110% of your prior-year tax) "
+            f"({income_brackets.UNDERPAYMENT_CITATION})."
+        )
+        return result
+    result["answer_text"] = (
+        f"{common_facts}: your estimated Underpayment of Estimated Tax Penalty is "
+        f"${penalty['penalty']:,.2f} -- your withholding falls ${penalty['underpayment']:,.2f} "
+        f"short of the required annual payment (${penalty['required_annual_payment']:,.2f}, the "
+        "LESSER of 90% of your current-year tax or 100%/110% of your prior-year tax), computed "
+        f"using FTB's Short Method (the underpayment x .05028767, {income_brackets.DEFAULT_TAX_YEAR}'s "
+        f"blended annual rate) ({income_brackets.UNDERPAYMENT_CITATION}). This assumes you paid "
+        "your balance with your return (not early -- an early payment could reduce this slightly); "
+        "you made NO estimated tax payments this year (only withholding); and you don't qualify "
+        "for the Farmer/Fisherman exception. Your actual liability may differ, especially if you "
+        "made any estimated payments (the eligibility for this simplified method depends on "
+        "whether those were made exactly on the required due dates)."
+    )
+    return result
+
+
+def _income_underpayment_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_underpayment_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Underpayment of Estimated Tax Penalty, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California income, your prior-year "
+        "CA tax, your prior-year CA AGI, and your California withholding. (This assistant only "
+        "handles the common case: no estimated tax payments made, only withholding.)")
+    return result
+
+
+def _income_underpayment_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when the question mentions any
+    estimated tax payment, or the Farmer/Fisherman exception -- both
+    need the regular (date-dependent) method or an entirely different
+    form, not this short-method-only slice."""
+    if not income_brackets.detect_underpayment_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only estimates California's Underpayment of Estimated Tax Penalty for "
+        "the common case of a withholding-only filer who made NO estimated tax payments this "
+        "year, using FTB's simplified Short Method. If you made any estimated tax payments, "
+        "whether this simplified method still applies to you depends on whether those payments "
+        "were made exactly on the required due dates (not early, not late) -- a timing detail "
+        "this assistant can't verify from a single question. Farmers and fishermen use a "
+        "separate form (FTB 5805F) with different rules entirely. Please consult FTB Form 5805's "
+        "instructions directly, or a tax professional, for an accurate figure."
+    )
+    return result
+
+
 def _income_self_employment_answer(conn, question: str, amount, base: dict):
     """Sole-proprietor Schedule C self-employment tax computation -- see
     income_brackets.compute_self_employment_ca_tax's docstring for the R&TC
@@ -1236,20 +2406,63 @@ def _ebl_carryover_extract_amounts(question: str):
     loss's "one other amount" extraction, generalized to three figures
     instead of two."""
     amounts = _amounts(question)
-    carryover_balance = _amount_near_filtered(question, income_brackets.EBL_CARRYOVER_TERMS, amounts)
-    if carryover_balance is None:
+    carryover_match = _amount_near_filtered_span(question, income_brackets.EBL_CARRYOVER_TERMS, amounts)
+    if carryover_match is None:
         return None
-    remaining = [(a, s, e) for a, s, e in amounts if a != carryover_balance]
+    carryover_balance = carryover_match[0]
+    remaining = _remove_amount_span(amounts, carryover_match)
     is_loss_year = income_brackets.detect_ebl_carryover_is_loss_year(question)
     business_terms = (income_brackets.EBL_CARRYOVER_LOSS_TERMS if is_loss_year
                        else income_brackets.EBL_CARRYOVER_INCOME_TERMS)
-    business_result = _amount_near_filtered(question, business_terms, remaining)
-    if business_result is None:
+    business_match = _amount_near_filtered_span(question, business_terms, remaining)
+    if business_match is None:
         return None
-    others = [a for a, _, _ in remaining if a != business_result]
+    business_result = business_match[0]
+    remaining = _remove_amount_span(remaining, business_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     other_income = others[0]
+    return other_income, business_result, carryover_balance, is_loss_year
+
+
+def _extract_ebl_carryover_facts_llm(question: str):
+    """Income Coverage Blueprint, Phase 2a PILOT -- structured LLM-based
+    extraction for the excess-business-loss-carryover feature, intended
+    to replace the hand-rolled 2-anchor regex/proximity extraction
+    (_ebl_carryover_extract_amounts) with one general typed extractor,
+    per the blueprint's Phase 2a scope. Computed in SHADOW MODE only
+    (see _income_ebl_carryover_answer below) -- same "compute both,
+    compare, let the proven approach keep deciding the live answer"
+    precedent already established by _rerank_v2 in the sales domain, not
+    a new risk-tolerance decision invented for this pilot.
+
+    Returns (other_income, business_result, carryover_balance,
+    is_loss_year) or None on any extraction/parse failure. A failure
+    here must never affect the live answer -- the caller only logs a
+    mismatch, it never falls back to or overrides the regex result."""
+    prompt = (
+        "Extract dollar figures from this California income-tax question "
+        "about an excess-business-loss carryover from a prior year "
+        "(Schedule CA (540) Line 8z). Reply with ONLY a JSON object (no "
+        "markdown fences, no other text) with these exact keys:\n"
+        '  "other_income": the taxpayer\'s OTHER income (e.g. wages), as a plain number\n'
+        '  "business_result": this year\'s business income OR loss amount, as a plain number\n'
+        '  "is_loss_year": true if business_result is described as a LOSS this year, false if it is income/profit\n'
+        '  "carryover_balance": the stated prior-year excess business loss carryover amount, as a plain number\n'
+        "Use null for any key you cannot determine from the question.\n"
+        f"QUESTION: {question}"
+    )
+    try:
+        raw = model.generate_content(prompt).text.strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+        data = json.loads(raw)
+        other_income = float(data["other_income"])
+        business_result = float(data["business_result"])
+        carryover_balance = float(data["carryover_balance"])
+        is_loss_year = bool(data["is_loss_year"])
+    except Exception:
+        return None
     return other_income, business_result, carryover_balance, is_loss_year
 
 
@@ -1263,7 +2476,12 @@ def _income_ebl_carryover_answer(conn, question: str, base: dict):
     as a substring, so without this ordering the EXISTING Line 8p
     detector would swallow carryover-phrased questions first (same "move
     the check earlier" fix as K-1 capital gain/real-estate-professional's
-    dispatcher placement)."""
+    dispatcher placement).
+
+    Also runs the Phase 2a structured-extraction PILOT in shadow mode
+    (see _extract_ebl_carryover_facts_llm) -- computed alongside the
+    live regex extraction purely for comparison/logging, never used to
+    decide this answer."""
     fs = income_brackets.detect_ebl_carryover_signal(question)
     if not fs:
         return None
@@ -1271,6 +2489,12 @@ def _income_ebl_carryover_answer(conn, question: str, base: dict):
     if extracted is None:
         return None
     other_income, business_result, carryover_balance, is_loss_year = extracted
+
+    shadow = _extract_ebl_carryover_facts_llm(question)
+    if shadow is not None and shadow != (other_income, business_result, carryover_balance, is_loss_year):
+        print(f"[phase2a-shadow-mismatch] regex={(other_income, business_result, carryover_balance, is_loss_year)} "
+              f"llm={shadow} question={question!r}")
+
     calc = income_brackets.compute_ebl_carryover_ca_tax(
         conn, other_income, business_result, carryover_balance, is_loss_year, fs)
     if not calc:
@@ -1604,14 +2828,29 @@ def _cannabis_strip_280e_phantom_amounts(question: str, amounts):
     return out
 
 
-def _amount_near_filtered(question: str, keywords, amounts, window: int = 60):
-    """Same nearest-keyword-distance logic as _amount_near, but operating
-    on a caller-supplied (already phantom-filtered) amounts list instead
-    of calling _amounts() internally -- shared by any feature whose own
-    trigger vocabulary contains bare digits that _amounts()'s regex would
+def _amount_near_filtered_span(question: str, keywords, amounts, window: int = 60):
+    """Nearest-keyword-distance amount lookup, operating on a caller-
+    supplied (already phantom-filtered) amounts list instead of calling
+    _amounts() internally -- shared by any feature whose own trigger
+    vocabulary contains bare digits that _amounts()'s regex would
     otherwise misparse as a dollar amount (see
     _cannabis_strip_280e_phantom_amounts's "280E" case and
-    _qsbs_strip_section_number_phantoms's "Section 1202/1045" case)."""
+    _qsbs_strip_section_number_phantoms's "Section 1202/1045" case).
+    Returns the full (amount, start, end) tuple, not just the amount --
+    lets the caller remove EXACTLY the matched tuple from a shared
+    amounts list by its own position, not by value. Removing "by value"
+    (a plain `a != matched_value` filter -- the ORIGINAL pattern used by
+    every "N anchors + 1 remainder" multi-figure feature until this was
+    found) silently breaks whenever two DIFFERENT stated facts happen to
+    share the same dollar figure: found live in the Underpayment-of-
+    Estimated-Tax-Penalty build ("prior year tax was $15,000 ...
+    withholding was $15,000" in one question) -- filtering by value
+    either strips BOTH occurrences (if using `!=`) or, with a naive
+    "remove the first list-order occurrence" attempt, can strip the
+    WRONG one when the anchor actually matched a LATER-positioned
+    duplicate. Every multi-figure feature in this codebase was migrated
+    to this span-returning family + _remove_amount_span after that
+    discovery."""
     ql = question.lower()
     if not amounts:
         return None
@@ -1625,9 +2864,20 @@ def _amount_near_filtered(question: str, keywords, amounts, window: int = 60):
             for amount, a_start, a_end in amounts:
                 dist = abs((a_start + a_end) / 2 - idx)
                 if dist <= window and (best is None or dist < best[1]):
-                    best = (amount, dist)
+                    best = ((amount, a_start, a_end), dist)
             start = idx + len(kw)
     return best[0] if best else None
+
+
+def _remove_amount_span(amounts, span):
+    """Removes the tuple matching `span` (an (amount, start, end) triple,
+    or None -- a no-op) from `amounts` BY POSITION, not by value -- see
+    _amount_near_filtered_span's docstring for why value-based removal
+    is unsafe whenever two different stated facts share a dollar figure."""
+    if span is None:
+        return amounts
+    _, s, e = span
+    return [(a, a_s, a_e) for a, a_s, a_e in amounts if (a_s, a_e) != (s, e)]
 
 
 def _income_cannabis_280e_answer(conn, question: str, base: dict):
@@ -1642,10 +2892,12 @@ def _income_cannabis_280e_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _cannabis_strip_280e_phantom_amounts(question, _amounts(question))
-    expense_amount = _amount_near_filtered(question, income_brackets.CANNABIS_280E_EXPENSE_TERMS, amounts)
-    if expense_amount is None:
+    expense_match = _amount_near_filtered_span(question, income_brackets.CANNABIS_280E_EXPENSE_TERMS, amounts)
+    if expense_match is None:
         return None
-    others = [a for a, _, _ in amounts if a != expense_amount]
+    expense_amount = expense_match[0]
+    remaining = _remove_amount_span(amounts, expense_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     net_profit = others[0]
@@ -1839,10 +3091,12 @@ def _income_qsbs_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _qsbs_strip_section_number_phantoms(_amounts(question))
-    excluded_amount = _amount_near_filtered(question, income_brackets.QSBS_EXCLUDED_AMOUNT_TERMS, amounts)
-    if excluded_amount is None:
+    excluded_match = _amount_near_filtered_span(question, income_brackets.QSBS_EXCLUDED_AMOUNT_TERMS, amounts)
+    if excluded_match is None:
         return None
-    others = [a for a, _, _ in amounts if a != excluded_amount]
+    excluded_amount = excluded_match[0]
+    remaining = _remove_amount_span(amounts, excluded_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     federal_taxable_gain = others[0]
@@ -2211,7 +3465,7 @@ def _income_foreign_earned_income_answer(conn, question: str, base: dict):
     "...a $30,000 form 2555 housing deduction single": after the
     $30,000 is correctly claimed by the housing search, the ONLY
     remaining amount ($80,000, the wage figure) can still fall within
-    _amount_near_filtered's proximity window of the bare "form 2555"
+    _amount_near_filtered_span's proximity window of the bare "form 2555"
     substring even though it's semantically unrelated (the window is a
     fixed character radius, not a phrase-boundary check). Fixed by only
     attempting the exclusion-amount search when the question contains
@@ -2228,19 +3482,19 @@ def _income_foreign_earned_income_answer(conn, question: str, base: dict):
     has_housing_terms = any(t in q for t in income_brackets.FOREIGN_HOUSING_DEDUCTION_TERMS)
     housing_deduction_amount = 0.0
     if has_housing_terms:
-        found = _amount_near_filtered(question, income_brackets.FOREIGN_HOUSING_DEDUCTION_TERMS, amounts)
-        if found is not None:
-            housing_deduction_amount = found
-            amounts = [(a, s, e) for a, s, e in amounts if a != found]
+        match = _amount_near_filtered_span(question, income_brackets.FOREIGN_HOUSING_DEDUCTION_TERMS, amounts)
+        if match is not None:
+            housing_deduction_amount = match[0]
+            amounts = _remove_amount_span(amounts, match)
     excluded_amount = 0.0
     exclusion_specific_terms = income_brackets.FOREIGN_EARNED_INCOME_TERMS - {"form 2555"}
     has_exclusion_specific_terms = any(t in q for t in exclusion_specific_terms)
     has_bare_form_2555 = "form 2555" in q
     if has_exclusion_specific_terms or (has_bare_form_2555 and not has_housing_terms):
-        found = _amount_near_filtered(question, income_brackets.FOREIGN_EARNED_INCOME_TERMS, amounts)
-        if found is not None:
-            excluded_amount = found
-            amounts = [(a, s, e) for a, s, e in amounts if a != found]
+        match = _amount_near_filtered_span(question, income_brackets.FOREIGN_EARNED_INCOME_TERMS, amounts)
+        if match is not None:
+            excluded_amount = match[0]
+            amounts = _remove_amount_span(amounts, match)
     if excluded_amount <= 0 and housing_deduction_amount <= 0:
         return None
     others = [a for a, _, _ in amounts]
@@ -2339,10 +3593,12 @@ def _income_subpart_f_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _cfc_951_strip_section_number_phantoms(_amounts(question))
-    inclusion_amount = _amount_near_filtered(question, income_brackets.SUBPART_F_TERMS, amounts)
-    if inclusion_amount is None:
+    inclusion_match = _amount_near_filtered_span(question, income_brackets.SUBPART_F_TERMS, amounts)
+    if inclusion_match is None:
         return None
-    others = [a for a, _, _ in amounts if a != inclusion_amount]
+    inclusion_amount = inclusion_match[0]
+    remaining = _remove_amount_span(amounts, inclusion_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     other_income = others[0]
@@ -2405,10 +3661,12 @@ def _income_gilti_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _gilti_strip_form_number_phantoms(_cfc_951_strip_section_number_phantoms(_amounts(question)))
-    inclusion_amount = _amount_near_filtered(question, income_brackets.GILTI_TERMS, amounts)
-    if inclusion_amount is None:
+    inclusion_match = _amount_near_filtered_span(question, income_brackets.GILTI_TERMS, amounts)
+    if inclusion_match is None:
         return None
-    others = [a for a, _, _ in amounts if a != inclusion_amount]
+    inclusion_amount = inclusion_match[0]
+    remaining = _remove_amount_span(amounts, inclusion_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     other_income = others[0]
@@ -2484,10 +3742,12 @@ def _income_nra_foreign_income_answer(conn, question: str, base: dict):
     amounts = _nra_strip_1040nr_phantoms(_amounts(question))
     terms = (income_brackets.NRA_FOREIGN_LOSS_AMOUNT_TERMS if is_loss
              else income_brackets.NRA_FOREIGN_INCOME_AMOUNT_TERMS)
-    foreign_amount = _amount_near_filtered(question, terms, amounts)
-    if foreign_amount is None:
+    foreign_match = _amount_near_filtered_span(question, terms, amounts)
+    if foreign_match is None:
         return None
-    others = [a for a, _, _ in amounts if a != foreign_amount]
+    foreign_amount = foreign_match[0]
+    remaining = _remove_amount_span(amounts, foreign_match)
+    others = [a for a, _, _ in remaining]
     if len(others) != 1:
         return None
     other_income = others[0]
@@ -4131,6 +5391,130 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if fiduciary_fallback_result:
         return fiduciary_fallback_result
 
+    exemption_credit_result = _income_exemption_credit_answer(conn, question, base)
+    if exemption_credit_result:
+        return exemption_credit_result
+
+    missing_exemption_credit_fs_result = _income_exemption_credit_missing_filing_status_answer(question, base)
+    if missing_exemption_credit_fs_result:
+        return missing_exemption_credit_fs_result
+
+    use_tax_result = _income_use_tax_answer(question, base)
+    if use_tax_result:
+        return use_tax_result
+
+    use_tax_over_cap_result = _income_use_tax_over_cap_answer(question, base)
+    if use_tax_over_cap_result:
+        return use_tax_over_cap_result
+
+    other_state_tax_credit_result = _income_other_state_tax_credit_answer(conn, question, base)
+    if other_state_tax_credit_result:
+        return other_state_tax_credit_result
+
+    missing_other_state_tax_credit_fs_result = _income_other_state_tax_credit_missing_filing_status_answer(question, base)
+    if missing_other_state_tax_credit_fs_result:
+        return missing_other_state_tax_credit_fs_result
+
+    pte_credit_result = _income_pte_credit_answer(conn, question, base)
+    if pte_credit_result:
+        return pte_credit_result
+
+    missing_pte_credit_fs_result = _income_pte_credit_missing_filing_status_answer(question, base)
+    if missing_pte_credit_fs_result:
+        return missing_pte_credit_fs_result
+
+    late_penalty_reasonable_cause_result = _income_late_penalty_reasonable_cause_answer(question, base)
+    if late_penalty_reasonable_cause_result:
+        return late_penalty_reasonable_cause_result
+
+    late_penalty_result = _income_late_penalty_answer(question, base)
+    if late_penalty_result:
+        return late_penalty_result
+
+    early_distribution_result = _income_early_distribution_answer(question, base)
+    if early_distribution_result:
+        return early_distribution_result
+
+    early_distribution_exception_result = _income_early_distribution_exception_answer(question, base)
+    if early_distribution_exception_result:
+        return early_distribution_exception_result
+
+    early_distribution_other_account_result = _income_early_distribution_other_account_answer(question, base)
+    if early_distribution_other_account_result:
+        return early_distribution_other_account_result
+
+    cdc_credit_result = _income_cdc_credit_answer(question, base)
+    if cdc_credit_result:
+        return cdc_credit_result
+
+    cdc_credit_out_of_scope_result = _income_cdc_credit_out_of_scope_answer(question, base)
+    if cdc_credit_out_of_scope_result:
+        return cdc_credit_out_of_scope_result
+
+    adoption_credit_result = _income_adoption_credit_answer(conn, question, base)
+    if adoption_credit_result:
+        return adoption_credit_result
+
+    missing_adoption_credit_fs_result = _income_adoption_credit_missing_filing_status_answer(question, base)
+    if missing_adoption_credit_fs_result:
+        return missing_adoption_credit_fs_result
+
+    adoption_credit_out_of_scope_result = _income_adoption_credit_out_of_scope_answer(question, base)
+    if adoption_credit_out_of_scope_result:
+        return adoption_credit_out_of_scope_result
+
+    adoption_credit_ambiguous_result = _income_adoption_credit_ambiguous_eligibility_answer(question, base)
+    if adoption_credit_ambiguous_result:
+        return adoption_credit_ambiguous_result
+
+    catc_credit_result = _income_catc_credit_answer(conn, question, base)
+    if catc_credit_result:
+        return catc_credit_result
+
+    missing_catc_credit_fs_result = _income_catc_credit_missing_filing_status_answer(question, base)
+    if missing_catc_credit_fs_result:
+        return missing_catc_credit_fs_result
+
+    isr_penalty_result = _income_isr_penalty_answer(question, base)
+    if isr_penalty_result:
+        return isr_penalty_result
+
+    missing_isr_penalty_fs_result = _income_isr_penalty_missing_filing_status_answer(question, base)
+    if missing_isr_penalty_fs_result:
+        return missing_isr_penalty_fs_result
+
+    isr_penalty_out_of_scope_result = _income_isr_penalty_out_of_scope_answer(question, base)
+    if isr_penalty_out_of_scope_result:
+        return isr_penalty_out_of_scope_result
+
+    isr_penalty_ambiguous_result = _income_isr_penalty_ambiguous_coverage_answer(question, base)
+    if isr_penalty_ambiguous_result:
+        return isr_penalty_ambiguous_result
+
+    amt_screen_result = _income_amt_screen_answer(conn, question, base)
+    if amt_screen_result:
+        return amt_screen_result
+
+    missing_amt_screen_fs_result = _income_amt_screen_missing_filing_status_answer(question, base)
+    if missing_amt_screen_fs_result:
+        return missing_amt_screen_fs_result
+
+    amt_screen_out_of_scope_result = _income_amt_screen_out_of_scope_answer(question, base)
+    if amt_screen_out_of_scope_result:
+        return amt_screen_out_of_scope_result
+
+    underpayment_result = _income_underpayment_answer(conn, question, base)
+    if underpayment_result:
+        return underpayment_result
+
+    missing_underpayment_fs_result = _income_underpayment_missing_filing_status_answer(question, base)
+    if missing_underpayment_fs_result:
+        return missing_underpayment_fs_result
+
+    underpayment_out_of_scope_result = _income_underpayment_out_of_scope_answer(question, base)
+    if underpayment_out_of_scope_result:
+        return underpayment_out_of_scope_result
+
     amount = _amount(question)
     compute_result = _income_compute_answer(conn, question, amount, base)
     if compute_result:
@@ -4424,6 +5808,172 @@ def _effective_rate(conn, taxable, base_rate, question, location):
     return base_rate, "statewide base 7.25% (give a city/county for the local rate)", None
 
 
+# --- Income Coverage Blueprint, Phase 2b: generalized domain-routing
+# intercept -- replaces the growing list of hand-written per-feature
+# early-intercept guards (military retirement, cannabis 280E, foreign-
+# earned-income, each added only AFTER a real sales-domain misrouting
+# bug was found live) with ONE mechanism covering every registered
+# income-feature signal at once, including future ones.
+#
+# THE BUG CLASS THIS FIXES: sales tries first by default (see _answer's
+# own docstring); the sales domain's embedding-based router occasionally
+# sits close enough to an income-flavored question's embedding to
+# confidently (and wrongly) answer it as sales/excise tax on the stated
+# dollar figure. This was found FOUR separate times this session --
+# military retirement pay vs. sales' federal-areas/vehicle-sale cluster,
+# cannabis 280E vs. sales' cannabis excise rule, and foreign-earned-
+# income/housing-deduction vs. a general "tangible personal property"
+# fallback (the last one for only ONE capitalization of an otherwise-
+# identical question) -- each discovered only by adversarial testing,
+# never by code review, and each patched with its own hand-written guard
+# after the fact. That pattern doesn't scale: every new income feature
+# is a fresh, undiscoverable-by-inspection roll of the embedding-
+# collision dice until it happens to get tested against the right
+# phrasing.
+#
+# THE FIX: any question that a registered income-feature's OWN
+# deterministic signal detector recognizes gets routed through the full
+# income pipeline FIRST, unconditionally -- sales never gets a look at
+# it, regardless of embedding distance. This is strictly more permissive
+# than the 3 guards it replaces (which only covered 3 features); it
+# covers all ~40 registered detectors at once, including every feature
+# built this session, and any future one gets the SAME protection simply
+# by being added to the CHECKS list below -- no bug report required
+# first.
+#
+# WHY THIS IS SAFE (not just convenient): every function in CHECKS
+# already requires its OWN feature's specific trigger vocabulary AND
+# (for the "_signal" variants) a genuine filing-status statement before
+# returning truthy -- these are the SAME conservative detectors already
+# proven, across 304 income_item_sweep.py cases, not to misfire on
+# ordinary wage/sales-adjacent phrasing. Forcing income-first when one of
+# them fires does not lower that bar; it only guarantees sales doesn't
+# get an undeserved first crack at a question these detectors already
+# recognize as unambiguously income-shaped.
+#
+# Each check is called defensively: a bad or unexpectedly-erroring
+# detector for ONE feature must never take down the intercept for every
+# OTHER feature, so exceptions are swallowed per-check, not propagated.
+_INCOME_SIGNAL_CHECKS = (
+    # income_brackets.py -- core compute paths and their missing-filing-
+    # status counterparts (a signal fires on a COMPLETE question; the
+    # missing-filing-status variant fires on the same vocabulary minus
+    # the filing status, so both must be checked to protect a question
+    # that's recognizably this feature but incomplete).
+    income_brackets.detect_compute_signal,
+    income_brackets.detect_compute_missing_filing_status,
+    income_brackets.detect_exemption_credit_signal,
+    income_brackets.detect_exemption_credit_missing_filing_status,
+    income_brackets.detect_use_tax_signal,
+    income_brackets.detect_other_state_tax_credit_signal,
+    income_brackets.detect_other_state_tax_credit_missing_filing_status,
+    income_brackets.detect_pte_credit_signal,
+    income_brackets.detect_pte_credit_missing_filing_status,
+    income_brackets.detect_late_penalty_signal,
+    income_brackets.detect_late_penalty_reasonable_cause_mention,
+    income_brackets.detect_early_distribution_signal,
+    income_brackets.detect_early_distribution_exception_mention,
+    income_brackets.detect_early_distribution_other_account_mention,
+    income_brackets.detect_cdc_credit_signal,
+    income_brackets.detect_cdc_credit_out_of_scope,
+    income_brackets.detect_adoption_credit_signal,
+    income_brackets.detect_adoption_credit_missing_filing_status,
+    income_brackets.detect_adoption_credit_out_of_scope,
+    income_brackets.detect_adoption_credit_ambiguous_eligibility,
+    income_brackets.detect_catc_credit_signal,
+    income_brackets.detect_catc_credit_missing_filing_status,
+    income_brackets.detect_isr_penalty_signal,
+    income_brackets.detect_isr_penalty_missing_filing_status,
+    income_brackets.detect_isr_penalty_out_of_scope,
+    income_brackets.detect_isr_penalty_ambiguous_coverage,
+    income_brackets.detect_amt_screen_signal,
+    income_brackets.detect_amt_screen_missing_filing_status,
+    income_brackets.detect_amt_screen_out_of_scope,
+    income_brackets.detect_underpayment_signal,
+    income_brackets.detect_underpayment_missing_filing_status,
+    income_brackets.detect_underpayment_out_of_scope,
+    income_brackets.detect_self_employment_signal,
+    income_brackets.detect_self_employment_missing_filing_status,
+    income_brackets.detect_mixed_wage_se_signal,
+    income_brackets.detect_mixed_wage_se_missing_filing_status,
+    income_brackets.detect_k1_signal,
+    income_brackets.detect_k1_missing_filing_status,
+    income_brackets.detect_grantor_trust_mention,
+    income_brackets.detect_trust_estate_k1,
+    income_brackets.detect_itemized_signal,
+    income_brackets.detect_itemized_missing_filing_status,
+    income_brackets.detect_itemized_mfs_unsupported,
+    income_brackets.detect_capital_loss_signal,
+    income_brackets.detect_capital_loss_missing_filing_status,
+    income_brackets.detect_capital_loss_carryover_signal,
+    income_brackets.detect_capital_loss_carryover_missing_filing_status,
+    income_brackets.detect_excess_business_loss_signal,
+    income_brackets.detect_excess_business_loss_missing_filing_status,
+    income_brackets.detect_ebl_carryover_signal,
+    income_brackets.detect_ebl_carryover_missing_filing_status,
+    income_brackets.detect_nol_signal,
+    income_brackets.detect_nol_missing_filing_status,
+    income_brackets.detect_disaster_loss_carryover_signal,
+    income_brackets.detect_disaster_loss_carryover_missing_filing_status,
+    income_brackets.detect_cannabis_280e_signal,
+    income_brackets.detect_cannabis_280e_missing_filing_status,
+    income_brackets.detect_ira_deduction_signal,
+    income_brackets.detect_ira_deduction_missing_filing_status,
+    income_brackets.detect_roth_ira_mention,
+    income_brackets.detect_qsbs_signal,
+    income_brackets.detect_qsbs_missing_filing_status,
+    income_brackets.detect_hsa_investment_gain_signal,
+    income_brackets.detect_hsa_investment_gain_missing_filing_status,
+    income_brackets.detect_k1_capital_gain_signal,
+    income_brackets.detect_k1_capital_gain_missing_filing_status,
+    income_brackets.detect_fringe_benefit_signal,
+    income_brackets.detect_fringe_benefit_missing_filing_status,
+    income_brackets.detect_real_estate_pro_signal,
+    income_brackets.detect_real_estate_pro_missing_filing_status,
+    income_brackets.detect_foreign_earned_income_signal,
+    income_brackets.detect_foreign_earned_income_missing_filing_status,
+    income_brackets.detect_subpart_f_signal,
+    income_brackets.detect_subpart_f_missing_filing_status,
+    income_brackets.detect_gilti_signal,
+    income_brackets.detect_gilti_missing_filing_status,
+    income_brackets.detect_nra_foreign_income_signal,
+    income_brackets.detect_nra_foreign_income_missing_filing_status,
+    income_brackets.detect_deduction_question,
+    # income_credits.py
+    income_credits.detect_caleitc_signal,
+    income_credits.detect_ycta_signal,
+    income_credits.detect_fytc_signal,
+    income_credits.detect_renters_credit_signal,
+    income_credits.detect_renters_credit_missing_filing_status,
+    income_credits.detect_senior_hoh_signal,
+    income_credits.detect_joint_custody_signal,
+    income_credits.detect_dependent_parent_signal,
+    income_credits.detect_military_retirement_signal,
+    income_credits.detect_military_retirement_missing_filing_status,
+    # entity_tax.py / fiduciary_tax.py -- top-level compute signals only
+    # (detect_entity_type/detect_fiduciary_type are sub-helpers for WHICH
+    # entity/fiduciary type, not "does this domain apply" checks).
+    entity_tax.detect_entity_compute_signal,
+    fiduciary_tax.detect_fiduciary_compute_signal,
+    # income_nonresident.py
+    income_nonresident.detect_nonresident_signal,
+    income_nonresident.detect_part_year_signal,
+)
+
+
+def _income_has_any_signal(question: str) -> bool:
+    """True iff ANY registered income-feature detector recognizes this
+    question -- see the module note above _INCOME_SIGNAL_CHECKS for why
+    this replaces the old per-feature early-intercept guard pattern."""
+    for check in _INCOME_SIGNAL_CHECKS:
+        try:
+            if check(question):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _answer(question: str, compose: bool = True, location: str = None,
             router: str = None, tax_type: str = None) -> dict:
     """`tax_type` (None|"sales"|"income") is a HINT, not a hard gate --
@@ -4451,74 +6001,24 @@ def _answer(question: str, compose: bool = True, location: str = None,
             if cross_result:
                 return cross_result
 
-        # Military retirement pay / DoD Survivor Benefit Plan annuity: same
-        # early-intercept reasoning as the cross-domain override above, but
-        # routed through the FULL income pipeline (not a bare topic lookup)
-        # since the real verdict is AGI-dependent (see
-        # income_credits.compute_military_retirement_exclusion), not a
-        # fixed answer. Found live, via income_item_sweep.py, right after
-        # this topic was added: sales' own military-vehicle/federal-area
-        # rule cluster ("sales_on_federal_areas", "vehicle_sale_to_
-        # servicemember"...) sits close enough in embedding space to ANY
-        # "military"-flavored question that "is my military retirement
-        # taxable in California" was confidently (and nonsensically)
-        # answered as 7.25% SALES TAX on the stated AGI dollar figure,
-        # treating income as if it were a purchase price. Sales tries
-        # first by default, so without this intercept the income-domain
-        # military retirement exclusion would never even be tried.
-        if income_credits.detect_military_retirement_signal(question):
-            qv_military = _embed(question)
+        # Generalized income-signal intercept (Income Coverage Blueprint,
+        # Phase 2b) -- see _income_has_any_signal's module note above for
+        # the full rationale. This ONE check replaces what used to be
+        # three separate hand-written guards here (military retirement,
+        # cannabis 280E, foreign-earned-income/housing-deduction), each
+        # added only after its own live sales-misrouting bug was found.
+        # Those three signals are now just three of the ~40 entries in
+        # _INCOME_SIGNAL_CHECKS -- removing their bespoke guards here is
+        # not a scope reduction, it's replacing three special cases with
+        # the general mechanism that already subsumes them, PLUS every
+        # other registered income feature that never got its own
+        # incident-driven guard at all.
+        if _income_has_any_signal(question):
+            qv_income_signal = _embed(question)
             with income_db.get_conn() as iconn:
-                military_result = _answer_income(iconn, question, compose, qv_military)
-            if military_result:
-                return military_result
-
-        # Cannabis 280E business-expense decoupling: the SAME collision
-        # class as the military-retirement guard above, found live via
-        # income_item_sweep.py while building this feature. Sales tries
-        # first by default, and this project's OWN sales-tax cannabis
-        # excise rule (cannabis_retail_adult_use -- "retail sale of
-        # cannabis or cannabis products ... for adult (recreational) use")
-        # sits close enough to ANY cannabis-flavored question that a
-        # question entirely about a LICENSED BUSINESS's net PROFIT and
-        # 280E-disallowed expenses (nothing to do with a retail purchase)
-        # was confidently answered as sales/excise tax on the stated
-        # dollar figure. Without this intercept the income-domain 280E
-        # restoration would never even be tried. Checks BOTH the full
-        # signal and the missing-filing-status variant (unlike military
-        # retirement, this path needs a filing status, so a question
-        # missing one must still be intercepted here rather than falling
-        # through to sales).
-        if (income_brackets.detect_cannabis_280e_signal(question)
-                or income_brackets.detect_cannabis_280e_missing_filing_status(question)):
-            qv_cannabis = _embed(question)
-            with income_db.get_conn() as iconn:
-                cannabis_result = _answer_income(iconn, question, compose, qv_cannabis)
-            if cannabis_result:
-                return cannabis_result
-
-        # Foreign earned income exclusion / foreign housing deduction
-        # (Form 2555, Schedule CA Lines 8d/24j): same collision class as
-        # cannabis 280E/military retirement above -- found live via
-        # direct testing after the Line 24j housing-deduction extension
-        # was added. A "both exclusion AND housing deduction stated
-        # together" question was confidently (and nonsensically)
-        # answered by the sales domain ("tangible personal property
-        # purchased abroad") for one capitalization of an otherwise-
-        # identical question that answered correctly for another
-        # capitalization -- an embedding-space routing quirk (sales
-        # tries first by default), not a logic bug in the income-domain
-        # answer itself (confirmed: calling the income-domain function
-        # directly always returns the correct result regardless of
-        # capitalization). Without this intercept, some phrasings of
-        # this question would never even reach the income domain.
-        if (income_brackets.detect_foreign_earned_income_signal(question)
-                or income_brackets.detect_foreign_earned_income_missing_filing_status(question)):
-            qv_foreign_income = _embed(question)
-            with income_db.get_conn() as iconn:
-                foreign_income_result = _answer_income(iconn, question, compose, qv_foreign_income)
-            if foreign_income_result:
-                return foreign_income_result
+                income_signal_result = _answer_income(iconn, question, compose, qv_income_signal)
+            if income_signal_result:
+                return income_signal_result
 
         branches, qv = [], None
         route_dist = None

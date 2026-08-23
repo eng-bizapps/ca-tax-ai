@@ -380,8 +380,21 @@ ITEMS = [
     ("how much tax do I owe on $100,000 self-employed and $30,000 in wages married filing jointly",
      {"status": "answered", "domain": "income", "category": "self_employment_income_tax",
       "tax": 3761.17}),
+    # CORRECTED 2026-08-15: this was a stale expectation, not a genuine
+    # defer -- entity-level tax has no personal filing status at all, so
+    # a well-formed "how much tax does my S-corp owe" question shouldn't
+    # be blocked by an irrelevant trailing word like "single". Found via
+    # the Income Coverage Blueprint Phase 2b routing change, which forced
+    # a full cache reset (the normal incremental "run" never re-verifies
+    # already-cached entries, so this had been silently passing against
+    # an outdated cached value for who knows how long). Verified
+    # independently: entity_tax.detect_entity_type correctly reads this
+    # as ('s_corp', False) [not financial, not first-year], and $800
+    # base annual tax + 1.5% x $100,000 = $2,300 matches the already-
+    # documented S-corp formula exactly -- not a new bug, a correct
+    # answer the old cache just never re-checked.
     ("how much tax do I owe as an s-corp making $100,000 single",
-     {"status": "needs_review"}),
+     {"status": "answered", "domain": "income", "category": "entity_annual_tax", "tax": 2300.0}),
 
     # --- mixed wages + self-employment: the first multi-amount compute
     # path (engine._amount_near, distance-based keyword tagging so the
@@ -1567,6 +1580,555 @@ ITEMS = [
     # $160,000 -> taxable $148,588 -> $6,695.96.
     ("how much california tax do I owe on $120,000 in wages with a $40,000 foreign housing deduction married filing jointly",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6695.96}),
+
+    # --- Personal/Blind/Senior/Dependent Exemption Credits (Form 540
+    # Lines 7-10, Line 32 AGI Limitation Worksheet) -- Income Coverage
+    # Blueprint Phase 3's highest-frequency finding: every CA resident
+    # filer receives at least the Personal Exemption Credit, a real gap
+    # income_nonresident.py's own docstring had already flagged as
+    # known-and-disclosed. Dollar figures verified directly against the
+    # actual 2025 Form 540 PDF (not secondary aggregators) -- $153/unit
+    # for personal/blind/senior (2 units for MFJ/QSS by default, 1
+    # otherwise, per Line 7's own "enter 1 or 2" mechanic), $475/
+    # dependent. This is a TAX CREDIT (subtracted from computed tax),
+    # not a deduction from taxable income -- structurally different
+    # from every itemized/standard-deduction feature already built.
+    # Built as its OWN standalone opt-in path (not integrated into
+    # compute_ca_tax itself), a deliberate scope decision so the ~300
+    # already-verified expected values for every OTHER feature in this
+    # file stay unaffected -- see income_brackets.py's module note.
+    #
+    # Basic: $80,000 wages, single, no dependents -> bracket tax $3,347.98
+    # (unaffected baseline) minus $153 personal credit -> $3,194.98.
+    ("how much california tax do I owe on $80,000 in wages, single, with my exemption credit?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3194.98}),
+    # with 2 dependents: $153 personal + 2x$475=$950 dependent -> $1,103
+    # total credit -> $3,347.98-$1,103 = $2,244.98.
+    ("how much california tax do I owe on $80,000 in wages, single, with my exemption credit and 2 dependents?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2244.98}),
+    # SAME figures, dependent count stated BEFORE the income figure --
+    # order independence. This specifically exercises the extraction
+    # fix: "2" (the dependent count) sits before "$80,000" in the
+    # string, so a naive first-amount-wins extraction would have
+    # wrongly treated 2 as the income figure.
+    ("how much california tax do I owe on $80,000 in wages, with 2 dependents, single, and my exemption credit?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2244.98}),
+    # MFJ coverage: 2 personal units by default -> $306 credit.
+    # $150,000 wages MFJ -> bracket tax $5,855.14 (std ded $11,412 ->
+    # taxable $138,588) minus $306 -> $5,549.14.
+    ("how much california tax do I owe on $150,000 in wages, married filing jointly, with my personal exemption credit?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5549.14}),
+    # PHASE-OUT case: $300,000 wages single is above the $252,203
+    # threshold -> 20 steps of $2,500 (rounded up) x $6/unit = $120
+    # reduction -> personal credit floored at $153-$120=$33 -> bracket
+    # tax $23,807.98 minus $33 -> $23,774.98.
+    ("how much california tax do I owe on $300,000 in wages, single, with my exemption credit?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 23774.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do I owe on $80,000 in wages with my exemption credit?",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COLLISION GUARD: unlike the itemized-deduction-
+    # style optional add-ons, this feature mirrors the PLAIN wage-only
+    # path's scope exactly and must DEFER on self-employment (reusing
+    # COMPLEXITY_EXCLUDE, minus "dependent" only) -- the pre-existing
+    # self-employment feature answers normally instead (same disclosed-
+    # simplification precedent as every other feature this session:
+    # answers without the exemption credit, a small safe-direction
+    # overestimate, rather than a wrong computation).
+    ("how much california tax do I owe on $80,000 self-employed with my exemption credit, single?",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 2875.42}),
+
+    # --- Estimated Use Tax Lookup Table (Form 540 Line 91) -- Income
+    # Coverage Blueprint Phase 3's second-priority finding, and genuinely
+    # simpler than the exemption credit above: no filing status at all,
+    # just a flat California-AGI-band lookup. Table verified directly
+    # against the actual 2025 Form 540 Booklet PDF (all 14 flat-dollar
+    # bands plus the >$199,999 -> AGI x 0.0001 formula band). Only
+    # covers individual non-business items purchased for LESS than
+    # $1,000 each -- anything at/above that (or business purchases)
+    # needs the separate Use Tax Worksheet instead, deliberately not
+    # modeled, routed to a specific clarifying message rather than
+    # silently misapplied.
+    #
+    # Basic: $80,000 CA AGI -> $8 (the $80,000-$89,999 band).
+    ("how much use tax do I owe if my California AGI is $80,000?",
+     {"status": "answered", "domain": "income", "category": "estimated_use_tax", "tax": 8.0}),
+    # lower band: $25,000 -> $2.
+    ("what is my estimated use tax if my California AGI is $25,000?",
+     {"status": "answered", "domain": "income", "category": "estimated_use_tax", "tax": 2.0}),
+    # top formula band: $300,000 -> 300000 x 0.0001 = $30.
+    ("how much use tax do I owe if my California AGI is $300,000?",
+     {"status": "answered", "domain": "income", "category": "estimated_use_tax", "tax": 30.0}),
+    # same figure, AGI stated before the trigger phrase -- order independence.
+    ("my California AGI is $80,000, how much use tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "estimated_use_tax", "tax": 8.0}),
+    # OVER-CAP case: a specific stated item price ($2,000) isn't caught
+    # by phrase-matching alone (no "over $1,000"-style wording) -- this
+    # exercises the "two or more dollar figures is ambiguous, don't
+    # guess which one is AGI" fix found live during this build.
+    ("how much use tax do I owe if my California AGI is $80,000 and I bought a $2,000 TV out of state?",
+     {"status": "needs_review", "domain": "income"}),
+    # OVER-CAP case: explicit business-purchase phrasing (phrase-matched
+    # directly, no second dollar figure needed).
+    ("how much use tax do I owe if my California AGI is $80,000 for a business purchase?",
+     {"status": "needs_review", "domain": "income"}),
+    # PURE INFORMATIONAL (zero dollar figures) must NOT be swept into
+    # the ambiguous-defer path -- falls through to the pre-existing
+    # sales-side informational answer unaffected, same behavior as
+    # before this feature existed.
+    ("what is use tax?",
+     {"status": "answered", "domain": "sales", "category": "use_tax_on_property_exempt_from_sales_tax_but_used_in_ca"}),
+
+    # --- Other State Tax Credit (Schedule S (540), credit code 187) --
+    # Income Coverage Blueprint Phase 3's third build, and the most
+    # complex extraction this session: 4 dollar figures (income,
+    # double-taxed income, other-state AGI, other-state tax paid) plus
+    # filing status. Verified directly against the actual 2025
+    # Schedule S PDF -- TWO independent prorations (not one, as an
+    # earlier broad survey pass assumed), credit = lesser of the two.
+    # CA side: bracket_tax x min(1.0, double_taxed_income/CA_AGI).
+    # Other side: other_state_tax_paid x min(1.0, double_taxed_income/other_state_AGI).
+    #
+    # Basic case, single, other-state side binding: $150,000 CA income,
+    # $60,000 double-taxed, $65,000 other-state AGI, $4,000 other-state
+    # tax paid -> CA ratio 60000/150000=0.4, CA side $9,857.98*0.4=
+    # $3,943.19; other ratio 60000/65000=0.9231 (capped<1.0), other side
+    # $4,000*0.9231=$3,692.31 -> credit=min=$3,692.31 -> total tax
+    # $9,857.98-$3,692.31=$6,165.67.
+    ("how much California tax do I owe with the other state tax credit, if my California income is $150,000, my double-taxed income is $60,000, my other state AGI is $65,000, and my tax paid to the other state is $4,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6165.67}),
+    # SAME figures, fully reordered (anchors stated before the income
+    # figure and the trigger question) -- order independence. Also
+    # exercises the forward-only extraction fix found live during this
+    # build: an earlier undirected-nearest-distance version picked a
+    # PRECEDING amount over the one each anchor phrase actually
+    # described, since "double-taxed income" sat character-wise closer
+    # to the preceding $150,000 than to the $60,000 it was describing.
+    ("my tax paid to the other state is $4,000, my other state AGI is $65,000, my double-taxed income is $60,000, how much California tax do I owe with the other state tax credit on $150,000 in California income, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6165.67}),
+    # MFJ coverage, CA side binding instead of the other-state side
+    # (same figures as the basic case, different filing status changes
+    # which side wins the min()): CA ratio still 0.4, but MFJ's own
+    # bracket tax is lower -> CA side ($2,342.06) < other side
+    # ($3,692.31) -> credit=$2,342.06 -> total tax $5,855.14-$2,342.06=$3,513.08.
+    ("how much California tax do I owe with the other state tax credit, if my California income is $150,000, my double-taxed income is $60,000, my other state AGI is $65,000, and my tax paid to the other state is $4,000, married filing jointly?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3513.08}),
+    # DUPLICATE-VALUE COLLISION AUDIT (found live building the
+    # Underpayment penalty, then audited back across every "N anchors +
+    # 1 remainder" multi-figure feature this session): double-taxed
+    # income and other-state AGI are BOTH stated as $60,000 -- filtering
+    # an already-matched amount out of the shared list BY VALUE (the
+    # original pattern) would strip both occurrences or the wrong one;
+    # fixed via _amount_near_filtered_span/_amount_after_filtered_span +
+    # _remove_amount_span, which remove by character position instead.
+    # ca_side=9857.98*min(1,60000/150000)=3943.19; other_side=4000*
+    # min(1,60000/60000)=4000; credit=min(3943.19,4000)=3943.19; tax=
+    # 9857.98-3943.19=5914.79.
+    ("how much California tax do I owe with the other state tax credit, if my California income is $150,000, my double-taxed income is $60,000, my other state AGI is $60,000, and my tax paid to the other state is $4,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5914.79}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with the other state tax credit, if my California income is $150,000, my double-taxed income is $60,000, my other state AGI is $65,000, and my tax paid to the other state is $4,000?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Pass-Through Entity (PTE) Elective Tax Credit (FTB 3804-CR,
+    # credit code 242) -- Income Coverage Blueprint Phase 3's fourth
+    # build. A broad survey pass sketched this as a pure single-number
+    # pass-through ("trust the K-1 figure"); a dedicated verification
+    # pass found it's the THIRD claim from that same survey to be wrong
+    # or incomplete once independently checked -- FTB 3804-CR is a real
+    # (if small) worksheet: K-1 credit + optional prior-year carryover,
+    # capped at CURRENT-YEAR CA tax liability (nonrefundable), excess
+    # carries forward up to 5 years. Built as the CURRENT-YEAR-
+    # absorption-only slice, same established pattern as the NOL/EBL/
+    # disaster-loss/capital-loss carryovers -- carryforward disclosed,
+    # not tracked. "CA tax liability" is computed from stated income via
+    # the existing bracket engine, not asked as a separate stated fact
+    # -- the 9.3% rate itself is entirely entity-side, confirmed from
+    # FTB's own instructions, so the taxpayer's only real input is the
+    # already-computed dollar credit off their K-1.
+    #
+    # Basic: $150,000 CA income single (bracket tax $9,857.98), $5,000
+    # PTE credit, fully usable -> $9,857.98-$5,000=$4,857.98.
+    ("how much California tax do I owe with a $5,000 PTE credit, if my California income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4857.98}),
+    # order independence.
+    ("I have a $5,000 PTE credit, how much California tax do I owe on $150,000 in California income, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4857.98}),
+    # CREDIT EXCEEDS CURRENT-YEAR TAX LIABILITY: $30,000 CA income single
+    # (bracket tax only $375.09) with a $5,000 PTE credit -> capped at
+    # $375.09 used, tax floored at $0.00, $4,624.91 disclosed as
+    # carrying forward (not tracked).
+    ("how much California tax do I owe with a $5,000 PTE credit, if my California income is $30,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
+    # WITH PRIOR-YEAR CARRYOVER: $5,000 K-1 credit + $2,000 carryover =
+    # $7,000 total available, fully usable against $9,857.98 bracket tax
+    # -> $9,857.98-$7,000=$2,857.98. Also exercises the "PTE credit
+    # carryover contains PTE credit as a literal substring" extraction
+    # case, correctly disambiguated by removing the carryover-claimed
+    # amount before searching for the K-1 credit anchor.
+    ("how much California tax do I owe with a $5,000 PTE credit and a $2,000 PTE credit carryover from a prior year, if my California income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 2857.98}),
+    # DUPLICATE-VALUE COLLISION AUDIT: carryover and K1 credit both
+    # stated as $5,000 -- see the Other State Tax Credit's own
+    # duplicate-value test above for the general bug this audits.
+    # total_available=10000, credit_used=min(10000,9857.98)=9857.98,
+    # tax=max(0,9857.98-9857.98)=0.0.
+    ("how much California tax do I owe with a $5,000 PTE credit and a $5,000 PTE credit carryover from a prior year, if my California income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a $5,000 PTE credit, if my California income is $150,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # SELF-EMPLOYMENT COLLISION GUARD: mirrors the exemption credit/OSTC
+    # scope exactly (full COMPLEXITY_EXCLUDE) -- the pre-existing
+    # self-employment feature answers normally instead, same disclosed-
+    # simplification precedent as those two.
+    ("how much California tax do I owe on $80,000 self-employed with a $5,000 PTE credit, single?",
+     {"status": "answered", "domain": "income", "category": "self_employment_income_tax", "tax": 2875.42}),
+
+    # --- Late-filing / late-payment penalties (Form 540 Line 112, R&TC
+    # 19131/19132) -- Income Coverage Blueprint Phase 3's fifth build,
+    # and architecturally different from every feature above: no filing
+    # status, no bracket/income computation at all -- a flat percentage
+    # of a stated unpaid balance. A dedicated verification pass found
+    # this is genuinely more complex than the broad survey's sketch --
+    # missing the payment penalty's own cap/40-month ceiling and
+    # entirely missing the REQUIRED offset between the two penalties
+    # (late-payment is reduced dollar-for-dollar by late-filing for the
+    # same period) -- the FOURTH claim from that same survey to be
+    # wrong or incomplete once independently checked.
+    #
+    # 3 months late, $5,000 balance: late-filing 5%x3=15%->$750;
+    # late-payment 5%+0.5%x3=6.5%->$325 (less than filing, so offset
+    # zeroes the assessed amount) -> total $750.
+    ("what is my late filing penalty if I owe $5,000 and filed 3 months late?",
+     {"status": "answered", "domain": "income", "category": "late_filing_payment_penalty", "tax": 750.0}),
+    # order independence.
+    ("I filed 3 months late, what is my late filing penalty if I owe $5,000?",
+     {"status": "answered", "domain": "income", "category": "late_filing_payment_penalty", "tax": 750.0}),
+    # PAYMENT-PENALTY-BINDING case (the one branch not exercised by the
+    # basic case above): at exactly 1 month late, the payment penalty's
+    # 5% flat start (5.5% total) exceeds the filing penalty's 5% -- the
+    # offset assesses the $25 excess ON TOP of the $250 filing penalty,
+    # rather than zeroing out. Total $250+$25=$275.
+    ("what is my late payment penalty if I owe $5,000 and paid 1 month late?",
+     {"status": "answered", "domain": "income", "category": "late_filing_payment_penalty", "tax": 275.0}),
+    # both penalties at their 25% caps (40+ months late): late-filing
+    # caps at 5 months (25%), late-payment caps at 40 months (25%) --
+    # both equal, offset zeroes out, total = 25% of balance = $1,250.
+    ("what is my late payment penalty if I owe $5,000 and paid 40 months late?",
+     {"status": "answered", "domain": "income", "category": "late_filing_payment_penalty", "tax": 1250.0}),
+    # FRACTIONAL MONTHS round UP to a full month ("month or fraction
+    # thereof") -- 2.5 months late computes identically to 3 months late.
+    ("what is my late filing penalty if I owe $5,000 and filed 2.5 months late?",
+     {"status": "answered", "domain": "income", "category": "late_filing_payment_penalty", "tax": 750.0}),
+    # REASONABLE-CAUSE REDIRECT: a case-by-case FTB determination, not
+    # computed here -- dedicated informational message, no dollar figure.
+    ("what is my late filing penalty if I have reasonable cause and owe $5,000, filed 3 months late?",
+     {"status": "answered", "domain": "income", "category": "late_penalty_reasonable_cause"}),
+
+    # --- California additional tax on early retirement distributions
+    # (FTB 3805P Part I, R&TC 17085) -- Income Coverage Blueprint Phase
+    # 3's sixth build. A dedicated verification pass confirmed the 2.5%
+    # rate (not folklore) but found real complexity the survey's sketch
+    # didn't capture: FTB's own text confirms California's exception
+    # list does NOT fully match federal's (2 confirmed divergent
+    # codes), a 25-code year-versioned exception table, a 6% override
+    # for early-SIMPLE-IRA distributions, and different rates entirely
+    # for other account types (12.5% Archer MSA, 50% Medicare Advantage
+    # MSA). Scoped to the common no-exception Part-I case only --
+    # exception-flavored language and non-Part-I account types both
+    # route to dedicated clarifying messages rather than a guess.
+    #
+    # Basic: $20,000 taxable early distribution x 2.5% = $500.
+    ("what is my early distribution tax if I took a $20,000 taxable early distribution?",
+     {"status": "answered", "domain": "income", "category": "early_distribution_tax", "tax": 500.0}),
+    # order independence.
+    ("I took a taxable early distribution of $20,000, what is my early distribution tax?",
+     {"status": "answered", "domain": "income", "category": "early_distribution_tax", "tax": 500.0}),
+    # SIMPLE IRA within first 2 years: 6% override -> $20,000 x 6% = $1,200.
+    ("what is my early distribution tax if I took a $20,000 taxable early distribution from my SIMPLE IRA within the first 2 years?",
+     {"status": "answered", "domain": "income", "category": "early_distribution_tax", "tax": 1200.0}),
+    # EXCEPTION MENTIONED: California's exception list is confirmed to
+    # diverge from federal's -- deliberately deferred, not guessed.
+    ("what is my early distribution tax if I took a $20,000 taxable early distribution, but I have a disability exception?",
+     {"status": "needs_review", "domain": "income"}),
+    # NON-PART-I ACCOUNT TYPE (Archer MSA uses a different 12.5% rate) --
+    # deliberately deferred, not silently misapplied at 2.5%.
+    ("what is my early distribution tax if I took a $20,000 non-qualified Archer MSA distribution?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Child and Dependent Care Expenses Credit (FTB 3506, credit code
+    # 232) -- Income Coverage Blueprint Phase 3's seventh build. Broad
+    # survey framed this as a simple "percentage of federal credit"
+    # lookup; dedicated research confirmed Form 3506 is actually a full
+    # parallel worksheet keyed on FEDERAL AGI (not CA AGI) that never
+    # literally reads a federal credit dollar amount as input. The
+    # "federal credit x FTB percentage" shortcut IS mathematically valid,
+    # but only for the common case: full-year CA resident, all care
+    # provided in California, no employer dependent-care benefits.
+    # Scoped to that case; nonresident/part-year/out-of-state-care/
+    # employer-benefits language routes to a dedicated clarifying message.
+    #
+    # Basic: federal AGI $50,000 falls in the 43% bracket ($40k-$70k).
+    ("what is my child and dependent care credit if my federal credit is $1,000 and my federal AGI is $50,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": 430.0}),
+    # order independence: federal AGI stated before federal credit.
+    ("my federal AGI is $50,000, what is my child and dependent care credit if my federal credit is $1,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": 430.0}),
+    # lowest bracket: federal AGI <= $40,000 -> 50%.
+    ("what is my child and dependent care credit if my federal credit is $1,000 and my federal AGI is $30,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": 500.0}),
+    # DISQUALIFIED: federal AGI over $100,000 is a hard cutoff, not a
+    # gradually-reduced percentage.
+    ("what is my child and dependent care credit if my federal credit is $1,000 and my federal AGI is $150,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": None}),
+    # OUT OF SCOPE: nonresident care sourcing genuinely differs from the
+    # federal calculation -- deliberately deferred, not guessed.
+    ("what is my child and dependent care credit if my federal credit is $1,000 and my federal AGI is $50,000, and I am a nonresident?",
+     {"status": "needs_review", "domain": "income"}),
+    # PHANTOM-AMOUNT GUARD: "form 3506" must not be misparsed as a $3,506
+    # dollar figure by the shared amount-extraction regex.
+    ("what is my child and dependent care credit under form 3506 if my federal credit is $1,000 and my federal AGI is $50,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": 430.0}),
+    # DUPLICATE-VALUE COLLISION AUDIT: federal credit and federal AGI
+    # both stated as $40,000 -- see the Other State Tax Credit's own
+    # duplicate-value test for the general bug this audits. $40,000 AGI
+    # falls in the <=$40k bracket -> 50% -> credit=40000*0.50=20000.
+    ("what is my child and dependent care credit if my federal credit is $40,000 and my federal AGI is $40,000?",
+     {"status": "answered", "domain": "income", "category": "cdc_credit", "credit": 20000.0}),
+
+    # --- Child Adoption Costs Credit (Form 540 Credit Chart code 197) --
+    # Income Coverage Blueprint Phase 3's eighth build. Broad survey/
+    # ledger note had the core formula right (50% of costs, $2,500/child
+    # cap, CA-public-agency-custody restriction) but was missing the
+    # real nonrefundable-capped-at-CA-tax-liability-with-carryover
+    # mechanic (same shape as the PTE credit, unlike the CDC credit's
+    # simpler standalone formula) plus a second eligibility gate (child
+    # must also be a US citizen/legal resident, assumed satisfied here
+    # rather than elicited as its own fact).
+    #
+    # Basic: $60,000 CA income single (std deduction $5,706, taxable
+    # $54,294, bracket tax $1,792.53) with a $3,000 adoption cost ($1,500
+    # credit, fully absorbed) -> $1,792.53-$1,500=$292.53. Phrasing
+    # deliberately avoids restating the $3,000 figure a second time (a
+    # decorative "with a $3,000 adoption credit" lead-in, present in an
+    # earlier version of this test, accidentally created a genuine
+    # 3-figure question once duplicate-value removal became position-
+    # based instead of value-based -- see the duplicate-value-collision
+    # audit note elsewhere in this file).
+    ("how much California tax do I owe with my child adoption credit if I paid $3,000 in adoption costs, adopted through the county foster care system, my income is $60,000, filing single?",
+     {"status": "answered", "domain": "income", "category": "adoption_credit", "tax": 292.53}),
+    # order independence.
+    ("my income is $60,000, filing single, i adopted through the county foster care system, how much california tax do i owe with my child adoption credit if i paid $3,000 in adoption costs?",
+     {"status": "answered", "domain": "income", "category": "adoption_credit", "tax": 292.53}),
+    # CREDIT EXCEEDS CURRENT-YEAR TAX LIABILITY: $8,000 costs -> $2,500
+    # credit (capped at the per-child max), but $15,000 CA income single
+    # only has $92.94 of bracket tax -> credit capped at $92.94 used,
+    # tax floored at $0.00, $2,407.06 disclosed as carrying forward.
+    ("how much california tax do i owe with my child adoption credit if i paid $8,000 in adoption costs, adopted through the county foster care system, my income is $15,000, filing single?",
+     {"status": "answered", "domain": "income", "category": "adoption_credit", "tax": 0.0}),
+    # DUPLICATE-VALUE COLLISION AUDIT: qualifying costs and income both
+    # stated as $60,000 -- see the Other State Tax Credit's own
+    # duplicate-value test for the general bug this audits.
+    # credit_available=min(60000*0.5,2500)=2500 (capped), bracket_tax at
+    # $60k single = $1,792.53, credit_used=min(2500,1792.53)=1792.53,
+    # tax=max(0,1792.53-1792.53)=0.0.
+    ("how much California tax do I owe with my child adoption credit if I paid $60,000 in adoption costs, adopted through the county foster care system, my income is $60,000, filing single?",
+     {"status": "answered", "domain": "income", "category": "adoption_credit", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do i owe with my child adoption credit if i paid $3,000 in adoption costs, adopted through the county foster care system, my income is $60,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: private adoption -- FTB's own text confirms this
+    # credit does not apply outside CA-public-agency custody.
+    ("how much california tax do i owe with my child adoption credit if i paid $3,000 in adoption costs, this was a private adoption, my income is $60,000, filing single?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: international adoption.
+    ("how much california tax do i owe with my child adoption credit if i paid $3,000 in international adoption costs, my income is $60,000, filing single?",
+     {"status": "needs_review", "domain": "income"}),
+    # AMBIGUOUS ELIGIBILITY: adoption-credit vocabulary present but
+    # neither a public-agency signal nor an out-of-scope term -- routes
+    # to a dedicated eligibility question rather than guessing.
+    ("how much california tax do i owe with my child adoption credit if i paid $3,000 in adoption costs, my income is $60,000, filing single?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- College Access Tax Credit (Form 540 Credit Chart code 235, FTB
+    # 3592) -- Income Coverage Blueprint Phase 3's ninth build. Ledger
+    # note's core claim (50% of contribution, for 2025) checked out true,
+    # but the rate is year-keyed (not a permanent constant) and the
+    # credit is nonrefundable with a SIX-year carryover (not five, unlike
+    # the PTE credit) capped at CA tax liability -- same cap-at-liability
+    # pattern as PTE/adoption credit, not a pure pass-through.
+    #
+    # Basic: $150,000 CA income single (bracket tax $9,857.98), $5,000
+    # contribution -> $2,500 credit, fully usable -> $9,857.98-$2,500=$7,357.98.
+    ("how much California tax do I owe with a $5,000 college access tax credit contribution, if my California income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "catc_credit", "tax": 7357.98}),
+    # order independence.
+    ("my california income is $150,000, single, how much california tax do i owe with a $5,000 college access tax credit contribution?",
+     {"status": "answered", "domain": "income", "category": "catc_credit", "tax": 7357.98}),
+    # CREDIT EXCEEDS CURRENT-YEAR TAX LIABILITY: $30,000 CA income single
+    # (bracket tax only $375.09) with a $5,000 contribution ($2,500
+    # credit) -> capped at $375.09 used, tax floored at $0.00, remaining
+    # $2,124.91 disclosed as carrying forward (not tracked).
+    ("how much california tax do i owe with a $5,000 college access tax credit contribution, if my california income is $30,000, single?",
+     {"status": "answered", "domain": "income", "category": "catc_credit", "tax": 0.0}),
+    # DUPLICATE-VALUE COLLISION AUDIT: contribution and income both
+    # stated as $150,000 -- see the Other State Tax Credit's own
+    # duplicate-value test for the general bug this audits.
+    # credit_available=150000*0.5=75000, bracket_tax=$9,857.98,
+    # credit_used=min(75000,9857.98)=9857.98, tax=max(0,9857.98-9857.98)=0.0.
+    ("how much California tax do I owe with a $150,000 college access tax credit contribution, if my California income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "catc_credit", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("how much california tax do i owe with a $5,000 college access tax credit contribution, if my california income is $150,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # PHANTOM-AMOUNT GUARD: "form 3592" must not be misparsed as a $3,592
+    # dollar figure by the shared amount-extraction regex.
+    ("how much california tax do i owe with a $5,000 college access tax credit (form 3592) contribution, if my california income is $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "catc_credit", "tax": 7357.98}),
+
+    # --- Individual Shared Responsibility (ISR) Penalty (Form 540 Line
+    # 92, FTB 3853) -- Income Coverage Blueprint Phase 3's tenth build,
+    # and the FIRST item this session where the ledger's own "too
+    # complex, same class as AMT" verdict was found WRONG (not just
+    # incomplete) -- a dedicated research pass found the full formula
+    # published as a self-contained, linear worksheet in FTB's own text,
+    # with a genuinely tractable common-case slice: uninsured the entire
+    # year, no exemption claimed, nobody turning 18 during the year.
+    #
+    # Basic: MFJ, 2 adults, 0 children, $100,000 household income.
+    # Filing threshold (0 dependents) = $36,711 -> household income
+    # exceeds it. Flat = min(950*2 + 475*0, 2850) = $1,900. Pct income =
+    # 2.5% * (100000-36711) = $1,582.23. Base = max(1900, 1582.23) =
+    # $1,900. Avg premium cap (2 people) = 377*12*2 = $9,048. Penalty =
+    # min(1900, 9048) = $1,900.
+    ("what is my individual shared responsibility penalty if I have 2 adults and 0 children in my household, uninsured all year, my household income is $100,000, married filing jointly?",
+     {"status": "answered", "domain": "income", "category": "isr_penalty", "tax": 1900.0}),
+    # order independence.
+    ("married filing jointly, my household income is $100,000, uninsured all year, what is my individual shared responsibility penalty with 2 adults and 0 children in my household?",
+     {"status": "answered", "domain": "income", "category": "isr_penalty", "tax": 1900.0}),
+    # EXEMPT BELOW FILING THRESHOLD: MFJ, 2 adults, 2 children (dependent
+    # bucket "2 or more") -> threshold $64,419; $50,000 income is at or
+    # below it -> the ENTIRE penalty is $0, not just reduced.
+    ("what is my individual shared responsibility penalty if I have 2 adults and 2 children in my household, uninsured all year, my household income is $50,000, married filing jointly?",
+     {"status": "answered", "domain": "income", "category": "isr_penalty", "tax": 0.0}),
+    # single, "no children" phrasing (word-form zero, not a digit).
+    # Threshold (0 dep) = $18,353; flat = $950; pct = 2.5%*(40000-18353)
+    # = $541.18; base = max(950, 541.18) = $950; premium cap (1 person)
+    # = $4,524 -> penalty = min(950, 4524) = $950.
+    ("what is my individual shared responsibility penalty if I have 1 adult and no children in my household, uninsured all year, my household income is $40,000, single?",
+     {"status": "answered", "domain": "income", "category": "isr_penalty", "tax": 950.0}),
+    # missing filing status -> specific clarifying message.
+    ("what is my individual shared responsibility penalty if I have 2 adults and 0 children in my household, uninsured all year, my household income is $100,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: hardship exemption mentioned -- case-by-case FTB
+    # determination, not computed.
+    ("what is my individual shared responsibility penalty if I have 2 adults and 0 children in my household, uninsured all year, my household income is $100,000, married filing jointly, but I have a hardship exemption?",
+     {"status": "needs_review", "domain": "income"}),
+    # AMBIGUOUS COVERAGE: ISR-penalty vocabulary present but no full-year
+    # confirmation and no exclusion term -- routes to a dedicated
+    # clarifying question rather than assuming full-year uninsured.
+    ("what is my individual shared responsibility penalty if I have 2 adults and 0 children in my household, my household income is $100,000, married filing jointly?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- California AMT "screen" (Schedule P (540), Form 540 Line 61) --
+    # Income Coverage Blueprint Phase 3's eleventh build. NOT a general
+    # AMT computation (the ~11-preference-category general case correctly
+    # stays deferred) -- a scoped "does AMT apply to you at all" check
+    # for the narrow population already this codebase's baseline case:
+    # standard deduction, wage-only income, zero preference items. For
+    # that population, AMTI collapses to CA AGI (no addback modeling
+    # needed) and California's flat 7.0% TMT rate + large exemption mean
+    # TMT never exceeds regular tax at any realistic income level --
+    # verified via dedicated research checking multiple income points
+    # from the exemption threshold through $2M+ across the bracket
+    # engine's own already-verified data. Built as a REAL formula
+    # computation (not a hard-coded "always $0"), so it self-verifies.
+    #
+    # $100,000 single: AMTI=$100,000, exemption=$92,749 (no phase-out yet),
+    # TMT=7%*(100000-92749)=$507.57, regular tax=$5,207.98 -> TMT well
+    # below regular tax -> $0 AMT owed.
+    ("do I owe california amt if my income is $100,000, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # order independence.
+    ("single, my income is $100,000, do i owe california amt?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # HIGH INCOME still $0 -- confirms this isn't just true near the
+    # exemption threshold; $2,000,000 single: TMT=$140,000, regular tax
+    # (incl. Behavioral Health Services surtax)=$236,077.72 -> still $0.
+    ("do i owe california amt if my income is $2,000,000, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("do i owe california amt if my income is $100,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: incentive stock options mentioned -- genuinely needs
+    # the full ~11-category AMTI build, not this scoped screen.
+    ("do i owe california amt if my income is $100,000, single, and i exercised incentive stock options?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form
+    # 540 Line 113, FTB Form 5805 Side 2 Part II) -- Income Coverage
+    # Blueprint Phase 3's twelfth build, a THIRD consecutive case of a
+    # "too complex" ledger verdict found overly conservative -- but a
+    # split finding: the REGULAR method's per-diem/changing-rate
+    # mechanism correctly stays deferred (same disqualifying complexity
+    # already excluded from the late-payment penalty's interest), but
+    # FTB's SHORT METHOD collapses to one flat annual constant
+    # (.05028767 for 2025) for the common "withholding-only, no
+    # estimated payments made" population. Two genuine extraction bugs
+    # found live: (1) the undirected _amount_near_filtered picked a
+    # PRECEDING figure over the correct one (fixed with the established
+    # _amount_after_filtered forward-only pattern from OSTC); (2) two
+    # DIFFERENT stated facts sharing the same dollar value (e.g. prior-
+    # year tax and withholding both $15,000) broke value-based removal
+    # from the amounts list -- fixed with a NEW position-aware variant,
+    # _amount_after_filtered_span, that removes the exact matched tuple
+    # by its own character span rather than by value or list order.
+    #
+    # Basic: $150,000 CA income single (current-year tax $9,857.98),
+    # $5,000 prior-year tax, $100,000 prior-year AGI (under the $150k
+    # threshold -> 100% test), $2,000 withholding. Required annual
+    # payment = min(90%*9857.98=8872.18, 100%*5000=5000) = $5,000.
+    # Underpayment = 5000-2000=$3,000. Penalty = 3000*.05028767=$150.86.
+    ("do I owe underpayment penalty if my income is $150,000, filing single, my prior year tax was $5,000, my prior year agi was $100,000, and my california withholding was $2,000?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 150.86}),
+    # order independence.
+    ("filing single, my california withholding was $2,000, my prior year agi was $100,000, my prior year tax was $5,000, do I owe underpayment penalty if my income is $150,000?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 150.86}),
+    # SAFE HARBOR MET (100% test, prior AGI under threshold): $300,000
+    # income single (current-year tax $23,807.98), $15,000 prior-year
+    # tax, $80,000 prior-year AGI (under threshold -> 100%), $15,000
+    # withholding. Required payment = min(21427.18, 15000) = $15,000,
+    # exactly met by withholding -> $0.
+    ("do I owe underpayment penalty if my income is $300,000, filing single, my prior year tax was $15,000, my prior year agi was $80,000, and my california withholding was $15,000?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 0.0}),
+    # 110% TEST BINDING (prior AGI OVER the $150k threshold): same
+    # figures as above except prior-year AGI $200,000 -> 110% test ->
+    # required payment = min(21427.18, 16500) = $16,500. Underpayment =
+    # 16500-15000=$1,500. Penalty = 1500*.05028767=$75.43. Deliberately
+    # differs from the case above ONLY by the prior-year-AGI threshold
+    # test -- the regression signal that would catch the threshold
+    # check silently not being applied.
+    ("do I owe underpayment penalty if my income is $300,000, filing single, my prior year tax was $15,000, my prior year agi was $200,000, and my california withholding was $15,000?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 75.43}),
+    # FORCED 90%-ONLY (current-year AGI >= $1,000,000): the lesser-of
+    # test is bypassed entirely regardless of how favorable the prior-
+    # year test would otherwise be.
+    ("do I owe underpayment penalty if my income is $1,500,000, filing single, my prior year tax was $5,000, my prior year agi was $50,000, and my california withholding was $10,000?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 7172.02}),
+    # DE MINIMIS SAFE HARBOR, duplicate-value extraction case: prior-year
+    # tax AND withholding are both stated as $300 -- the exact figure
+    # collision that exposed the position-aware-removal bug.
+    ("do I owe underpayment penalty if my income is $20,000, filing single, my prior year tax was $300, my prior year agi was $15,000, and my california withholding was $300?",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("do I owe underpayment penalty if my income is $150,000, my prior year tax was $5,000, my prior year agi was $100,000, and my california withholding was $2,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: estimated payments mentioned -- eligibility for the
+    # short method then depends on exact payment dates, a timing
+    # question this slice deliberately avoids.
+    ("do I owe underpayment penalty if my income is $150,000, filing single, my prior year tax was $5,000, my prior year agi was $100,000, my california withholding was $2,000, and I also made estimated payments?",
+     {"status": "needs_review", "domain": "income"}),
 
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given

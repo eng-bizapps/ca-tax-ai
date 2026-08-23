@@ -12,9 +12,11 @@ default, defer the rest" discipline as income_brackets.py: assumes wage-only
 earned income with federal AGI equal to CA earned income (skips FTB Form
 3514 Part II's AGI-vs-earned-income reconciliation, which only matters when
 they differ -- e.g. investment income, which is excluded below). Foster
-Youth Tax Credit (FYTC) is NOT implemented -- its eligibility (foster-youth
-status at/after age 13) can't be inferred from a general question, unlike
-CalEITC/YCTC which only depend on income and child count.
+Youth Tax Credit (FYTC) IS implemented (see compute_fytc/detect_fytc_signal
+below) -- eligibility (foster-youth status at/after age 13) is handled as
+an explicit checklist question rather than inferred, the same "specific
+clarifying question, not a guess" pattern used for its own age/foster-care
+disqualification sub-cases.
 """
 import re
 

@@ -16,6 +16,7 @@ published and loaded via load_income_content.py -- it is NOT auto-derived
 from the system clock, since a new tax year's numbers aren't available on
 January 1st itself (FTB typically publishes the following autumn/winter).
 """
+import math
 import re
 
 DEFAULT_TAX_YEAR = 2025   # 2025 is the most recently complete tax year as of
@@ -3055,6 +3056,1929 @@ def compute_nra_foreign_income_ca_tax(conn, other_income: float, foreign_amount:
         return None
     return {**calc, "other_income": other_income, "foreign_amount": foreign_amount,
             "is_loss": is_loss, "agi": agi, "standard_deduction": dedu["amount"]}
+
+
+# --- Personal/Blind/Senior/Dependent Exemption Credits (Form 540 Lines
+# 7-10, Line 32 AGI Limitation Worksheet) -- Income Coverage Blueprint
+# Phase 3's highest-frequency finding: every California resident filer
+# receives at least the Personal Exemption Credit, yet nothing in this
+# codebase computed it before now -- income_nonresident.py's own module
+# docstring already flagged this as a KNOWN, DISCLOSED gap ("a pre-
+# existing gap in the RESIDENT engine too... omitting it makes the
+# computed tax a small overestimate, never an underestimate"). This is
+# the first feature built to actually CLOSE that gap, as its OWN
+# standalone opt-in question path rather than retrofitting every
+# existing feature's computation -- a deliberate scope decision (see
+# form540_inventory.py's ledger note) since integrating it into
+# compute_ca_tax itself would change ~300 already-verified regression
+# expectations across every feature built this session.
+#
+# DOLLAR FIGURES VERIFIED DIRECTLY against the actual 2025 Form 540 PDF
+# (Side 1 Lines 7-9, Side 2 Line 10) and the 2025 Form 540 Booklet's AGI
+# Limitation Worksheet (Page 14) -- not secondary tax-prep aggregator
+# sites, after an earlier research pass's OTHER specific-sounding claim
+# (the Behavioral Health Services Tax) turned out to be flatly wrong
+# once independently checked, which raised the bar for what "verified"
+# means before trusting a number here.
+#
+# THE CREDIT IS A TAX CREDIT (subtracted from computed TAX, Form 540
+# Line 32), NOT a deduction from taxable income -- structurally
+# different from the standard/itemized deduction this codebase already
+# applies before bracket computation. IMPORTANT ORDERING: the credit
+# reduces the BRACKET tax only (Form 540 Lines 31-48's chain) -- the
+# Behavioral Health Services Tax surtax (Line 62) is computed
+# INDEPENDENTLY on taxable income and added back AFTER, unaffected by
+# this or any other nonrefundable credit. compute_exemption_credit_ca_
+# tax below applies the credit to compute_ca_tax's own "bracket_tax"
+# field specifically, then re-adds "surtax" unchanged -- NOT a
+# subtraction from "total_tax" directly, which would incorrectly also
+# shrink the surtax portion.
+#
+# MECHANIC (Form 540 Line 7's own wording): personal exemption units
+# default to 2 for MFJ/QSS, 1 for every other filing status -- this is
+# NOT a separately-set $306 figure, it's the SAME $153 rate multiplied
+# by a unit count baked into the filing status itself. Blind/Senior
+# exemptions are SEPARATE optional units (0, 1, or 2 each -- one per
+# qualifying spouse/RDP) at the SAME $153 rate, but are NOT MODELED in
+# this first build (always 0) -- see EXEMPTION_CREDIT_TERMS's module
+# note for why the trigger vocabulary itself was scoped narrowly this
+# round; a documented, disclosed simplification (omission makes the
+# computed credit a small UNDERestimate, i.e. computed TAX a small safe-
+# direction OVERestimate, same direction as every other undiscovered
+# gap this codebase already accepts). Dependent exemptions are a
+# SEPARATE $475-per-dependent group, phased out INDEPENDENTLY from the
+# personal/blind/senior group per FTB's own AGI Limitation Worksheet.
+#
+# PHASE-OUT (verbatim from the AGI Limitation Worksheet, lines a-n): for
+# every $2,500 of AGI over the filing-status threshold ($1,250 if MFS),
+# ROUNDED UP to the next whole step, each personal/blind/senior
+# exemption UNIT loses $6, and each dependent exemption loses $6
+# separately -- NOT a percentage and NOT a hard cliff. Both groups are
+# floored at $0 independently (e.g. a taxpayer with enough dependents
+# can have the personal-group credit phase out to $0 while the
+# dependent-group credit is still meaningfully positive, or vice versa).
+EXEMPTION_CREDIT_CITATION = "FTB 2025 Form 540, Side 1 Lines 7-9, Side 2 Line 10, and Line 32 AGI Limitation Worksheet"
+EXEMPTION_CREDIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-booklet.html"
+
+PERSONAL_EXEMPTION_UNIT_AMOUNT = 153.0
+DEPENDENT_EXEMPTION_AMOUNT = 475.0
+EXEMPTION_CREDIT_AGI_THRESHOLD = {
+    "single": 252203.0, "mfs": 252203.0, "hoh": 378310.0,
+    "mfj": 504411.0, "qss": 504411.0,
+}
+EXEMPTION_CREDIT_PHASEOUT_STEP = 2500.0       # $1,250 for MFS
+EXEMPTION_CREDIT_PHASEOUT_STEP_MFS = 1250.0
+EXEMPTION_CREDIT_PHASEOUT_PER_STEP = 6.0      # $6 lost per exemption unit per step
+
+# Requires EXPLICIT "exemption credit" phrasing to trigger -- deliberately
+# narrower than the most natural real-world phrasing ("...with 2
+# dependents", no "exemption credit" wording at all) would allow,
+# because bare "dependent"/"children" vocabulary is ALREADY heavily used
+# elsewhere in this codebase for OTHER features' own purposes (HOH
+# determination, Joint Custody HOH Credit, Dependent Parent Credit,
+# CalEITC/YCTC/FYTC's child-count facts) -- widening this feature's
+# trigger to bare dependent-count phrasing risks silently stealing
+# questions those features are already correctly handling, a
+# dispatcher-collision audit this build does not attempt. Narrower-but-
+# safe now, same "build the tractable slice, don't force the rest"
+# discipline as everywhere else in this codebase; broadening the
+# trigger vocabulary is a real, but separate, future extension (see
+# form540_inventory.py's ledger note).
+EXEMPTION_CREDIT_TERMS = {
+    "exemption credit", "exemption credits", "personal exemption credit",
+    "dependent exemption credit", "blind exemption credit",
+    "senior exemption credit", "california exemption credit",
+}
+# Deliberately (almost) the FULL COMPLEXITY_EXCLUDE, not a narrower
+# purpose-built set -- unlike the itemized-deduction-style optional
+# add-ons, this feature mirrors the PLAIN wage-only bracket path's own
+# scope exactly (compute_ca_tax on a single gross-income figure, no
+# SE-tax deduction, no K-1/entity math). A self-employment or K-1
+# question that ALSO mentions "exemption credit" must defer, not
+# silently treat the net-profit/K-1 figure as wage-equivalent -- same
+# "wrong number silently used" bug class already fixed for other
+# features this session (e.g. IRA deduction + self-employment).
+#
+# "dependent" SUBTRACTED BACK OUT -- found live via testing: bare
+# "dependent" sits in COMPLEXITY_EXCLUDE to block OTHER paths (HOH/
+# credit questions usually signal real complexity for THOSE features),
+# but this feature's own dependent-exemption-credit fact is exactly
+# "N dependents" -- reusing COMPLEXITY_EXCLUDE unmodified made this
+# feature self-exclude the instant a user stated the one optional fact
+# it's specifically built to accept. Same "subtract the trigger term
+# back out of a reused shared exclude set" pattern as cannabis 280E's
+# fix for the identical self-referential-exclusion bug class earlier
+# this session.
+EXEMPTION_CREDIT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"dependent"}
+
+
+def _exemption_credit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in EXEMPTION_CREDIT_TERMS):
+        return False
+    if any(t in q for t in EXEMPTION_CREDIT_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_exemption_credit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'wage income
+    with a stated exemption-credit question' -- requires the explicit
+    EXEMPTION_CREDIT_TERMS phrasing (see that set's module note for why
+    bare dependent-count phrasing is deliberately NOT enough here)."""
+    q = question.lower()
+    if not _exemption_credit_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_exemption_credit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _exemption_credit_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_exemption_credit_dependent_count(question: str):
+    """Returns a stated dependent COUNT (int) if the question states one
+    for the dependent exemption credit, or None if not stated (treated
+    as 0 dependents -- the personal exemption credit alone is still
+    computed; a missing dependent count does NOT block the whole
+    feature the way a missing filing status does)."""
+    q = question.lower()
+    m = re.search(r"(\d+)\s*dependent", q)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\bone dependent\b", q):
+        return 1
+    if re.search(r"\btwo dependents\b", q):
+        return 2
+    if re.search(r"\bthree dependents\b", q):
+        return 3
+    return None
+
+
+def compute_exemption_credit(filing_status: str, dependent_count: int = 0, agi: float = None):
+    """Form 540 Lines 7-10 + Line 32 AGI Limitation Worksheet. Personal
+    exemption units default to 2 for MFJ/QSS, 1 otherwise (Line 7's own
+    "enter 1 or 2" mechanic -- not a separate input). Blind/senior
+    exemption units are NOT modeled in this first build (always 0) --
+    see the module note above. dependent_count defaults to 0 (personal
+    exemption credit alone, the universal case). Returns the personal/
+    blind/senior GROUP total and the dependent GROUP total (phased out
+    INDEPENDENTLY per FTB's own worksheet), each floored at 0
+    separately, plus their sum."""
+    if filing_status not in EXEMPTION_CREDIT_AGI_THRESHOLD:
+        return None
+    if dependent_count is None or dependent_count < 0:
+        return None
+    personal_units = 2 if filing_status in ("mfj", "qss") else 1
+    personal_group_before = personal_units * PERSONAL_EXEMPTION_UNIT_AMOUNT
+    dependent_group_before = dependent_count * DEPENDENT_EXEMPTION_AMOUNT
+
+    result = {
+        "personal_units": personal_units, "dependent_count": dependent_count,
+        "personal_group_before": personal_group_before,
+        "dependent_group_before": dependent_group_before,
+        "phaseout_applied": False, "steps": 0, "reduction_per_unit": 0.0,
+    }
+    threshold = EXEMPTION_CREDIT_AGI_THRESHOLD[filing_status]
+    if agi is None or agi <= threshold:
+        result["personal_group"] = personal_group_before
+        result["dependent_group"] = dependent_group_before
+        result["total"] = personal_group_before + dependent_group_before
+        return result
+
+    step_size = EXEMPTION_CREDIT_PHASEOUT_STEP_MFS if filing_status == "mfs" else EXEMPTION_CREDIT_PHASEOUT_STEP
+    steps = math.ceil((agi - threshold) / step_size)
+    reduction_per_unit = steps * EXEMPTION_CREDIT_PHASEOUT_PER_STEP
+    personal_group_after = max(0.0, personal_group_before - reduction_per_unit * personal_units)
+    dependent_group_after = max(0.0, dependent_group_before - reduction_per_unit * dependent_count)
+    result.update({
+        "phaseout_applied": True, "steps": steps, "reduction_per_unit": reduction_per_unit,
+        "personal_group": personal_group_after, "dependent_group": dependent_group_after,
+        "total": personal_group_after + dependent_group_after, "threshold": threshold,
+    })
+    return result
+
+
+def compute_exemption_credit_ca_tax(conn, income_amount: float, filing_status: str,
+                                      dependent_count: int = 0, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as gross income/AGI, same simplification
+    as every other compute path -- also used directly as the Line 32
+    AGI Limitation Worksheet's own AGI figure (Form 540 Line 13, BEFORE
+    the standard/itemized deduction). The exemption credit reduces
+    compute_ca_tax's "bracket_tax" specifically, floored at 0, then the
+    surtax is re-added UNCHANGED -- see the module note above for why
+    (the Behavioral Health Services surtax is computed independently on
+    taxable income and is not reduced by nonrefundable credits)."""
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    exemption = compute_exemption_credit(filing_status, dependent_count, income_amount)
+    if not exemption:
+        return None
+    bracket_tax_before_credit = calc["bracket_tax"]
+    bracket_tax_after_credit = max(0.0, bracket_tax_before_credit - exemption["total"])
+    total_tax_after_credit = round(bracket_tax_after_credit + calc["surtax"], 2)
+    return {**calc, "income_amount": income_amount, "standard_deduction": dedu["amount"],
+            "taxable_income": taxable_income, "exemption": exemption,
+            "bracket_tax_before_credit": bracket_tax_before_credit,
+            "bracket_tax": bracket_tax_after_credit, "total_tax": total_tax_after_credit}
+
+
+# --- Estimated Use Tax Lookup Table (Form 540 Line 91) -- Income
+# Coverage Blueprint Phase 3's second-priority finding: California
+# residents who buy from out-of-state/online retailers without CA tax
+# collected owe USE tax, self-reported on Form 540 Line 91, and FTB
+# publishes a flat AGI-band lookup table specifically so most filers
+# never have to track individual purchases. Genuinely simpler than the
+# exemption credit above: no filing status at all, just California AGI.
+#
+# TABLE VERIFIED DIRECTLY against the actual 2025 Form 540 Booklet PDF
+# (downloaded and extracted locally, Page 17-18, "Estimated Use Tax
+# Lookup Table") -- all 14 flat-dollar bands plus the top formula band,
+# not sampled/extrapolated from a partial quote.
+#
+# USES CALIFORNIA AGI (Form 540 LINE 17), NOT federal AGI (Line 13) --
+# FTB's own instruction: "include the use tax liability that corresponds
+# to your California Adjusted Gross Income (found on Line 17)." This
+# codebase's usual "income_amount treated as gross income/AGI" trust-
+# the-input simplification applies the same way here.
+#
+# SCOPE CAP, confirmed from FTB's own text and NOT modeled as a silent
+# assumption: the lookup table only covers "individual non-business
+# items you purchased for less than $1,000 each." Purchases of $1,000+
+# per item, or any business purchase, must use the separate Use Tax
+# Worksheet (actual price x district tax rate) instead -- a genuinely
+# different, multi-input computation this feature does not attempt.
+# Detected explicitly (USE_TAX_OVER_CAP_TERMS) and routed to a dedicated
+# clarifying message rather than silently misapplying the flat lookup
+# to a purchase FTB's own rule says doesn't qualify for it.
+USE_TAX_CITATION = "FTB 2025 Form 540 Instructions, Line 91 -- Estimated Use Tax Lookup Table"
+USE_TAX_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-booklet.html"
+
+USE_TAX_LOOKUP_TABLE = [
+    # (agi_floor, agi_ceiling_inclusive, flat_amount)
+    (0.0, 19999.99, 1.0),
+    (20000.0, 29999.99, 2.0),
+    (30000.0, 39999.99, 3.0),
+    (40000.0, 49999.99, 4.0),
+    (50000.0, 59999.99, 5.0),
+    (60000.0, 69999.99, 6.0),
+    (70000.0, 79999.99, 7.0),
+    (80000.0, 89999.99, 8.0),
+    (90000.0, 99999.99, 9.0),
+    (100000.0, 124999.99, 11.0),
+    (125000.0, 149999.99, 14.0),
+    (150000.0, 174999.99, 16.0),
+    (175000.0, 199999.99, 19.0),
+]
+USE_TAX_TOP_THRESHOLD = 199999.99   # "More than $199,999" -- i.e. $200,000+
+USE_TAX_TOP_RATE = 0.0001            # 0.010% of AGI
+USE_TAX_PER_ITEM_CAP = 1000.0
+
+USE_TAX_TERMS = {"use tax", "estimated use tax", "use tax lookup"}
+USE_TAX_OVER_CAP_TERMS = {
+    "1,000 or more", "$1,000 or more", "over $1,000", "over 1,000",
+    "more than $1,000", "more than 1,000", "1000 or more", "$1000 or more",
+    "business purchase", "for my business", "business item", "for business use",
+}
+USE_TAX_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "trust", "estate", "gambling", "gambled", "betting", "wagering",
+}
+
+
+def detect_use_tax_signal(question: str):
+    """True iff this looks like a genuine 'estimate my use tax from
+    stated AGI' question -- 'use tax' is distinctive enough vocabulary
+    on its own (no separate compute-trigger phrase required, unlike
+    other features, since a stated AGI figure alongside this term is
+    already unambiguous intent). Does NOT require filing status --
+    FTB's own lookup table is AGI-only, no filing-status distinction."""
+    q = question.lower()
+    if not any(t in q for t in USE_TAX_TERMS):
+        return False
+    if any(t in q for t in USE_TAX_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_use_tax_over_cap(question: str) -> bool:
+    """True iff the question explicitly describes a purchase the
+    Estimated Use Tax Lookup Table doesn't cover ($1,000+ per item, or
+    any business purchase) -- routes to a dedicated clarifying message
+    instead of silently misapplying the flat AGI lookup to a purchase
+    FTB's own rule excludes from it."""
+    q = question.lower()
+    return any(t in q for t in USE_TAX_OVER_CAP_TERMS)
+
+
+def compute_estimated_use_tax(ca_agi: float):
+    """Form 540 Line 91's Estimated Use Tax Lookup Table -- a flat
+    dollar amount by California AGI band, or 0.01% of AGI above
+    $199,999. Returns None if ca_agi is missing/negative."""
+    if ca_agi is None or ca_agi < 0:
+        return None
+    if ca_agi > USE_TAX_TOP_THRESHOLD:
+        return round(ca_agi * USE_TAX_TOP_RATE, 2)
+    for floor, ceiling, amount in USE_TAX_LOOKUP_TABLE:
+        if floor <= ca_agi <= ceiling:
+            return amount
+    return None
+
+
+# --- Other State Tax Credit (Schedule S (540), credit code 187) --
+# Income Coverage Blueprint Phase 3's third build, and the most complex
+# feature this session: California residents whose income was taxed by
+# BOTH California and another state (remote workers, multi-state
+# earners) can credit some of the double taxation back. Likely the most
+# commonly-needed UNBUILT credit given how common CA-plus-another-state
+# income situations are -- flagged as the highest-priority remaining
+# Phase 3 credit finding.
+#
+# VERIFIED DIRECTLY against the actual 2025 Schedule S PDF (Part I/II's
+# own line-by-line worksheet, downloaded and extracted locally, cross-
+# checked against a 2016 standalone copy to confirm the mechanic hasn't
+# materially changed) -- NOT the single-proration shape an earlier
+# broad survey pass assumed. It's TWO INDEPENDENT prorations, one per
+# side, and the credit is the LESSER of the two:
+#   Line 5  = min(1.0, double-taxed income taxable by CA / CA AGI)
+#   Line 6  = CA tax liability x Line 5
+#   Line 10 = min(1.0, double-taxed income taxable by other state / other-state AGI)
+#   Line 11 = other-state tax paid x Line 10
+#   Line 12 (the credit) = min(Line 6, Line 11)
+# Confirmed: the CA-side denominator is CA AGI (Form 540 Line 17), NOT
+# CA taxable income -- a real distinction from what a naive reading of
+# "proration" might assume.
+#
+# SIMPLIFICATION, disclosed (not silently assumed): Schedule S Part I
+# tracks the double-taxed income amount in TWO columns -- taxable by CA
+# (b) and taxable by the other state (c) -- which can genuinely differ,
+# but for the common single-item case (e.g. wages earned entirely in
+# another state while a CA resident) they're the same dollar figure.
+# This feature asks for ONE double-taxed-income amount and uses it for
+# BOTH Line 3 and Line 8 -- correct for that common case, an
+# approximation if a taxpayer's actual Part I breakdown diverges.
+#
+# "CA TAX LIABILITY" (Line 2) IS NOT A SEPARATE STATED FACT -- Schedule
+# S's own Line 2 instruction points straight to "Form 540, line 48",
+# a number this codebase already computes (compute_ca_tax's bracket_tax)
+# rather than something to ask the taxpayer to independently state and
+# risk getting wrong. Genuinely stated facts needed are the 4 figures
+# external to this return: CA income (also serves as the Line 4 CA AGI
+# denominator), double-taxed income, the other state's AGI, and tax
+# actually paid to the other state -- all things a multi-state filer
+# would read directly off their other-state return.
+#
+# ORDERING, same pattern as the exemption credit above: the credit
+# reduces compute_ca_tax's "bracket_tax" specifically (Schedule S's own
+# Line 2 = Form 540 Line 48, which is BEFORE the Behavioral Health
+# Services surtax is added at Line 62) -- surtax is re-added unchanged
+# afterward, not reduced by this or any other nonrefundable credit.
+#
+# ELIGIBILITY, confirmed not assumed: this credit's own resident-
+# specific computation path matches exactly this codebase's existing
+# resident-only (Schedule CA (540)/Form 540) population -- no mismatch.
+# One real limitation confirmed from FTB's own text and NOT modeled:
+# "No credit is allowed if the other state allows California residents
+# a credit for net income taxes paid to California" (an anti-double-
+# benefit rule) -- not detectable from a single question, disclosed in
+# the answer text rather than silently ignored. Also not modeled: the
+# credit cannot offset California AMT (this codebase doesn't compute
+# AMT at all, so this is moot in practice, not a gap specific to this
+# feature).
+OTHER_STATE_TAX_CREDIT_CITATION = "FTB 2025 Schedule S (540) Instructions, Part I-II"
+OTHER_STATE_TAX_CREDIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-s-instructions.html"
+
+OTHER_STATE_TAX_CREDIT_TERMS = {
+    "other state tax credit", "other state's tax credit", "schedule s",
+    "credit for taxes paid to another state", "credit for tax paid to another state",
+}
+DOUBLE_TAXED_INCOME_TERMS = {
+    "double-taxed income", "double taxed income", "income taxed by both states",
+}
+OTHER_STATE_AGI_TERMS = {
+    "other state agi", "other state's agi", "other-state agi",
+    "the other state's adjusted gross income", "agi in the other state",
+    "adjusted gross income in the other state",
+}
+OTHER_STATE_TAX_PAID_TERMS = {
+    "tax paid to the other state", "other state tax paid",
+    "income tax paid to the other state", "paid in the other state",
+}
+OTHER_STATE_TAX_CREDIT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _other_state_tax_credit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in OTHER_STATE_TAX_CREDIT_TERMS):
+        return False
+    if any(t in q for t in OTHER_STATE_TAX_CREDIT_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_other_state_tax_credit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine Other State
+    Tax Credit question -- mirrors the plain wage-only path's scope
+    exactly (full COMPLEXITY_EXCLUDE, no self-referential collision
+    since none of this feature's own vocabulary overlaps that set)."""
+    q = question.lower()
+    if not _other_state_tax_credit_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_other_state_tax_credit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _other_state_tax_credit_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_other_state_tax_credit(ca_tax_liability: float, ca_agi: float, double_taxed_income: float,
+                                     other_state_agi: float, other_state_tax_paid: float):
+    """Schedule S (540) Part II, Lines 2-12, verbatim worksheet -- see
+    module note above for the exact line mapping and the "same double-
+    taxed income figure used for both columns" simplification."""
+    if any(v is None for v in (ca_tax_liability, ca_agi, double_taxed_income,
+                                 other_state_agi, other_state_tax_paid)):
+        return None
+    if ca_agi <= 0 or other_state_agi <= 0:
+        return None
+    if ca_tax_liability < 0 or double_taxed_income < 0 or other_state_tax_paid < 0:
+        return None
+    ca_ratio = min(1.0, double_taxed_income / ca_agi)
+    ca_side = round(ca_tax_liability * ca_ratio, 2)
+    other_ratio = min(1.0, double_taxed_income / other_state_agi)
+    other_side = round(other_state_tax_paid * other_ratio, 2)
+    credit = min(ca_side, other_side)
+    return {"ca_ratio": ca_ratio, "ca_side": ca_side,
+            "other_ratio": other_ratio, "other_side": other_side, "credit": credit}
+
+
+def compute_other_state_tax_credit_ca_tax(conn, income_amount: float, filing_status: str,
+                                            double_taxed_income: float, other_state_agi: float,
+                                            other_state_tax_paid: float, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as CA gross income/AGI, same
+    simplification as everywhere else -- also serves as Schedule S
+    Line 4 (CA AGI). "CA tax liability" (Line 2) is NOT a separate
+    stated fact -- computed via compute_ca_tax on this income, same as
+    the plain wage-bracket path, not asked from the taxpayer (see
+    module note above). The credit reduces bracket_tax specifically,
+    with the surtax re-added unchanged afterward -- see module note."""
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    credit_calc = compute_other_state_tax_credit(
+        calc["bracket_tax"], income_amount, double_taxed_income, other_state_agi, other_state_tax_paid)
+    if not credit_calc:
+        return None
+    bracket_tax_before_credit = calc["bracket_tax"]
+    bracket_tax_after_credit = max(0.0, bracket_tax_before_credit - credit_calc["credit"])
+    total_tax_after_credit = round(bracket_tax_after_credit + calc["surtax"], 2)
+    return {**calc, "income_amount": income_amount, "standard_deduction": dedu["amount"],
+            "taxable_income": taxable_income, "double_taxed_income": double_taxed_income,
+            "other_state_agi": other_state_agi, "other_state_tax_paid": other_state_tax_paid,
+            "credit": credit_calc, "bracket_tax_before_credit": bracket_tax_before_credit,
+            "bracket_tax": bracket_tax_after_credit, "total_tax": total_tax_after_credit}
+
+
+# --- Pass-Through Entity (PTE) Elective Tax Credit (FTB 3804-CR,
+# credit code 242) -- Income Coverage Blueprint Phase 3's fourth build.
+# A CORRECTION was needed before building: the broad Phase 3 survey
+# sketched this as a pure single-number pass-through ("the 9.3% figure
+# is already on the K-1, trust it"), but a dedicated verification pass
+# found this is the THIRD claim from that same survey to be wrong or
+# incomplete once independently checked (after the Behavioral Health
+# Services Tax miss and the Other State Tax Credit's formula). FTB 3804-
+# CR is a genuine small worksheet, not a scalar: Part I sums K-1 credit
+# amount(s); Part II adds a PRIOR-YEAR CARRYOVER, caps the CURRENT-YEAR
+# usable amount at remaining CA tax liability (nonrefundable), and
+# tracks an unused remainder that carries forward up to 5 years.
+#
+# THE 9.3% RATE ITSELF IS 100% ENTITY-SIDE, confirmed directly from FTB
+# 3804/3804-CR instructions -- the electing PTE computes 9.3% of its
+# qualified net income and reports the resulting DOLLAR credit on each
+# owner's K-1; the individual taxpayer never recomputes the rate, only
+# transcribes the stated figure. This module trusts that stated figure
+# entirely, same "trust the input" precedent as every other K-1-sourced
+# item in this codebase.
+#
+# TRACTABLE SLICE, same pattern as NOL/EBL/disaster-loss/capital-loss
+# carryovers already built this session: CURRENT-YEAR absorption only.
+# total_available = k1_credit_amount + prior_year_carryover (prior-year
+# carryover optional, defaults to 0 -- the common first-time-claimant
+# case); credit_used = min(total_available, this taxpayer's OWN CA tax
+# liability); any excess is DISCLOSED as carrying forward (up to 5
+# years, no carryback, verified from FTB's own text), not tracked into
+# a future computation this stateless system can't perform.
+#
+# NOT MODELED, disclosed rather than silently assumed: Schedule P's
+# credit-ORDERING against OTHER nonrefundable credits (if a taxpayer
+# also claims the Other State Tax Credit or another Schedule P Section B
+# credit, FTB's own form claims this credit AFTER those -- this feature
+# caps only against the taxpayer's own gross CA tax liability, not
+# against what's left after other credits, since each standalone
+# feature in this codebase is independent, same precedent as the
+# exemption credit/OSTC not coordinating with each other either); the
+# AMT/TMT nuance (this credit cannot reduce AMT itself, but CAN reduce
+# regular tax below TMT -- moot here since this system doesn't compute
+# AMT/TMT at all); the SMLLC-specific limitation (a narrower sub-case);
+# and the "not assignable, one credit per married/RDP couple" rules.
+PTE_CREDIT_CITATION = "FTB 3804-CR Instructions, Part I-II; R&TC Section 17052.10"
+PTE_CREDIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2024/2024-3804-cr-instructions.html"
+
+PTE_CREDIT_TERMS = {
+    "pte elective tax credit", "pass-through entity elective tax credit",
+    "pte credit", "form 3804-cr",
+}
+PTE_CREDIT_CARRYOVER_TERMS = {
+    "pte credit carryover", "prior year pte credit", "pte carryover",
+    "pte credit carryover from a prior year",
+}
+PTE_CREDIT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _pte_credit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in PTE_CREDIT_TERMS):
+        return False
+    if any(t in q for t in PTE_CREDIT_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_pte_credit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine PTE Elective
+    Tax Credit question -- mirrors the plain wage-only path's scope
+    exactly (full COMPLEXITY_EXCLUDE; no self-referential collision,
+    none of this feature's own vocabulary overlaps that set)."""
+    q = question.lower()
+    if not _pte_credit_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_pte_credit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _pte_credit_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_pte_credit(k1_credit_amount: float, prior_year_carryover: float, ca_tax_liability: float):
+    """FTB 3804-CR Part II, current-year absorption only -- see module
+    note above. prior_year_carryover may be 0 (the common first-time-
+    claimant case)."""
+    if k1_credit_amount is None or k1_credit_amount < 0:
+        return None
+    prior_year_carryover = prior_year_carryover or 0.0
+    if prior_year_carryover < 0:
+        return None
+    if ca_tax_liability is None or ca_tax_liability < 0:
+        return None
+    total_available = k1_credit_amount + prior_year_carryover
+    credit_used = min(total_available, ca_tax_liability)
+    remaining_carryover = total_available - credit_used
+    return {"total_available": total_available, "credit_used": credit_used,
+            "remaining_carryover": remaining_carryover}
+
+
+def compute_pte_credit_ca_tax(conn, income_amount: float, filing_status: str, k1_credit_amount: float,
+                                prior_year_carryover: float = 0.0, tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as CA gross income/AGI, same
+    simplification as everywhere else. The credit reduces bracket_tax
+    specifically, with surtax re-added unchanged afterward -- same
+    ordering as the exemption credit/OSTC (Schedule P's own credit-
+    ordering happens before the surtax is added at Form 540 Line 62)."""
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    credit_calc = compute_pte_credit(k1_credit_amount, prior_year_carryover, calc["bracket_tax"])
+    if not credit_calc:
+        return None
+    bracket_tax_before_credit = calc["bracket_tax"]
+    bracket_tax_after_credit = max(0.0, bracket_tax_before_credit - credit_calc["credit_used"])
+    total_tax_after_credit = round(bracket_tax_after_credit + calc["surtax"], 2)
+    return {**calc, "income_amount": income_amount, "standard_deduction": dedu["amount"],
+            "taxable_income": taxable_income, "k1_credit_amount": k1_credit_amount,
+            "prior_year_carryover": prior_year_carryover, "credit": credit_calc,
+            "bracket_tax_before_credit": bracket_tax_before_credit,
+            "bracket_tax": bracket_tax_after_credit, "total_tax": total_tax_after_credit}
+
+
+# --- Late-filing / late-payment penalties (Form 540 Line 112, R&TC
+# Sections 19131/19132) -- Income Coverage Blueprint Phase 3's fifth
+# build, and architecturally DIFFERENT from every feature built earlier
+# this session: no filing status, no bracket/income computation at all
+# -- a flat percentage of a stated UNPAID BALANCE, filing-status-
+# agnostic (confirmed directly from the statute text).
+#
+# A dedicated verification pass found this is genuinely MORE complex
+# than the broad Phase 3 survey's sketch ("5%/month up to 25%, min $135
+# if >60 days late" for filing; "5% + 0.5%/month" for payment) --
+# missing the payment penalty's own 25% cap/40-month ceiling, and
+# entirely missing the REQUIRED offset between the two penalties
+# (R&TC 19132(b)): the late-payment penalty is reduced dollar-for-
+# dollar by the late-filing penalty for the same period -- skipping
+# this would DOUBLE-COUNT whenever both penalties apply to the same
+# late return, the common case. This is now the FOURTH claim from that
+# same broad survey pass to be wrong or incomplete once independently
+# checked (after the Behavioral Health Services Tax, OSTC's formula,
+# and the PTE credit's "pure pass-through" claim).
+#
+# CORE FORMULAS, verified directly against R&TC 19131(a)/19132(a),(b):
+#   Late-filing: 5% of the unpaid balance per month or FRACTION
+#     thereof (any partial month counts as a full month), from the
+#     ORIGINAL due date, capped at 25%.
+#   Late-payment: 5% flat + 0.5% per month or fraction thereof, capped
+#     at 25% total (the cap is reached exactly at 40 months, matching
+#     the statute's own "not to exceed 40 months" language).
+#   Offset: late_payment_assessed = max(0, late_payment_computed -
+#     late_filing_computed) -- NOT optional; this is a verified,
+#     tractable rule using the SAME inputs already collected, not a
+#     scope decision to skip.
+#   Total = late_filing + late_payment_assessed.
+#
+# DELIBERATELY OUT OF SCOPE, disclosed rather than silently omitted --
+# unlike the offset above, each of these genuinely needs facts beyond
+# what a single question reasonably asks for, or is a moving target:
+#   - The $135-minimum-penalty test: this only applies once a return is
+#     MORE than 60 days late measured from CA's AUTOMATIC 6-month filing
+#     extension (October 15, granted to every taxpayer with no request
+#     needed) -- a SEPARATE clock from the 5%/month accrual, which
+#     starts from the ORIGINAL due date (April 15) regardless of the
+#     extension. Modeling this correctly needs a second date input this
+#     feature doesn't ask for; in practice this floor only binds for
+#     filers roughly 8+ months late, a narrow slice of the population
+#     this feature already serves via the core formula.
+#   - Interest: mandatory, separate from both penalties, compounds
+#     DAILY at a rate that changes semi-annually (confirmed 0%-8% range
+#     over the past ~15 years) -- a genuinely moving external parameter,
+#     not something to hard-code.
+#   - Reasonable-cause abatement: a case-by-case FTB determination based
+#     on facts and circumstances -- not something this system should
+#     auto-apply from a stated fact. Detected as its own signal
+#     (LATE_PENALTY_COMPLEXITY_EXCLUDE) and redirected to a dedicated
+#     message rather than silently computed as if no exception applied.
+#   - The one-time Timeliness Penalty Abatement (R&TC 19132.5): a real,
+#     tractable-in-principle relief mechanism, but adds several more
+#     gating facts to an already multi-fact feature -- left for a
+#     future extension, not this build.
+#
+# SIMPLIFICATION: assumes filing and full payment happened at the SAME
+# time (one stated "months late" figure drives both penalty
+# accruals) -- correct when a taxpayer pays in full when they finally
+# file, the common case; a real approximation if payment happened on a
+# different date than filing.
+LATE_PENALTY_CITATION = "R&TC Sections 19131 (late filing) and 19132 (late payment)"
+LATE_PENALTY_SOURCE_URL = "https://www.ftb.ca.gov/pay/penalties-and-interest/index.html"
+
+LATE_PENALTY_FILING_RATE = 0.05        # 5% per month, capped at 25%
+LATE_PENALTY_FILING_CAP = 0.25
+LATE_PENALTY_PAYMENT_BASE_RATE = 0.05  # 5% flat
+LATE_PENALTY_PAYMENT_MONTHLY_RATE = 0.005   # + 0.5% per month
+LATE_PENALTY_PAYMENT_CAP = 0.25
+
+LATE_PENALTY_TERMS = {
+    "late filing penalty", "late payment penalty", "late-filing penalty",
+    "late-payment penalty", "penalty for filing late", "penalty for paying late",
+    "penalty for late filing", "penalty for late payment",
+}
+LATE_PENALTY_REASONABLE_CAUSE_TERMS = {
+    "reasonable cause", "penalty abatement", "waive my penalty", "waive the penalty",
+}
+
+
+def detect_late_penalty_signal(question: str) -> bool:
+    """No filing status needed -- these penalties are a flat percentage
+    of a stated unpaid balance, confirmed filing-status-agnostic
+    directly from R&TC 19131/19132's own text."""
+    q = question.lower()
+    if not any(t in q for t in LATE_PENALTY_TERMS):
+        return False
+    if any(t in q for t in LATE_PENALTY_REASONABLE_CAUSE_TERMS):
+        return False
+    return True
+
+
+def detect_late_penalty_reasonable_cause_mention(question: str) -> bool:
+    """True iff the question asks about a reasonable-cause exception or
+    penalty abatement specifically -- a case-by-case FTB determination,
+    not something this system should compute a waived/reduced outcome
+    for. Checked as its OWN signal (same 'specific redirect instead of
+    a generic defer or a silently-wrong computation' pattern as Roth
+    IRA's dedicated redirect)."""
+    q = question.lower()
+    return (any(t in q for t in LATE_PENALTY_TERMS)
+            and any(t in q for t in LATE_PENALTY_REASONABLE_CAUSE_TERMS))
+
+
+def detect_late_penalty_months_late(question: str):
+    """Returns a months-late figure (float, may be fractional) or None
+    -- a COUNT, not a dollar amount, extracted via its own "N months
+    late" pattern rather than the shared dollar-amount regex (same
+    "this is a count, not a dollar figure" distinction as the exemption
+    credit's dependent-count extraction)."""
+    q = question.lower()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*months?\s*late", q)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def compute_late_penalties(unpaid_balance: float, months_late: float):
+    """R&TC 19131(a)/19132(a),(b) -- core monthly-accrual formulas plus
+    the required offset. See module note above for what's deliberately
+    out of scope (the $135-minimum dual-clock test, interest,
+    reasonable cause, the one-time abatement). "Month or fraction
+    thereof" -- ANY partial month counts as a full month, so
+    months_late is rounded UP before either formula runs."""
+    if unpaid_balance is None or unpaid_balance < 0:
+        return None
+    if months_late is None or months_late <= 0:
+        return None
+    months_late_int = math.ceil(months_late)
+
+    late_filing_pct = min(LATE_PENALTY_FILING_RATE * months_late_int, LATE_PENALTY_FILING_CAP)
+    late_filing_penalty = round(unpaid_balance * late_filing_pct, 2)
+
+    late_payment_pct = min(
+        LATE_PENALTY_PAYMENT_BASE_RATE + LATE_PENALTY_PAYMENT_MONTHLY_RATE * months_late_int,
+        LATE_PENALTY_PAYMENT_CAP)
+    late_payment_computed = round(unpaid_balance * late_payment_pct, 2)
+
+    late_payment_assessed = max(0.0, round(late_payment_computed - late_filing_penalty, 2))
+    total_penalty = round(late_filing_penalty + late_payment_assessed, 2)
+    return {
+        "months_late_int": months_late_int,
+        "late_filing_penalty": late_filing_penalty,
+        "late_payment_computed": late_payment_computed,
+        "late_payment_assessed": late_payment_assessed,
+        "total_penalty": total_penalty,
+    }
+
+
+# --- California additional tax on early retirement distributions (FTB
+# 3805P Part I, R&TC Section 17085) -- Income Coverage Blueprint Phase
+# 3's sixth build, and the FIRST item this session where the "broad
+# survey sketch was wrong" pattern led to a NARROWER build than
+# originally scoped, not a corrected formula. A dedicated verification
+# pass confirmed the 2.5% rate (not folklore -- R&TC 17085(c)(1) states
+# "2 1/2 percent" directly, FTB 3805P Line 4 confirms "Multiply line 3
+# by 2 1/2% (.025)") but found real complexity the survey's one-line
+# sketch didn't capture: FTB's own instructions state directly
+# "California does not conform to all of the federal exceptions to the
+# additional tax on early distributions" -- TWO confirmed CA-specific
+# exception-list divergences from the federal Form 5329 list (federal
+# codes 17 -- phased-retirement annuitants -- and 18 -- auto-enrollment
+# permissible withdrawals -- are federally valid but explicitly "Not
+# applicable" for California), a 25-code, YEAR-VERSIONED exception list
+# (not static -- SB 711's 2025 conformity jump added several 2025-new
+# codes), a 6% override (not 2.5%) for early SIMPLE IRA distributions
+# within the plan's first 2 years, and ENTIRELY DIFFERENT rates for
+# other account types this module does NOT model (12.5% for Archer MSA
+# non-qualified distributions under R&TC 17215; 50% for Medicare
+# Advantage MSA non-qualified distributions).
+#
+# SCOPE, deliberately narrower than "the whole form": this models ONLY
+# Part I (IRA/qualified-plan/annuity/MEC early distributions) at the
+# 2.5% base rate (or 6% if the taxpayer explicitly states a SIMPLE IRA
+# distribution within its first 2 years) -- the single most common
+# real-world case, a taxpayer with NO exception who simply took an
+# early withdrawal. Rather than build a partial/unverified 25-code
+# exception table, ANY exception-flavored language in the question
+# (disability, death, divorce/QDRO, medical expenses, first-time home,
+# higher education, substantially equal periodic payments, birth/
+# adoption, disaster, military, public safety, terminal illness,
+# domestic abuse, emergency expense, etc.) routes to a dedicated
+# clarifying message explaining that CA's exception list mostly but NOT
+# fully matches federal's, rather than silently guessing whether that
+# specific exception applies for California -- given FTB's own
+# confirmed divergence on 2 of 25+ codes, guessing here is a real risk
+# of a confidently WRONG answer, not just an incomplete one. Archer/
+# Medicare Advantage MSA distributions are separately detected and
+# deferred (different rates entirely, not modeled).
+EARLY_DISTRIBUTION_CITATION = "FTB Form 3805P Instructions, Part I; R&TC Section 17085"
+EARLY_DISTRIBUTION_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3805p-instructions.html"
+
+EARLY_DISTRIBUTION_BASE_RATE = 0.025    # 2.5%, R&TC 17085(c)(1)
+EARLY_DISTRIBUTION_SIMPLE_RATE = 0.06   # 6% for early-SIMPLE-IRA, 17085(c)(2)
+
+EARLY_DISTRIBUTION_TERMS = {
+    "early distribution tax", "early withdrawal tax", "early distribution penalty",
+    "early withdrawal penalty", "additional tax on early distribution",
+    "additional tax on my early distribution", "form 3805p", "ftb 3805p",
+}
+EARLY_DISTRIBUTION_SIMPLE_TERMS = {
+    "simple ira", "simple plan",
+}
+# Broad by design (favors deferring over guessing) -- any of these
+# alongside EARLY_DISTRIBUTION_TERMS routes to the dedicated exception
+# clarifying message rather than a computed number, since FTB's own
+# text confirms California's exception list does NOT fully match
+# federal's and this module doesn't model the full 25-code table.
+EARLY_DISTRIBUTION_EXCEPTION_TERMS = {
+    "disability", "disabled", "died", "death", "deceased", "divorce", "qdro",
+    "medical expense", "medical expenses", "first-time home", "first time home",
+    "higher education", "education expense", "substantially equal periodic",
+    "birth", "adoption", "disaster", "reservist", "military", "public safety",
+    "terminal illness", "domestic abuse", "emergency expense", "exception",
+    "levy", "irs levy", "ftb levy",
+}
+EARLY_DISTRIBUTION_OTHER_ACCOUNT_TERMS = {
+    "archer msa", "medicare advantage msa", "coverdell", "able account", "hsa",
+}
+EARLY_DISTRIBUTION_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "capital gain", "capital loss",
+    "trust", "estate", "gambling", "gambled", "betting", "wagering",
+}
+
+
+def detect_early_distribution_signal(question: str) -> bool:
+    """No filing status needed -- a flat percentage of a stated taxable
+    distribution amount, confirmed rate-only (not bracket-dependent)
+    directly from R&TC 17085's own text. Returns False (routes
+    elsewhere) if exception-flavored language or a non-Part-I account
+    type is present -- see the module note above for why guessing on
+    either is a real risk, not just an incompleteness."""
+    q = question.lower()
+    if not any(t in q for t in EARLY_DISTRIBUTION_TERMS):
+        return False
+    if any(t in q for t in EARLY_DISTRIBUTION_COMPLEXITY_EXCLUDE):
+        return False
+    if any(t in q for t in EARLY_DISTRIBUTION_EXCEPTION_TERMS):
+        return False
+    if any(t in q for t in EARLY_DISTRIBUTION_OTHER_ACCOUNT_TERMS):
+        return False
+    return True
+
+
+def detect_early_distribution_exception_mention(question: str) -> bool:
+    """True iff exception-flavored language is present alongside this
+    feature's own trigger vocabulary -- routes to a dedicated
+    clarifying message (FTB's exception list doesn't fully match
+    federal's, confirmed divergence on 2+ codes) rather than a silently
+    guessed computation."""
+    q = question.lower()
+    return (any(t in q for t in EARLY_DISTRIBUTION_TERMS)
+            and any(t in q for t in EARLY_DISTRIBUTION_EXCEPTION_TERMS))
+
+
+def detect_early_distribution_other_account_mention(question: str) -> bool:
+    """True iff a non-Part-I account type (Archer MSA, Medicare
+    Advantage MSA, Coverdell, ABLE, HSA) is mentioned -- these use
+    DIFFERENT rates (12.5%, 50%, or no CA analog) this module does not
+    model, so a Part-I-only computation would be silently wrong if
+    applied to them."""
+    q = question.lower()
+    return (any(t in q for t in EARLY_DISTRIBUTION_TERMS)
+            and any(t in q for t in EARLY_DISTRIBUTION_OTHER_ACCOUNT_TERMS))
+
+
+def compute_early_distribution_tax(taxable_distribution: float, is_simple_early: bool = False):
+    """R&TC 17085(c) -- 2.5% of the TAXABLE portion of an early
+    retirement distribution (already net of basis/rollovers -- same
+    "trust the input" precedent as every other stated-figure feature in
+    this codebase, not a gross-distribution figure), or 6% if the
+    taxpayer explicitly states a SIMPLE IRA distribution within its
+    first 2 plan-years."""
+    if taxable_distribution is None or taxable_distribution < 0:
+        return None
+    rate = EARLY_DISTRIBUTION_SIMPLE_RATE if is_simple_early else EARLY_DISTRIBUTION_BASE_RATE
+    tax = round(taxable_distribution * rate, 2)
+    return {"rate": rate, "tax": tax}
+
+
+# --- Nonrefundable Child and Dependent Care Expenses Credit (FTB Form
+# 3506, credit code 232) -- Income Coverage Blueprint Phase 3's seventh
+# build. A dedicated verification pass found the SAME "credit = flat %
+# of the federal credit" claim from the broad survey is a valid
+# shortcut only for a common but SPECIFIC case -- the SIXTH claim from
+# that survey needing correction, this time about scope/validity rather
+# than a missing formula detail.
+#
+# FTB Form 3506 is structurally a FULL PARALLEL WORKSHEET (qualifying
+# expenses x a federal-AGI-based decimal chart that replicates the
+# federal Form 2441 formula exactly, THEN x a SECOND, genuinely CA-
+# specific federal-AGI-based decimal chart) -- it does NOT read a
+# federal credit dollar figure as an input anywhere on the form. BUT:
+# when (a) the taxpayer is a full-year CA resident, (b) all care was
+# provided IN California (CA restricts qualifying expenses to CA-source
+# care; federal has no such restriction), and (c) no employer dependent-
+# care benefits were received, the form's own Line 7 chart exactly
+# reproduces the federal calculation, so CA credit = federal credit x
+# the CA-specific Line 9 percentage becomes an exact equivalence, not
+# an approximation. This module models ONLY that case -- detected
+# scope-exclusion terms (nonresident/part-year/out-of-state-care/
+# employer-dependent-care-benefits) route to a dedicated clarifying
+# message rather than silently applying the shortcut where it doesn't
+# hold.
+#
+# LINE 9 PERCENTAGE TABLE, verified directly against the actual 2025
+# FTB Form 3506 PDF (federal AGI, NOT California AGI -- confirmed twice
+# in the instructions):
+#   $40,000 or less           -> 50%
+#   $40,000-$70,000           -> 43%
+#   $70,000-$100,000          -> 34%
+#   over $100,000             -> DISQUALIFIED ENTIRELY (a hard
+#                                 eligibility cutoff, not a phase-down
+#                                 to a smaller percentage -- FTB's own
+#                                 form literally says "Stop. You do not
+#                                 qualify for this credit.")
+# Nonrefundable, no carryover (confirmed directly from Schedule P
+# (540)'s own credit classification: code 232 has "no carryover
+# provisions" -- any unused amount is simply lost, not tracked forward).
+CDC_CREDIT_CITATION = "FTB Form 3506 Instructions, Line 9; Schedule P (540)"
+CDC_CREDIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3506-instructions.html"
+
+CDC_CREDIT_AGI_CUTOFF = 100000.0
+
+CDC_CREDIT_TERMS = {
+    "child and dependent care credit", "child and dependent care expenses credit",
+    "dependent care expenses credit", "dependent care credit", "child care credit",
+    "form 3506",
+}
+CDC_CREDIT_FEDERAL_CREDIT_TERMS = {
+    "federal child and dependent care credit", "federal dependent care credit",
+    "federal credit", "my federal credit",
+}
+CDC_CREDIT_FEDERAL_AGI_TERMS = {
+    "federal agi", "federal adjusted gross income",
+}
+# Detected and deferred rather than silently assumed away -- the "CA
+# credit = federal credit x Line 9 percentage" shortcut this module
+# relies on is only an exact equivalence for full-year CA residents
+# with all care provided in California and no employer dependent-care
+# benefits received.
+CDC_CREDIT_OUT_OF_SCOPE_TERMS = {
+    "nonresident", "non-resident", "part-year", "part year",
+    "out of state", "out-of-state", "care outside california",
+    "dependent care benefits", "box 10", "employer benefits",
+    "employer-provided", "employer provided",
+}
+
+
+def detect_cdc_credit_signal(question: str) -> bool:
+    q = question.lower()
+    if not any(t in q for t in CDC_CREDIT_TERMS):
+        return False
+    if any(t in q for t in CDC_CREDIT_OUT_OF_SCOPE_TERMS):
+        return False
+    return True
+
+
+def detect_cdc_credit_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside a scope-exclusion term -- routes to a dedicated
+    clarifying message since the federal-credit-shortcut equivalence
+    this module relies on doesn't hold for nonresidents/part-year
+    residents, out-of-state care, or employer dependent-care benefits."""
+    q = question.lower()
+    return (any(t in q for t in CDC_CREDIT_TERMS)
+            and any(t in q for t in CDC_CREDIT_OUT_OF_SCOPE_TERMS))
+
+
+def compute_cdc_credit(federal_credit_amount: float, federal_agi: float):
+    """FTB Form 3506 Line 9 -- see module note above for the exact
+    federal-AGI-based percentage table and the equivalence conditions
+    this shortcut relies on. Returns a dict with disqualified=True (not
+    None) when federal_agi exceeds $100,000, so the caller can give a
+    specific "you don't qualify" message rather than a generic
+    can't-compute defer."""
+    if federal_credit_amount is None or federal_credit_amount < 0:
+        return None
+    if federal_agi is None or federal_agi < 0:
+        return None
+    if federal_agi > CDC_CREDIT_AGI_CUTOFF:
+        return {"disqualified": True, "pct": None, "credit": 0.0}
+    if federal_agi <= 40000.0:
+        pct = 0.50
+    elif federal_agi <= 70000.0:
+        pct = 0.43
+    else:
+        pct = 0.34
+    credit = round(federal_credit_amount * pct, 2)
+    return {"disqualified": False, "pct": pct, "credit": credit}
+
+
+# --- Child Adoption Costs Credit (Form 540 Credit Chart code 197, worksheet
+# in the 2025 Form 540 booklet p.15) -- Income Coverage Blueprint Phase 3's
+# eighth build. A dedicated verification pass corrected an unverified ledger
+# note (itself carried over from the original Phase 3 survey, whose formula
+# claims have been wrong or incomplete on 7 of 8 features built so far):
+# the note's 50%/$2,500-per-child/public-agency-custody claims all checked
+# out true, but it was missing (a) a SECOND eligibility gate (the child must
+# also be a US citizen or legal resident -- confirmed from FTB's own
+# verbatim text: "In the custody of a California public agency or a
+# California political subdivision" AND "A citizen or legal resident of the
+# United States"), (b) the enumerated 3-category cost list (agency/DSS fees,
+# unreimbursed medical expenses, family travel expenses -- not a generic
+# "costs" blob), (c) a multi-year failed-then-successful-adoption
+# aggregation rule, and (d) a Schedule CA (540) Line 27 addback if the same
+# costs were also itemized on federal Schedule A. There is NO separate
+# numbered FTB form for this credit (no "FTB 3600" exists, unlike the
+# ledger's original guess) -- it's computed entirely on the unnumbered
+# worksheet embedded in the Form 540 booklet itself.
+#
+# Modeled: the credit formula (50% of stated qualifying costs, capped
+# $2,500/child) AND the real nonrefundable-with-carryover mechanic --
+# unlike the CDC credit (built as a pure standalone formula since its
+# federal-AGI-based amounts are small enough relative to typical CA tax
+# liability at that income range to rarely bind), this credit's $2,500 cap
+# is large relative to the likely CA tax liability of its target population
+# (families adopting from CA foster care/public-agency custody, often
+# moderate income) -- so the SAME "current-year-absorption, capped at CA
+# tax liability, carryforward disclosed not tracked" pattern already used
+# for the PTE credit is used here too, not the CDC credit's simpler
+# standalone shape.
+#
+# NOT modeled, disclosed in the answer text: the second (citizenship/legal-
+# residency) eligibility gate is ASSUMED satisfied rather than elicited as
+# its own fact (a child already in CA public agency custody is virtually
+# always a US citizen or legal resident in practice, and asking for a third
+# gating fact on top of "public agency custody" was judged to add friction
+# without meaningfully changing the answer for the realistic population);
+# the multi-year failed-attempt aggregation rule; the federal-Schedule-A
+# itemized-deduction addback (a separate Schedule CA (540) Line 27 item,
+# already tracked as not_applicable in schedule_ca_inventory.py); the
+# per-adoption-not-per-return cap for taxpayers adopting multiple children
+# in one year (each needs its own separate $2,500-capped computation, not
+# summed here); and Schedule P's credit-ordering against other nonrefundable
+# credits (same "each standalone feature is independent" precedent as
+# OSTC/PTE not coordinating with each other).
+ADOPTION_CREDIT_CITATION = "2025 Form 540 Booklet, Credit for Child Adoption Costs Worksheet, Code 197"
+ADOPTION_CREDIT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-booklet.pdf"
+ADOPTION_CREDIT_RATE = 0.50
+ADOPTION_CREDIT_CAP_PER_CHILD = 2500.0
+
+ADOPTION_CREDIT_TERMS = {
+    "adoption credit", "adoption costs credit", "adoption cost credit",
+    "child adoption credit", "credit for adoption", "credit for child adoption",
+    "credit for child adoption costs", "adoption costs tax credit",
+}
+ADOPTION_CREDIT_PUBLIC_AGENCY_TERMS = {
+    "public agency", "foster care", "foster child", "foster son", "foster daughter",
+    "county custody", "state custody", "county foster", "dependency court",
+    "adopted from foster care", "adopted through foster care",
+    "california public agency", "ca public agency", "department of social services",
+    "adopted through the county", "adopted through the state",
+    "adopted through a public agency",
+}
+ADOPTION_CREDIT_OUT_OF_SCOPE_TERMS = {
+    "private adoption", "privately", "independent adoption",
+    "international adoption", "adopted internationally", "adopted from another country",
+    "out of state adoption", "out-of-state adoption", "adopted from another state",
+    "stepparent adoption", "step-parent adoption", "stepchild adoption",
+}
+ADOPTION_CREDIT_COST_TERMS = {
+    "adoption costs", "adoption expenses", "adoption cost", "adoption fees",
+    "cost of adopting", "costs of adopting", "spent on the adoption",
+    "paid in adoption costs", "paid in adoption expenses", "qualifying costs",
+}
+ADOPTION_CREDIT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _adoption_credit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in ADOPTION_CREDIT_TERMS):
+        return False
+    if any(t in q for t in ADOPTION_CREDIT_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_adoption_credit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine, IN-SCOPE
+    adoption credit question -- requires an explicit CA-public-agency/
+    foster-care signal (the credit's real eligibility gate) and no
+    out-of-scope term. Ambiguous phrasing (adoption credit mentioned with
+    NEITHER a public-agency signal NOR an out-of-scope term) deliberately
+    returns None here so it falls through to a dedicated clarifying
+    message asking specifically about public-agency custody, rather than
+    silently assuming eligibility."""
+    q = question.lower()
+    if not _adoption_credit_base_signal_ok(q):
+        return None
+    if any(t in q for t in ADOPTION_CREDIT_OUT_OF_SCOPE_TERMS):
+        return None
+    if not any(t in q for t in ADOPTION_CREDIT_PUBLIC_AGENCY_TERMS):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_adoption_credit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _adoption_credit_base_signal_ok(q):
+        return False
+    if any(t in q for t in ADOPTION_CREDIT_OUT_OF_SCOPE_TERMS):
+        return False
+    if not any(t in q for t in ADOPTION_CREDIT_PUBLIC_AGENCY_TERMS):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_adoption_credit_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside an explicit out-of-scope term (private/international/
+    out-of-state/stepparent adoption) -- the credit's own eligibility
+    restriction to CA-public-agency custody genuinely excludes these,
+    per FTB's own text: "This credit does not apply when a child is
+    adopted from another country or another state, or was not in the
+    custody of a California public agency or a California political
+    subdivision.\""""
+    q = question.lower()
+    return (any(t in q for t in ADOPTION_CREDIT_TERMS)
+            and any(t in q for t in ADOPTION_CREDIT_OUT_OF_SCOPE_TERMS))
+
+
+def detect_adoption_credit_ambiguous_eligibility(question: str) -> bool:
+    """True iff this feature's trigger vocabulary is present but NEITHER
+    a public-agency signal NOR an out-of-scope term is stated -- routes
+    to a dedicated clarifying message asking specifically about the
+    eligibility gate, rather than silently guessing."""
+    q = question.lower()
+    if not any(t in q for t in ADOPTION_CREDIT_TERMS):
+        return False
+    if any(t in q for t in ADOPTION_CREDIT_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in ADOPTION_CREDIT_PUBLIC_AGENCY_TERMS):
+        return False
+    return True
+
+
+def compute_adoption_credit(qualifying_costs: float):
+    """50% of stated qualifying costs, capped at $2,500 per child."""
+    if qualifying_costs is None or qualifying_costs < 0:
+        return None
+    credit_available = round(min(qualifying_costs * ADOPTION_CREDIT_RATE, ADOPTION_CREDIT_CAP_PER_CHILD), 2)
+    return {"credit_available": credit_available}
+
+
+def compute_adoption_credit_ca_tax(conn, income_amount: float, filing_status: str, qualifying_costs: float,
+                                     tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as CA gross income/AGI, same
+    simplification as everywhere else. Nonrefundable, capped at CA tax
+    liability this year (current-year absorption only, same pattern as
+    the PTE credit) -- excess disclosed as carrying forward indefinitely
+    per FTB's own text, not tracked across years by this system. Reduces
+    bracket_tax specifically, surtax re-added unchanged afterward, same
+    ordering as every other credit built this session."""
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    credit_calc = compute_adoption_credit(qualifying_costs)
+    if not credit_calc:
+        return None
+    bracket_tax_before_credit = calc["bracket_tax"]
+    credit_used = min(credit_calc["credit_available"], bracket_tax_before_credit)
+    remaining_carryover = credit_calc["credit_available"] - credit_used
+    bracket_tax_after_credit = max(0.0, bracket_tax_before_credit - credit_used)
+    total_tax_after_credit = round(bracket_tax_after_credit + calc["surtax"], 2)
+    return {**calc, "income_amount": income_amount, "standard_deduction": dedu["amount"],
+            "taxable_income": taxable_income, "qualifying_costs": qualifying_costs,
+            "credit": {**credit_calc, "credit_used": credit_used, "remaining_carryover": remaining_carryover},
+            "bracket_tax_before_credit": bracket_tax_before_credit,
+            "bracket_tax": bracket_tax_after_credit, "total_tax": total_tax_after_credit}
+
+
+# --- College Access Tax Credit (Form 540 Credit Chart code 235, FTB Form
+# 3592) -- Income Coverage Blueprint Phase 3's ninth build. A dedicated
+# verification pass confirmed the ledger note's core claim -- 50% of a
+# stated contribution, for the 2025 tax year specifically -- but the rate
+# is YEAR-KEYED, not a permanent constant (60% TY2014, 55% TY2015, 50%
+# TY2016-TY2027), and the credit is far more than a self-computed pass-
+# through: (a) the taxpayer's contribution isn't automatically creditable
+# -- they must FIRST apply to CEFA (the CA Educational Facilities
+# Authority), receive a reservation, make the contribution matching that
+# reservation, THEN receive a certification stating the actual certified
+# amount; (b) a $500 million/year statewide allocation pool, first-come-
+# first-served, meaning the true certified amount could be less than 50%
+# of an intended contribution if the pool nears exhaustion (though by the
+# time a contribution is actually MADE, per CEFA's own process it has
+# already been matched to a granted reservation -- so for a COMPLETED
+# contribution specifically, 50% x the contributed amount is a safe
+# estimate of what was certified, not a guess); (c) nonrefundable with a
+# SIX-year carryover (not five, unlike the PTE credit built earlier this
+# session -- verify carryover length per-credit, don't assume it's always
+# five); (d) the credit sunsets for tax years beginning on/after January 1,
+# 2028 (guarded below via CATC_SUNSET_TAX_YEAR, though moot at
+# DEFAULT_TAX_YEAR=2025); (e) a separate $5,000,000 aggregate business-
+# credit ceiling applies for TY2024-2026 specifically (disclosed, not
+# modeled -- moot for the vast majority of individual filers); and (f) a
+# Schedule CA (540) Line 11 Column B addback applies if the same
+# contribution was also deducted on federal Schedule A (already tracked
+# as not_applicable in schedule_ca_inventory.py's own "College Access Tax
+# Credit contribution addback" entry -- not duplicated here).
+#
+# Modeled: 50% of a stated CONTRIBUTION amount (not a separately-elicited
+# "certified amount" -- see (b) above for why these are treated as
+# equivalent for a completed contribution), capped at current-year CA tax
+# liability with the carryover disclosed (not tracked), same pattern as
+# the PTE credit and the adoption credit. NOT modeled, disclosed in the
+# answer text: the $500M pool/first-come-first-served allocation itself
+# (this assistant cannot know CEFA's real-time pool status); the
+# application/reservation prerequisite (assumes the taxpayer already
+# completed CEFA's process, since they're describing a completed
+# contribution); the $5M aggregate business-credit ceiling; the Schedule
+# CA Line 11 addback; non-CA-resident eligibility (CEFA's own FAQ
+# explicitly declines to answer this, so not confirmed either way); and
+# Schedule P's credit-ordering against other nonrefundable credits.
+CATC_CITATION = "FTB Form 3592 (2025) Instructions, Sections B-D; R&TC Section 17053.85"
+CATC_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3592.pdf"
+CATC_RATE = 0.50
+CATC_SUNSET_TAX_YEAR = 2028   # sunsets for tax years beginning on/after this
+
+CATC_TERMS = {
+    "college access tax credit", "college access credit",
+    "catc fund", "college access tax credit fund", "form 3592",
+}
+CATC_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _catc_credit_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in CATC_TERMS):
+        return False
+    if any(t in q for t in CATC_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_catc_credit_signal(question: str):
+    """Returns filing_status iff this looks like a genuine College Access
+    Tax Credit question -- mirrors the plain wage-only path's scope
+    exactly (full COMPLEXITY_EXCLUDE; no self-referential collision)."""
+    q = question.lower()
+    if not _catc_credit_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_catc_credit_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _catc_credit_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_catc_credit(contribution_amount: float):
+    """50% of a stated CONTRIBUTION amount -- see module note above for
+    why this is treated as equivalent to the CEFA-certified amount for a
+    COMPLETED contribution. No per-taxpayer dollar cap exists (bounded
+    only by the $500M/year statewide pool, not modeled here)."""
+    if contribution_amount is None or contribution_amount < 0:
+        return None
+    credit_available = round(contribution_amount * CATC_RATE, 2)
+    return {"credit_available": credit_available}
+
+
+def compute_catc_credit_ca_tax(conn, income_amount: float, filing_status: str, contribution_amount: float,
+                                 tax_year: int = DEFAULT_TAX_YEAR):
+    """income_amount is treated as CA gross income/AGI, same
+    simplification as everywhere else. Nonrefundable, capped at CA tax
+    liability this year (current-year absorption only), SIX-year
+    carryover disclosed not tracked -- verify carryover length per-
+    credit, this one differs from the PTE credit's five years. Returns
+    None for tax_year >= CATC_SUNSET_TAX_YEAR (the credit has sunset;
+    moot at DEFAULT_TAX_YEAR=2025 but a real future gate). Reduces
+    bracket_tax specifically, surtax re-added unchanged afterward, same
+    ordering as every other credit built this session."""
+    if tax_year >= CATC_SUNSET_TAX_YEAR:
+        return None
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    credit_calc = compute_catc_credit(contribution_amount)
+    if not credit_calc:
+        return None
+    bracket_tax_before_credit = calc["bracket_tax"]
+    credit_used = min(credit_calc["credit_available"], bracket_tax_before_credit)
+    remaining_carryover = credit_calc["credit_available"] - credit_used
+    bracket_tax_after_credit = max(0.0, bracket_tax_before_credit - credit_used)
+    total_tax_after_credit = round(bracket_tax_after_credit + calc["surtax"], 2)
+    return {**calc, "income_amount": income_amount, "standard_deduction": dedu["amount"],
+            "taxable_income": taxable_income, "contribution_amount": contribution_amount,
+            "credit": {**credit_calc, "credit_used": credit_used, "remaining_carryover": remaining_carryover},
+            "bracket_tax_before_credit": bracket_tax_before_credit,
+            "bracket_tax": bracket_tax_after_credit, "total_tax": total_tax_after_credit}
+
+
+# --- Individual Shared Responsibility (ISR) Penalty (Form 540 Line 92,
+# FTB 3853) -- Income Coverage Blueprint Phase 3's tenth build, and the
+# FIRST item this session where a dedicated research pass found the
+# ledger's "too complex, same class as AMT" verdict itself WRONG, not just
+# incomplete -- the same "look harder for a common-case slice" discipline
+# that already worked once for the early-distribution tax. The full
+# formula is a self-contained, linear 5-step worksheet published directly
+# in FTB 3853's own 2025 instructions (pp.13-16), with every dollar figure
+# stated explicitly -- not synthesized from scattered code sections the
+# way AMT's ~11 preference categories would require.
+#
+# VERIFIED 2025 FORMULA (FTB 3853 Instructions 2025, Individual Shared
+# Responsibility Penalty Worksheet, Steps 1-5):
+#   penalty = min(max(flat_dollar, pct_income), avg_premium_cap)
+#   flat_dollar = min($950 x n_adults + $475 x n_children, $2,850)
+#   pct_income = 2.5% x max(0, household_income - filing_threshold)
+#   avg_premium_cap = $377/month x 12 x min(household_size, 5)
+#   -- and BEFORE any of that: if household_income <= filing_threshold,
+#      the ENTIRE penalty is $0 (Step 4's mandatory gate, not a separate
+#      "exemption" a filer must think to claim).
+#
+# SCOPED to the tractable common case, mirroring the early-distribution-
+# tax pattern exactly: uninsured the ENTIRE tax year (full-year, no
+# partial-year proration), no coverage exemption claimed (hardship,
+# unaffordability, religious, tribal, incarceration, short-coverage-gap,
+# etc. -- all genuinely case-by-case per FTB's own text, same class as
+# the late-penalty reasonable-cause redirect), and nobody in the
+# household turned 18 during the year (their per-person rate would
+# otherwise need to change mid-year, forcing the full monthly worksheet).
+# Any of those signals routes to a dedicated clarifying/out-of-scope
+# message rather than a guess.
+#
+# ALSO DELIBERATELY SIMPLIFIED, disclosed in the answer text: assumes the
+# filer (and spouse/RDP, if MFJ) are under 65 -- the filing-threshold
+# lookup table below uses ONLY the under-65 rows; a 65+ filer's real
+# threshold is higher, which this build does not use (a real, narrow
+# overstatement risk near the threshold boundary, same disclosure
+# discipline as every other "common case only" scope decision this
+# session); treats the stated household-income figure as the complete
+# "applicable household income" (doesn't separately add CA tax-exempt
+# interest income or a dependent's own MAGI if that dependent
+# independently has a filing requirement -- both narrow additions per
+# FTB's definition); and doesn't model the "unclaimed-but-claimable
+# household member" edge case (a household can include someone the filer
+# COULD but does not claim as a dependent).
+#
+# CA ADJUSTED GROSS INCOME filing-threshold chart (FTB 3853 Instructions
+# 2025, "Do I Have to File?", p.18, UNDER-65 rows only), keyed by filing
+# status and dependent count (2 = "2 or more"). Cross-verified against
+# the instructions' own worked examples (Example 1: MFJ, 3 dependents,
+# threshold $64,419 -- matches mfj[2] below exactly). QSS has no valid
+# 0-dependent combination (a qualifying surviving spouse requires a
+# dependent child by definition).
+ISR_FILING_THRESHOLD_AGI = {
+    "single": {0: 18353.0, 1: 34186.0, 2: 46061.0},
+    "hoh":    {0: 18353.0, 1: 34186.0, 2: 46061.0},
+    "mfs":    {0: 18353.0, 1: 34186.0, 2: 46061.0},
+    "mfj":    {0: 36711.0, 1: 52544.0, 2: 64419.0},
+    "qss":    {1: 34186.0, 2: 46061.0},
+}
+
+ISR_PENALTY_CITATION = "FTB 3853 (2025) Instructions, Individual Shared Responsibility Penalty Worksheet, Steps 1-5; R&TC Section 61050"
+ISR_PENALTY_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3853-instructions.pdf"
+ISR_PENALTY_ADULT_RATE = 950.0
+ISR_PENALTY_CHILD_RATE = 475.0
+ISR_PENALTY_FLAT_CAP = 2850.0
+ISR_PENALTY_INCOME_RATE = 0.025
+ISR_PENALTY_AVG_PREMIUM_MONTHLY = 377.0
+ISR_PENALTY_MAX_HOUSEHOLD_FOR_CAP = 5
+
+ISR_PENALTY_TERMS = {
+    "individual shared responsibility penalty", "isr penalty", "shared responsibility penalty",
+    "no health insurance penalty", "health insurance penalty", "uninsured penalty",
+    "penalty for not having health insurance", "penalty for being uninsured",
+    "form 3853", "health care mandate penalty", "individual mandate penalty",
+}
+ISR_PENALTY_FULL_YEAR_TERMS = {
+    "uninsured all year", "no health insurance all year", "did not have health insurance all year",
+    "didn't have health insurance all year", "no insurance all year",
+    "without health insurance all year", "uninsured the entire year", "no coverage all year",
+    "without coverage all year", "uninsured for the whole year", "uninsured for the entire year",
+}
+ISR_PENALTY_EXCLUDE_TERMS = {
+    "exemption", "hardship", "unaffordable", "affordability", "religious", "incarcerated",
+    "incarceration", "tribal", "short coverage gap", "medi-cal", "medical", "health care sharing ministry",
+    "healthcare sharing ministry", "part of the year", "part-year", "part year", "some months",
+    "a few months", "turned 18", "turning 18", "18th birthday", "65 or older", "over 65",
+    "age 65", "65 years old",
+}
+
+
+def _isr_penalty_base_signal_ok(q: str) -> bool:
+    """No COMPUTE_TRIGGERS requirement -- this feature's own trigger
+    vocabulary ("ISR penalty", "shared responsibility penalty", etc.) is
+    specific enough on its own, same precedent as the late-filing/late-
+    payment penalty."""
+    if not any(t in q for t in ISR_PENALTY_TERMS):
+        return False
+    if any(t in q for t in ISR_PENALTY_EXCLUDE_TERMS):
+        return False
+    return True
+
+
+def detect_isr_penalty_signal(question: str):
+    """Returns filing_status iff this looks like a genuine, IN-SCOPE ISR
+    penalty question -- requires an explicit full-year-uninsured
+    confirmation (the tractable slice's own gating fact); ambiguous or
+    partial-year phrasing deliberately returns None here."""
+    q = question.lower()
+    if not _isr_penalty_base_signal_ok(q):
+        return None
+    if not any(t in q for t in ISR_PENALTY_FULL_YEAR_TERMS):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_isr_penalty_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _isr_penalty_base_signal_ok(q):
+        return False
+    if not any(t in q for t in ISR_PENALTY_FULL_YEAR_TERMS):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_isr_penalty_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present alongside
+    an exemption/partial-year/65+/mid-year-18th-birthday term -- each of
+    these genuinely changes the computation (or requires a case-by-case
+    FTB determination) in a way this scoped build does not attempt."""
+    q = question.lower()
+    return (any(t in q for t in ISR_PENALTY_TERMS)
+            and any(t in q for t in ISR_PENALTY_EXCLUDE_TERMS))
+
+
+def detect_isr_penalty_ambiguous_coverage(question: str) -> bool:
+    """True iff ISR-penalty vocabulary is present but the question states
+    neither a full-year-uninsured confirmation nor an out-of-scope term --
+    routes to a dedicated clarifying question rather than assuming
+    full-year coverage status either way."""
+    q = question.lower()
+    if not any(t in q for t in ISR_PENALTY_TERMS):
+        return False
+    if any(t in q for t in ISR_PENALTY_EXCLUDE_TERMS):
+        return False
+    if any(t in q for t in ISR_PENALTY_FULL_YEAR_TERMS):
+        return False
+    return True
+
+
+def detect_isr_penalty_household_adults(question: str):
+    """Returns a stated adult-count (int, including the filer and spouse/
+    RDP if MFJ) or None if not stated -- REQUIRED, unlike dependent
+    counts elsewhere in this module, since the formula has no sensible
+    default (every household has at least one adult, but guessing which
+    one risks silently under/overstating the flat-dollar and premium-cap
+    terms)."""
+    q = question.lower()
+    m = re.search(r"(\d+)\s*adults?\b", q)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\bone adult\b", q):
+        return 1
+    if re.search(r"\btwo adults\b", q):
+        return 2
+    if re.search(r"\bthree adults\b", q):
+        return 3
+    return None
+
+
+def detect_isr_penalty_household_children(question: str):
+    """Returns a stated child-count (int) or None if not stated -- treated
+    as 0 children by the caller if not stated, same "missing count means
+    zero" precedent as the exemption credit's dependent count."""
+    q = question.lower()
+    m = re.search(r"(\d+)\s*(?:children|child)\b", q)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\bone child\b", q):
+        return 1
+    if re.search(r"\btwo children\b", q):
+        return 2
+    if re.search(r"\bthree children\b", q):
+        return 3
+    if re.search(r"\bno children\b", q):
+        return 0
+    return None
+
+
+def compute_isr_penalty(filing_status: str, n_adults: int, n_children: int, household_income: float):
+    """See module note above for the verified 2025 formula and its
+    scoping. dependent_count for the filing-threshold lookup is derived
+    (not separately asked): adults beyond the filer/spouse, plus all
+    children, are treated as dependents claimed."""
+    if n_adults is None or n_adults < 1:
+        return None
+    n_children = n_children or 0
+    if n_children < 0:
+        return None
+    if household_income is None or household_income < 0:
+        return None
+    thresholds = ISR_FILING_THRESHOLD_AGI.get(filing_status)
+    if not thresholds:
+        return None
+    base_adults = 2 if filing_status == "mfj" else 1
+    dependent_count = max(0, n_adults - base_adults) + n_children
+    threshold_bucket = min(dependent_count, 2)
+    filing_threshold = thresholds.get(threshold_bucket)
+    if filing_threshold is None:
+        return None   # e.g. QSS with 0 dependents -- not a valid combination
+    if household_income <= filing_threshold:
+        return {"exempt_below_threshold": True, "penalty": 0.0, "filing_threshold": filing_threshold}
+    flat_dollar = round(min(ISR_PENALTY_ADULT_RATE * n_adults + ISR_PENALTY_CHILD_RATE * n_children,
+                             ISR_PENALTY_FLAT_CAP), 2)
+    pct_income = round(ISR_PENALTY_INCOME_RATE * (household_income - filing_threshold), 2)
+    base_penalty = max(flat_dollar, pct_income)
+    household_size = min(n_adults + n_children, ISR_PENALTY_MAX_HOUSEHOLD_FOR_CAP)
+    avg_premium_cap = round(ISR_PENALTY_AVG_PREMIUM_MONTHLY * 12 * household_size, 2)
+    penalty = round(min(base_penalty, avg_premium_cap), 2)
+    return {"exempt_below_threshold": False, "penalty": penalty, "filing_threshold": filing_threshold,
+            "flat_dollar": flat_dollar, "pct_income": pct_income, "avg_premium_cap": avg_premium_cap}
+
+
+# --- California Alternative Minimum Tax "screen" (Schedule P (540), Form
+# 540 Line 61) -- Income Coverage Blueprint Phase 3's eleventh build, and
+# a DIFFERENT shape of tractable slice than every other Phase 3 item:
+# not a narrowed-but-still-general formula, but a genuine "does this
+# apply to you at all" screen for the specific population that's already
+# this whole codebase's baseline case -- a standard-deduction, wage-only
+# filer with zero AMT preference items.
+#
+# The GENERAL AMT case (itemizers, ISO exercisers, passive-activity/
+# depreciation adjusters, private-activity-bond holders, K-1 preference
+# pass-throughs -- Schedule P (540) Side 1 Lines 2-13) genuinely still
+# needs the full ~11-category AMTI build this ledger already correctly
+# deferred -- nothing here changes that population's complexity.
+#
+# What a dedicated verification pass found, directly from FTB's own 2025
+# Schedule P (540) form text: for a taxpayer who did NOT itemize, Line 1
+# says explicitly: "If you did not itemize deductions, enter your
+# standard deduction from Form 540, line 18, and go to line 6" -- and
+# every other AMTI adjustment/preference line (2-13, 16-18, 20) is
+# itemizing- or preference-item-specific, so for this narrow population
+# they're all $0. AMTI (Line 21) therefore collapses to regular taxable
+# income + standard deduction added back, which is arithmetically just
+# CA AGI -- no preference-item modeling needed at all for this case.
+# CA's AMT rate is a FLAT 7.0% (Schedule P (540) Side 2 Line 24) -- NOT
+# the federal 26%/28% two-tier structure; confirm this explicitly for
+# any future AMT work, since assuming the federal structure would be
+# wrong. The exemption is a 3-tier phase-out (25% of AMTI over a
+# threshold, fully zeroed at a second threshold), all five filing-status
+# dollar figures verified directly from Schedule P (540) Side 2's own
+# exemption worksheet/table (internally self-consistent: exemption =
+# 25% x (zero-out threshold - phase-out-start threshold) exactly, for
+# all 3 threshold pairs).
+#
+# Rather than trusting a purely empirical "AMT is always $0 for this
+# population" claim, this is built as a REAL formula computation (regular
+# tax via the existing bracket engine vs. TMT = 7% x max(0, AMTI -
+# phased-out exemption), AMT owed = max(0, TMT - regular tax)) -- so it
+# self-verifies against its own inputs rather than hard-coding an assumed
+# always-zero answer, and would correctly surface a nonzero result if the
+# structural "regular tax stays ahead of TMT" relationship this research
+# found ever didn't hold for some input. "Regular tax" for the comparison
+# uses total_tax (bracket_tax + the Behavioral Health Services surtax) --
+# the more conservative (higher) figure, erring toward NOT finding AMT
+# owed rather than toward finding it, when in doubt.
+#
+# OUT OF SCOPE, routes to a dedicated redirect: itemized deductions,
+# incentive stock options, passive activity, depreciation adjustments,
+# private activity bonds, and other preference items (COMPLEXITY_EXCLUDE
+# already blocks itemizing/stock/K-1/self-employment/capital-loss/rental;
+# a few AMT-preference-specific terms are added on top).
+AMT_SCREEN_CITATION = "2025 Schedule P (540), Side 1 Line 1, Side 2 Lines 22-24; R&TC Section 17062"
+AMT_SCREEN_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-p.pdf"
+AMT_RATE = 0.07
+AMT_EXEMPTION_PHASEOUT_RATE = 0.25
+
+# Verified directly from Schedule P (540) Side 2's exemption table/
+# worksheet. QSS shares MFJ's figures (both use the joint-return column).
+AMT_EXEMPTION = {
+    "single": 92749.0, "hoh": 92749.0, "mfs": 61830.0,
+    "mfj": 123667.0, "qss": 123667.0,
+}
+AMT_EXEMPTION_PHASEOUT_START = {
+    "single": 347808.0, "hoh": 347808.0, "mfs": 231868.0,
+    "mfj": 463745.0, "qss": 463745.0,
+}
+
+AMT_SCREEN_TERMS = {
+    "alternative minimum tax", "schedule p (540)", "tentative minimum tax",
+    "form 540 line 61", "amt liability", "owe amt", "subject to amt", "amt exposure",
+    "do i owe amt", "california amt",
+}
+AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS = {
+    "passive activity", "passive income", "private activity bond", "depreciation",
+    "municipal bond", "incentive stock option", "iso exercise", "exercised stock options",
+    "tax-exempt interest", "circulation cost", "mining cost", "research cost",
+    "intangible drilling", "net operating loss",
+}
+AMT_SCREEN_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE | AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS
+
+
+def _amt_screen_has_preference_exclusion(q: str) -> bool:
+    """Bare "nol" needs a word-boundary regex (same precedent as the
+    NOL-suspension feature's own detector) -- a plain substring check
+    risks false hits inside unrelated words."""
+    if any(t in q for t in AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS):
+        return True
+    return re.search(r"\bnol\b", q) is not None
+
+
+def _amt_screen_base_signal_ok(q: str) -> bool:
+    """No COMPUTE_TRIGGERS requirement -- this feature's own trigger
+    vocabulary is specific enough on its own, same precedent as the
+    ISR penalty and late-filing/late-payment penalty."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if any(t in q for t in COMPLEXITY_EXCLUDE):
+        return False
+    if _amt_screen_has_preference_exclusion(q):
+        return False
+    return True
+
+
+def detect_amt_screen_signal(question: str):
+    q = question.lower()
+    if not _amt_screen_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_screen_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_screen_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_screen_out_of_scope(question: str) -> bool:
+    """True iff AMT vocabulary is present alongside an AMT-preference-
+    specific term (ISO, passive activity, depreciation, private activity
+    bond, etc.) -- these genuinely require the full ~11-category AMTI
+    build this scoped screen does not attempt. Deliberately narrower than
+    the base signal's full COMPLEXITY_EXCLUDE gate (a generic self-
+    employment/itemizing collision just silently doesn't fire, same
+    convention as every other feature here; only AMT-preference-specific
+    language gets its own dedicated redirect)."""
+    q = question.lower()
+    return any(t in q for t in AMT_SCREEN_TERMS) and _amt_screen_has_preference_exclusion(q)
+
+
+def compute_amt_screen_ca_tax(conn, income_amount: float, filing_status: str,
+                                tax_year: int = DEFAULT_TAX_YEAR):
+    """See module note above -- AMTI collapses to CA AGI for this narrow
+    population (standard deduction, wage-only, zero preference items).
+    Returns a real computed comparison, not a hard-coded assumption."""
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    regular = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not regular:
+        return None
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = income_amount
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    regular_tax = regular["total_tax"]
+    amt_owed = round(max(0.0, tmt - regular_tax), 2)
+    return {**regular, "amti": amti, "exemption": exemption, "tmt": tmt,
+            "regular_tax": regular_tax, "amt_owed": amt_owed}
+
+
+# --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540
+# Line 113, FTB Form 5805 Side 2 Part II) -- Income Coverage Blueprint
+# Phase 3's twelfth build, and a THIRD consecutive case where a dedicated
+# research pass found the ledger's "too complex" verdict overly
+# conservative -- but this time the finding is genuinely split, not a
+# clean reversal like ISR penalty or a narrow screen like AMT.
+#
+# FTB 5805's REGULAR METHOD (Worksheet II) is exactly the same
+# disqualifying mechanism this project already correctly excluded from
+# the late-filing/late-payment penalty build: per-installment days-
+# unpaid x a periodic interest rate that changes mid-year (8% through
+# 6/30/25, then 7% through 4/15/26), with payment-ordering rules across
+# 4 installment columns. That case STAYS deferred -- nothing here
+# changes it.
+#
+# But FTB also publishes a SHORT METHOD (Form 5805 Side 2, Part II,
+# lines 7-13) that collapses the whole per-diem/rate-period computation
+# into ONE flat annual constant, printed directly on the 2025 form:
+# Line 11 = Line 10 x .05028767 -- a single stated fact for the year,
+# the same kind of year-specific constant as a standard deduction
+# amount, not a live daily computation. It's eligible ONLY for
+# taxpayers who "made no estimated tax payments or [whose] only
+# payments were California income tax withheld" (2025 Form 5805
+# Instructions, Short Method) -- i.e., ordinary withholding-only filers,
+# a real and common population. Scoped to EXACTLY that population;
+# anyone who made ANY estimated tax payment this year is out of scope
+# (the short method's own eligibility for that population depends on
+# whether those payments were made exactly on the required due dates,
+# reintroducing the timing question this slice deliberately avoids) and
+# routes to a dedicated redirect, same for the separate Farmer/Fisherman
+# exception (Form 5805F, an entirely different pathway).
+#
+# VERIFIED MECHANIC (2025 Form 5805, Side 1 "Important" box + Side 2
+# Part II):
+#   1. De minimis safe harbor: if (current-year tax after credits -
+#      withholding) < $500 ($250 MFS), STOP -- no penalty, no form
+#      needed.
+#   2. Zero-prior-year-liability safe harbor: if the prior tax year was
+#      a full 12 months with NO tax liability at all, STOP -- no
+#      penalty.
+#   3. Required annual payment = the LESSER of 90% of current-year tax,
+#      or 100% of prior-year tax (110% if prior-year CA AGI exceeded
+#      $150,000 / $75,000 MFS) -- EXCEPT taxpayers with CURRENT-year CA
+#      AGI >= $1,000,000 / $500,000 MFS must use the 90%-of-current-year
+#      test only (no lesser-of comparison).
+#   4. Underpayment = required annual payment - withholding; if <= 0,
+#      STOP -- no penalty.
+#   5. Penalty = underpayment x .05028767 (assumes payment was NOT made
+#      early -- the form's own sanctioned conservative default: "If any
+#      payment was made earlier than the due date, you may use the
+#      short method, but using it may cause you to pay a larger penalty
+#      than using the regular method... likely to be small").
+#
+# "Current-year tax" is computed via the existing bracket engine (same
+# "don't ask for something we can derive" discipline as OSTC/PTE/
+# adoption/CATC), BEFORE credits -- this system has no unified way to
+# apply a taxpayer's various credits, same simplification already used
+# by the plain wage-compute path. "Prior-year tax" and "prior-year AGI"
+# CANNOT be derived (no multi-year engine exists yet -- Phase 4 of the
+# blueprint, not started) and must be stated facts, same as PTE credit's
+# prior-year carryover. Both are REQUIRED, not defaulted, deliberately:
+# defaulting prior-year AGI to "under threshold" (the 100% test) would
+# risk UNDERSTATING the required annual payment -- and therefore
+# understating or missing a real penalty -- for the real population
+# whose prior-year AGI exceeded the threshold, the same "never guess
+# toward understatement" discipline as early-distribution tax's
+# exception-language scoping.
+UNDERPAYMENT_CITATION = "2025 FTB Form 5805 Instructions, Short Method (Form 5805 Side 2, Part II); R&TC Section 19136"
+UNDERPAYMENT_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-5805.pdf"
+UNDERPAYMENT_SHORT_METHOD_RATE = 0.05028767
+UNDERPAYMENT_DE_MINIMIS_SINGLE = 500.0
+UNDERPAYMENT_DE_MINIMIS_MFS = 250.0
+UNDERPAYMENT_CURRENT_YEAR_SAFE_HARBOR_RATE = 0.90
+UNDERPAYMENT_PRIOR_YEAR_SAFE_HARBOR_RATE_STANDARD = 1.00
+UNDERPAYMENT_PRIOR_YEAR_SAFE_HARBOR_RATE_HIGH_AGI = 1.10
+UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_MFS = 75000.0
+UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_DEFAULT = 150000.0
+UNDERPAYMENT_FORCE_90_ONLY_THRESHOLD_MFS = 500000.0
+UNDERPAYMENT_FORCE_90_ONLY_THRESHOLD_DEFAULT = 1000000.0
+
+UNDERPAYMENT_TERMS = {
+    "underpayment penalty", "underpayment of estimated tax", "estimated tax penalty",
+    "estimated tax underpayment", "form 5805", "underestimated my tax",
+    "penalty for underpaying", "penalty for underpaying my taxes",
+}
+UNDERPAYMENT_OUT_OF_SCOPE_TERMS = {
+    "estimated payment", "estimated tax payment", "estimated payments",
+    "quarterly payment", "quarterly estimated", "made estimated payments",
+    "paid estimated tax", "farmer", "fisherman", "fisher", "regular method",
+    "annualized income",
+}
+UNDERPAYMENT_PRIOR_YEAR_TAX_TERMS = {
+    "prior year tax", "prior-year tax", "last year's tax", "2024 tax",
+    "2024 tax liability", "prior year tax liability", "last year's tax liability",
+}
+UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS = {
+    "prior year agi", "prior-year agi", "last year's agi", "2024 agi",
+    "prior year adjusted gross income", "last year's income", "2024 income",
+}
+UNDERPAYMENT_WITHHOLDING_TERMS = {
+    "withholding", "withheld", "tax withheld", "california withholding", "ca withholding",
+}
+UNDERPAYMENT_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _underpayment_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in UNDERPAYMENT_TERMS):
+        return False
+    if any(t in q for t in UNDERPAYMENT_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in UNDERPAYMENT_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_underpayment_signal(question: str):
+    q = question.lower()
+    if not _underpayment_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_underpayment_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _underpayment_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_underpayment_out_of_scope(question: str) -> bool:
+    """True iff underpayment-penalty vocabulary is present alongside any
+    estimated-tax-payment mention, or the Farmer/Fisherman exception --
+    both need the REGULAR method's date-dependent mechanic (or an
+    entirely different form), not this short-method-only slice."""
+    q = question.lower()
+    return (any(t in q for t in UNDERPAYMENT_TERMS)
+            and any(t in q for t in UNDERPAYMENT_OUT_OF_SCOPE_TERMS))
+
+
+def compute_underpayment_penalty(current_year_tax: float, prior_year_tax: float, prior_year_agi: float,
+                                   withholding: float, filing_status: str, current_year_income: float):
+    """FTB 5805 Short Method, Side 2 Part II -- see module note above for
+    the verified 5-step mechanic and its scope."""
+    if current_year_tax is None or current_year_tax < 0:
+        return None
+    if prior_year_tax is None or prior_year_tax < 0:
+        return None
+    if prior_year_agi is None or prior_year_agi < 0:
+        return None
+    if withholding is None or withholding < 0:
+        return None
+    is_mfs = filing_status == "mfs"
+    de_minimis = UNDERPAYMENT_DE_MINIMIS_MFS if is_mfs else UNDERPAYMENT_DE_MINIMIS_SINGLE
+    balance_due = current_year_tax - withholding
+    if balance_due < de_minimis:
+        return {"penalty": 0.0, "reason": "de_minimis_balance"}
+    if prior_year_tax == 0:
+        return {"penalty": 0.0, "reason": "zero_prior_year_liability"}
+    pct_current = UNDERPAYMENT_CURRENT_YEAR_SAFE_HARBOR_RATE * current_year_tax
+    high_agi_threshold = UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_MFS if is_mfs else UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_DEFAULT
+    prior_year_rate = (UNDERPAYMENT_PRIOR_YEAR_SAFE_HARBOR_RATE_HIGH_AGI if prior_year_agi > high_agi_threshold
+                        else UNDERPAYMENT_PRIOR_YEAR_SAFE_HARBOR_RATE_STANDARD)
+    pct_prior = prior_year_rate * prior_year_tax
+    force_90_threshold = UNDERPAYMENT_FORCE_90_ONLY_THRESHOLD_MFS if is_mfs else UNDERPAYMENT_FORCE_90_ONLY_THRESHOLD_DEFAULT
+    if current_year_income >= force_90_threshold:
+        required_annual_payment = pct_current
+    else:
+        required_annual_payment = min(pct_current, pct_prior)
+    underpayment = required_annual_payment - withholding
+    if underpayment <= 0:
+        return {"penalty": 0.0, "reason": "safe_harbor_met", "required_annual_payment": round(required_annual_payment, 2)}
+    penalty = round(underpayment * UNDERPAYMENT_SHORT_METHOD_RATE, 2)
+    return {"penalty": penalty, "reason": "penalty_owed",
+            "required_annual_payment": round(required_annual_payment, 2),
+            "underpayment": round(underpayment, 2)}
+
+
+def compute_underpayment_penalty_ca_tax(conn, income_amount: float, filing_status: str, prior_year_tax: float,
+                                          prior_year_agi: float, withholding: float,
+                                          tax_year: int = DEFAULT_TAX_YEAR):
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    current_year_tax = calc["total_tax"]
+    penalty_calc = compute_underpayment_penalty(current_year_tax, prior_year_tax, prior_year_agi,
+                                                  withholding, filing_status, income_amount)
+    if not penalty_calc:
+        return None
+    return {**calc, "income_amount": income_amount, "taxable_income": taxable_income,
+            "current_year_tax": current_year_tax, "prior_year_tax": prior_year_tax,
+            "prior_year_agi": prior_year_agi, "withholding": withholding, "penalty": penalty_calc}
 
 
 def detect_filing_status(question: str):
