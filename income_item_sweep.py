@@ -821,6 +821,51 @@ ITEMS = [
     ("how much california tax do I owe if I am self-employed and made $1,200,000, considering my nol carryover single",
      {"status": "needs_review"}),
 
+    # --- NOL carryover for a WAGE-ONLY filer with NO current-year
+    # business income (Schedule CA (540) Line 8a "wages/other income"
+    # population -- previously left deferred in schedule_ca_inventory.py
+    # as "real new scope," but found tractable via a closer look at the
+    # SAME suspension rule already verified above: the suspension test is
+    # an AND condition (net business income >= $1M AND modified AGI
+    # >= $1M) -- a taxpayer with $0 current business income (a closed
+    # prior business) can NEVER satisfy the business-income leg, so
+    # suspension is structurally impossible for this population at ANY
+    # wage level. Requires an EXPLICIT closed-business confirmation,
+    # never assumed from silence.
+    #
+    # Basic: $80,000 wages, $20,000 NOL carryover, closed business.
+    # MTI = 80000-5706=74294, deduction=min(20000,74294)=20000, taxable
+    # =54294 -> $1,792.53.
+    ("how much California tax do I owe with an NOL carryover of $20,000, my closed business, if my wages are $80,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1792.53}),
+    # order independence.
+    ("single, my wages are $80,000, my closed business, how much california tax do i owe with an nol carryover of $20,000?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 1792.53}),
+    # HIGH INCOME still never suspended -- confirms this isn't just true
+    # near the threshold; $2,000,000 wages, $20,000 carryover -> fully
+    # deductible regardless -> $233,417.72 (includes the BHS surtax).
+    ("how much California tax do I owe with an NOL carryover of $20,000, my closed business, if my wages are $2,000,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 233417.72}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with an NOL carryover of $20,000, my closed business, if my wages are $80,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # AMBIGUOUS: NOL vocabulary present but neither a closed-business
+    # confirmation nor an ongoing-business signal -- routes to a
+    # dedicated clarifying question. This exact phrasing exposed a real
+    # bug live: detect_compute_signal's COMPLEXITY_EXCLUDE doesn't
+    # recognize NOL/carryover vocabulary at all, so without an explicit
+    # NOL-term exclusion added to detect_compute_signal, the plain wage-
+    # compute path would race ahead and answer with the FIRST dollar
+    # figure in the question (the NOL amount, not wages) instead of
+    # deferring -- a silently WRONG answer, not just a missing one.
+    ("how much California tax do I owe with an NOL carryover of $20,000 if my wages are $80,000, single?",
+     {"status": "needs_review", "domain": "income"}),
+    # ONGOING BUSINESS signal ("self-employed") -- correctly excluded,
+    # since business income could genuinely be nonzero for this
+    # population and the real suspension-test complexity still applies.
+    ("how much California tax do I owe with an NOL carryover of $20,000, I'm self-employed, if my wages are $80,000, single?",
+     {"status": "informational", "domain": "income"}),
+
     # --- cannabis 280E business-expense decoupling (Ring 3 extension,
     # R&TC Section 17209) -- verified against the statute and the 2025
     # Schedule CA (540) instructions' Line 3 cannabis paragraph: LICENSED

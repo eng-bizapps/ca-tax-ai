@@ -306,14 +306,39 @@ ITEMS = [
      "existing feature's total-tax answer is already mathematically equivalent to running the "
      "real Line 8a -> Line 9b2 sequence. See the separate 'general wage+NOL population' row "
      "for the genuinely unbuilt slice."),
-    ("I", "B", "8a-general", "Federal NOL addback for taxpayers with wages/other income (not sole business income)",
-     "addition", "moderate", "Sched CA (540) Pt I Sec B line 8a; FTB 3805V",
+    ("I", "B", "8a-general", "Federal NOL addback for taxpayers with wages/other income AND "
+     "current-year business income (mixed sources)",
+     "addition", "narrow", "Sched CA (540) Pt I Sec B line 8a; FTB 3805V",
      "deferred_new_engine", None,
-     "compute_nol_ca_tax's NOL_COMPLEXITY_EXCLUDE deliberately excludes wage/salary mentions -- "
-     "for THIS population (wages plus a federal NOL carryover, e.g. from a now-closed prior "
-     "business), the addback genuinely matters and isn't already absorbed. Would require "
-     "generalizing the MTI/suspension test beyond business-income-only to a broader income "
-     "base -- real new scope, not a one-fact extension of the existing feature."),
+     "Genuinely still deferred: a taxpayer with BOTH wages AND ongoing current-year business "
+     "income needs the FULL suspension-test generalization (net business income and modified "
+     "AGI as two genuinely separate, possibly-nonzero figures) -- real new scope. See the "
+     "'wages-only, closed business' row below, which IS built, for the population this general "
+     "case's own deferral does NOT block."),
+    ("I", "B", "8a-wages-only", "Federal NOL addback for WAGE-ONLY filers with NO current-year "
+     "business income (closed prior business)",
+     "addition", "moderate", "FTB 2025 Instructions for Form 3805V -- NOL Suspension / General "
+     "Information",
+     "built", None,
+     "Built via income_brackets.compute_nol_wages_ca_tax / engine._income_nol_wages_answer. "
+     "The original deferral reasoning ('would require generalizing the MTI/suspension test to a "
+     "broader income base') turned out to have a tractable narrower slice: FTB's suspension "
+     "test is an AND condition ('net business income >= $1,000,000 AND modified AGI >= "
+     "$1,000,000') -- already verified/cited for compute_nol_ca_tax, no new research needed. A "
+     "taxpayer whose business has CLOSED has $0 current-year business income, which can NEVER "
+     "satisfy the '>= $1,000,000' business-income leg regardless of wage level -- suspension is "
+     "therefore structurally impossible for this population at ANY income, not just an "
+     "assumption. Requires an EXPLICIT closed-business confirmation (never inferred from "
+     "silence, since guessing wrong here could understate a real suspension); any ongoing-"
+     "business signal (self-employed, 1099, K-1, etc.) routes to the still-deferred general "
+     "case above. Also fixed a real bug found while building this: detect_compute_signal's "
+     "COMPLEXITY_EXCLUDE didn't recognize NOL/carryover vocabulary at all, so a question with "
+     "NOL terms but no OTHER complexity term (the ambiguous closed-vs-ongoing-business case) "
+     "would let the plain wage-compute path race ahead and silently answer with the WRONG "
+     "(first-found) dollar figure instead of deferring -- fixed by adding an explicit NOL-term "
+     "exclusion to detect_compute_signal, mirroring the existing QSBS/home-sale precedent for "
+     "extending that function. Verified via a full income_item_sweep.py reset (388/388) plus "
+     "all 4 other regression sweeps, all clean."),
     ("I", "B", "8b", "California Lottery winnings exclusion",
      "subtraction", "common", "Sched CA (540) Pt I Sec B line 8b",
      "built", "california_lottery_winnings", None),

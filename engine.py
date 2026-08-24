@@ -2341,10 +2341,12 @@ def _income_capital_loss_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_capital_loss_signal(question)
     if not fs:
         return None
-    loss_amount = _amount_near(question, income_brackets.CAPITAL_LOSS_TERMS)
-    if loss_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.CAPITAL_LOSS_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    loss_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -2595,10 +2597,12 @@ def _income_excess_business_loss_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_excess_business_loss_signal(question)
     if not fs:
         return None
-    loss_amount = _amount_near(question, income_brackets.EXCESS_BUSINESS_LOSS_TERMS)
-    if loss_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.EXCESS_BUSINESS_LOSS_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    loss_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -2667,10 +2671,12 @@ def _income_nol_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_nol_signal(question)
     if not fs:
         return None
-    nol_amount = _amount_near(question, income_brackets.NOL_TERMS)
-    if nol_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.NOL_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != nol_amount]
+    nol_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     business_income = others[0]
@@ -2734,6 +2740,98 @@ def _income_nol_missing_filing_status_answer(question: str, base: dict):
     return result
 
 
+def _income_nol_wages_answer(conn, question: str, base: dict):
+    """NOL carryover for a WAGE-ONLY filer with NO current-year business
+    income (Schedule CA (540) Line 8a "wages/other income" population) --
+    see income_brackets.compute_nol_wages_ca_tax's docstring for why
+    suspension is structurally impossible for this population (net
+    business income = $0 can never satisfy the suspension test's
+    ">=$1,000,000" business-income leg). Uses the position-safe
+    _amount_after_filtered_span/_remove_amount_span pattern from the
+    start, not the older value-filtering _amount_near used by the
+    sibling compute_nol_ca_tax path."""
+    fs = income_brackets.detect_nol_wages_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    match = _amount_after_filtered_span(question, income_brackets.NOL_TERMS, amounts)
+    if match is None:
+        return None
+    nol_amount = match[0]
+    remaining = _remove_amount_span(amounts, match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    wages = others[0]
+    calc = income_brackets.compute_nol_wages_ca_tax(conn, wages, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": wages, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["remaining_carryover"]:
+        nol_note = (f"${calc['nol_deduction']:,.2f} of your ${nol_amount:,.2f} NOL carryover is "
+                    f"deductible this year (capped at your Modified Taxable Income of "
+                    f"${calc['mti']:,.2f}, not a percentage), with the remaining "
+                    f"${calc['remaining_carryover']:,.2f} continuing to carry forward")
+    else:
+        nol_note = (f"your full ${nol_amount:,.2f} NOL carryover is deductible this year "
+                    "(within your Modified Taxable Income)")
+    result["answer_text"] = (
+        f"Assuming ${wages:,.2f} in wages (treated as your ONLY income and your modified AGI "
+        f"for the suspension test), filing status {label}, with no current-year business "
+        f"income: {nol_note} ({income_brackets.NOL_CITATION}). Because your net business "
+        "income this year is $0, California's 2024-2026 NOL suspension rule (which requires "
+        "BOTH net business income AND modified AGI to be at least $1,000,000) can never apply "
+        "to you, regardless of your wage level -- your carryover is never suspended. After the "
+        f"standard deduction (${calc['standard_deduction']:,.0f}), your California taxable "
+        f"income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes an ordinary business NOL (not a disaster-loss carryover) "
+        "and that you have no other income or adjustments beyond your stated wages -- your "
+        "actual liability may differ."
+    )
+    return result
+
+
+def _income_nol_wages_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_nol_wages_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an NOL carryover deduction from a closed "
+        "business, I need your filing status: single, married filing jointly, married filing "
+        "separately, head of household, or qualifying surviving spouse. Please also state your "
+        "wages and your NOL carryover amount.")
+    return result
+
+
+def _income_nol_wages_ambiguous_answer(question: str, base: dict):
+    """When NOL vocabulary is present but neither a closed-business
+    confirmation nor an ongoing-business signal is stated, ask
+    specifically -- whether the business has closed changes whether the
+    $1,000,000 suspension test can even apply, so this can't be
+    guessed either way."""
+    if not income_brackets.detect_nol_wages_ambiguous(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Do you have any current-year business income, or has that business closed (leaving "
+        "you with wages and just the NOL carryover)? This changes whether California's "
+        "$1,000,000 NOL suspension test can apply to you. If your business has closed, please "
+        "also state your wages, your NOL carryover amount, and your filing status."
+    )
+    return result
+
+
 def _income_disaster_loss_carryover_answer(conn, question: str, base: dict):
     """Other income + a stated California disaster loss carryover
     deduction -- see income_brackets.compute_disaster_loss_carryover_ca_
@@ -2744,10 +2842,12 @@ def _income_disaster_loss_carryover_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_disaster_loss_carryover_signal(question)
     if not fs:
         return None
-    carryover_amount = _amount_near(question, income_brackets.DISASTER_LOSS_CARRYOVER_TERMS)
-    if carryover_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.DISASTER_LOSS_CARRYOVER_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != carryover_amount]
+    carryover_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -3007,10 +3107,12 @@ def _income_ira_deduction_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_ira_deduction_signal(question)
     if not fs:
         return None
-    ira_amount = _amount_near(question, income_brackets.IRA_DEDUCTION_TERMS)
-    if ira_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.IRA_DEDUCTION_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != ira_amount]
+    ira_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -3154,10 +3256,12 @@ def _income_hsa_investment_gain_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_hsa_investment_gain_signal(question)
     if not fs:
         return None
-    hsa_gain_amount = _amount_near(question, income_brackets.HSA_INVESTMENT_GAIN_TERMS)
-    if hsa_gain_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.HSA_INVESTMENT_GAIN_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != hsa_gain_amount]
+    hsa_gain_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -3215,10 +3319,12 @@ def _income_capital_loss_carryover_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_capital_loss_carryover_signal(question)
     if not fs:
         return None
-    loss_amount = _amount_near(question, income_brackets.CAPITAL_LOSS_CARRYOVER_TERMS)
-    if loss_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.CAPITAL_LOSS_CARRYOVER_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != loss_amount]
+    loss_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     income_amount = others[0]
@@ -3283,10 +3389,12 @@ def _income_fringe_benefit_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_fringe_benefit_signal(question)
     if not fs:
         return None
-    restoration_amount = _amount_near(question, income_brackets.FRINGE_BENEFIT_TERMS)
-    if restoration_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.FRINGE_BENEFIT_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != restoration_amount]
+    restoration_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     net_profit = others[0]
@@ -3349,10 +3457,12 @@ def _income_real_estate_pro_answer(conn, question: str, base: dict):
     fs = income_brackets.detect_real_estate_pro_signal(question)
     if not fs:
         return None
-    rental_loss = _amount_near(question, income_brackets.REAL_ESTATE_PRO_LOSS_TERMS)
-    if rental_loss is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_brackets.REAL_ESTATE_PRO_LOSS_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != rental_loss]
+    rental_loss = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     other_income = others[0]
@@ -3812,10 +3922,12 @@ def _income_caleitc_investment_answer(conn, question: str, base: dict):
     children = income_credits.detect_caleitc_investment_signal(question)
     if children is None:
         return None
-    investment_amount = _amount_near(question, income_credits.INVESTMENT_INCOME_TERMS)
-    if investment_amount is None:
+    amounts = _amounts(question)
+    match = _amount_near_filtered_span(question, income_credits.INVESTMENT_INCOME_TERMS, amounts)
+    if match is None:
         return None
-    others = [a for a, _, _ in _amounts(question) if a != investment_amount]
+    investment_amount = match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, match)]
     if len(others) != 1:
         return None
     earned_income = others[0]
@@ -4380,9 +4492,11 @@ def _income_nonresident_answer(conn, question: str, base: dict):
     if not fs:
         return None
 
-    ca_source_amount = _amount_near(question, income_nonresident.CA_SOURCE_AMOUNT_TERMS)
-    if ca_source_amount is not None:
-        others = [a for a, _, _ in _amounts(question) if a != ca_source_amount]
+    amounts = _amounts(question)
+    ca_source_match = _amount_near_filtered_span(question, income_nonresident.CA_SOURCE_AMOUNT_TERMS, amounts)
+    if ca_source_match is not None:
+        ca_source_amount = ca_source_match[0]
+        others = [a for a, _, _ in _remove_amount_span(amounts, ca_source_match)]
         if len(others) != 1:
             return None
         total_wages = others[0]
@@ -5603,6 +5717,18 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_nol_fs_result:
         return missing_nol_fs_result
 
+    nol_wages_result = _income_nol_wages_answer(conn, question, base)
+    if nol_wages_result:
+        return nol_wages_result
+
+    missing_nol_wages_fs_result = _income_nol_wages_missing_filing_status_answer(question, base)
+    if missing_nol_wages_fs_result:
+        return missing_nol_wages_fs_result
+
+    nol_wages_ambiguous_result = _income_nol_wages_ambiguous_answer(question, base)
+    if nol_wages_ambiguous_result:
+        return nol_wages_ambiguous_result
+
     disaster_loss_carryover_result = _income_disaster_loss_carryover_answer(conn, question, base)
     if disaster_loss_carryover_result:
         return disaster_loss_carryover_result
@@ -5913,6 +6039,9 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_ebl_carryover_missing_filing_status,
     income_brackets.detect_nol_signal,
     income_brackets.detect_nol_missing_filing_status,
+    income_brackets.detect_nol_wages_signal,
+    income_brackets.detect_nol_wages_missing_filing_status,
+    income_brackets.detect_nol_wages_ambiguous,
     income_brackets.detect_disaster_loss_carryover_signal,
     income_brackets.detect_disaster_loss_carryover_missing_filing_status,
     income_brackets.detect_cannabis_280e_signal,

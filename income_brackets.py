@@ -1255,6 +1255,21 @@ EXCESS_BUSINESS_LOSS_COMPLEXITY_EXCLUDE = {
     "itemize", "itemized", "itemizing", "dependent", "alimony",
     "gambling", "gambled", "betting", "wagering",
     "capital gain", "capital loss", "stock", "rsu",
+    # added after the duplicate-value-extraction bug fix (2026-08-22)
+    # made this a live collision, not just a theoretical one: SE_
+    # COMPLEXITY_EXCLUDE/K1_COMPLEXITY_EXCLUDE already step the self-
+    # employment/K-1 paths ASIDE for business-loss phrasing (so a stated
+    # loss isn't silently treated as positive profit), on the assumption
+    # the excess-business-loss path picks it up instead -- but for
+    # phrasing like "$700,000 self-employed with a $700,000 business
+    # loss" (self-employment income AND the loss described via the SAME
+    # figure, no separately-stated "other income" at all), this path has
+    # no genuinely separate figure to extract either. Once the shared
+    # extraction helper was fixed to find each anchor by POSITION rather
+    # than value, it started successfully (but wrongly) treating the
+    # self-employment mention as a distinct "other income" fact. Mirrors
+    # K1_COMPLEXITY_EXCLUDE's own self-employment exclusion.
+    "self-employ", "self employ", "1099",
 }
 
 
@@ -1632,6 +1647,140 @@ def compute_nol_ca_tax(conn, business_income: float, nol_carryover_amount: float
             "suspended": suspended, "nol_deduction": nol_deduction,
             "remaining_carryover": remaining_carryover, "mti": mti,
             "standard_deduction": dedu["amount"]}
+
+
+# --- NOL carryover for a WAGE-ONLY filer with NO current-year business
+# income (Schedule CA (540) Line 8a, the "wages/other income" population
+# the schedule_ca_inventory.py ledger's own "Line 8a-general" row left
+# deferred as "real new scope... would require generalizing the MTI/
+# suspension test beyond business-income-only"). Found tractable via a
+# closer look at the SAME suspension rule already verified and cited
+# above for compute_nol_ca_tax -- no new FTB research needed, since the
+# rule itself was already primary-sourced; what changed is recognizing
+# what it implies for THIS population specifically.
+#
+# THE KEY INSIGHT: FTB's suspension test is explicitly an AND condition
+# -- "suspended... if your net business income is $1,000,000 or more AND
+# modified AGI is $1,000,000 or more." A taxpayer whose business has
+# CLOSED (no current-year business income at all) has net business
+# income of exactly $0 -- which can never satisfy ">= $1,000,000",
+# regardless of wage level. The suspension clause is therefore
+# STRUCTURALLY INERT for this population: the NOL deduction is NEVER
+# suspended for a wage-only filer with a carryover from a now-closed
+# business, at any income level. This isn't a simplifying assumption --
+# it falls directly out of the AND test's own logic, the same kind of
+# structural-guarantee reasoning already used for the AMT screen (there,
+# a rate/exemption relationship guaranteed a $0 result; here, a $0
+# business-income component guarantees the AND test can never trigger).
+#
+# SCOPE: requires an EXPLICIT confirmation that no current-year business
+# income exists (a "closed business"/"wages only" signal) -- NEVER
+# inferred from silence, same "don't guess toward understatement... or
+# overstatement" discipline as every other eligibility-gated feature
+# this session. Any signal of ONGOING self-employment/business income
+# routes elsewhere (the existing compute_nol_ca_tax path, or a defer) --
+# for that population, business income could genuinely be nonzero, and
+# the suspension test's real complexity (this session's original
+# deferral reasoning) still applies unchanged.
+#
+# MTI computed from WAGES (not business income) -- same "stated income
+# figure stands in for modified AGI" simplification already used by
+# compute_nol_ca_tax's business-income case, same disclosed limitation
+# (true MAGI could differ if other income/adjustments exist this path
+# doesn't know about).
+NOL_WAGES_CLOSED_BUSINESS_TERMS = {
+    "closed my business", "closed business", "former business", "business closed",
+    "no longer have a business", "sold my business", "business is now closed",
+    "used to have a business", "business has closed", "shut down my business",
+    "wages only", "only wages", "no business income this year", "no current business income",
+    "don't have a business anymore", "do not have a business anymore",
+}
+NOL_WAGES_ONGOING_BUSINESS_EXCLUDE_TERMS = {
+    "self-employ", "self employ", "1099", "s-corp", "s corp", "llc", "partnership",
+    "freelance", "freelancing", "contractor", "contracting", "contracted",
+    "sole proprietor", "k-1", "schedule c", "schedule e",
+    "business income this year", "current business income", "still run", "still operate",
+    "excess business loss", "business loss",
+}
+NOL_WAGES_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "alimony",
+    "gambling", "gambled", "betting", "wagering",
+    "capital gain", "capital loss", "stock", "rsu", "trust", "estate",
+    "disaster loss", "disaster",
+}
+
+
+def _nol_wages_base_signal_ok(q: str) -> bool:
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_ONGOING_BUSINESS_EXCLUDE_TERMS):
+        return False
+    if not any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False
+    if any(t in q for t in NOL_WAGES_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_nol_wages_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'wage-only
+    income, no current business, with a federal NOL carryover from a
+    now-closed business' question -- requires an EXPLICIT no-current-
+    business-income confirmation, never assumed from silence."""
+    q = question.lower()
+    if not _nol_wages_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_nol_wages_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _nol_wages_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_nol_wages_ambiguous(question: str) -> bool:
+    """True iff NOL vocabulary is present but neither a closed-business
+    confirmation nor an ongoing-business signal is stated -- routes to a
+    dedicated clarifying question rather than assuming either way,
+    since which case applies changes whether suspension can even apply."""
+    q = question.lower()
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_ONGOING_BUSINESS_EXCLUDE_TERMS):
+        return False
+    if any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False
+    return True
+
+
+def compute_nol_wages_ca_tax(conn, wages: float, nol_carryover_amount: float,
+                               filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """See module note above -- suspension is structurally impossible
+    for this population (net business income = $0 can never satisfy the
+    suspension AND test's ">= $1,000,000" business-income leg), so this
+    path has no suspended branch at all, unlike compute_nol_ca_tax."""
+    if wages is None or wages < 0:
+        return None
+    if nol_carryover_amount is None or nol_carryover_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    mti = max(0.0, wages - dedu["amount"])
+    nol_deduction = min(nol_carryover_amount, mti)
+    remaining_carryover = nol_carryover_amount - nol_deduction
+    taxable_income = max(0.0, mti - nol_deduction)
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "wages": wages, "nol_carryover_amount": nol_carryover_amount,
+            "nol_deduction": nol_deduction, "remaining_carryover": remaining_carryover,
+            "mti": mti, "standard_deduction": dedu["amount"],
+            "citation": NOL_CITATION, "source_url": NOL_SOURCE_URL}
 
 
 # --- California disaster loss carryover deduction (Schedule CA (540)
@@ -5029,6 +5178,15 @@ def detect_compute_signal(question: str):
         return None   # QSBS -- a stated gain figure is ambiguous (pre- or post-exclusion?
                        # see QSBS_TERMS's module note); the dedicated QSBS path asks for
                        # both figures explicitly rather than guessing which one this is
+    if _has_nol_term(q):
+        return None   # NOL carryover -- found live building the wages-only NOL path: a
+                       # question mentioning an NOL carryover with no OTHER
+                       # COMPLEXITY_EXCLUDE term (e.g. no "business" word at all, the
+                       # ambiguous closed-vs-ongoing-business case) would otherwise let
+                       # this plain single-amount path grab the FIRST dollar figure in
+                       # the question (often the NOL amount itself, not income) and
+                       # answer with a silently wrong number instead of deferring to
+                       # detect_nol_signal/detect_nol_wages_signal/detect_nol_wages_ambiguous
     if not any(trig in q for trig in COMPUTE_TRIGGERS):
         return None
     return detect_filing_status(question)
