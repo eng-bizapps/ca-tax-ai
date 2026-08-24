@@ -2480,22 +2480,35 @@ def _income_ebl_carryover_answer(conn, question: str, base: dict):
     the check earlier" fix as K-1 capital gain/real-estate-professional's
     dispatcher placement).
 
-    Also runs the Phase 2a structured-extraction PILOT in shadow mode
-    (see _extract_ebl_carryover_facts_llm) -- computed alongside the
-    live regex extraction purely for comparison/logging, never used to
-    decide this answer."""
+    Phase 2a's LLM extractor (_extract_ebl_carryover_facts_llm) is
+    PROMOTED TO LIVE as of 2026-08-23, but ONLY as a fallback -- regex/
+    proximity extraction (_ebl_carryover_extract_amounts) remains
+    PRIMARY and decides the answer whenever it succeeds, unchanged from
+    before. The LLM is called ONLY when regex returns None entirely,
+    per explicit user sign-off scoped to exactly this mode (not "LLM
+    primary" or "LLM only," both considered and declined). This can
+    only ADD coverage, never override a regex answer that already
+    exists. Promotion was backed by a same-day adversarial test (see
+    the income-coverage-blueprint-progress.md memory note): regex fails
+    outright (returns None) on reordered-fact phrasing and on anchor-
+    phrase-to-value disconnects that a fixed keyword-anchor approach
+    can't generalize past -- both hand-verified cases where the LLM
+    extracted every fact correctly. `result["extraction_method"]`
+    records which path answered, and the LLM-fallback case gets an
+    explicit disclosure appended to answer_text, since this is the
+    first place in the codebase a probabilistic step decides a live
+    financial computation's INPUTS rather than just its wording."""
     fs = income_brackets.detect_ebl_carryover_signal(question)
     if not fs:
         return None
     extracted = _ebl_carryover_extract_amounts(question)
+    used_llm_fallback = False
     if extracted is None:
-        return None
+        extracted = _extract_ebl_carryover_facts_llm(question)
+        if extracted is None:
+            return None
+        used_llm_fallback = True
     other_income, business_result, carryover_balance, is_loss_year = extracted
-
-    shadow = _extract_ebl_carryover_facts_llm(question)
-    if shadow is not None and shadow != (other_income, business_result, carryover_balance, is_loss_year):
-        print(f"[phase2a-shadow-mismatch] regex={(other_income, business_result, carryover_balance, is_loss_year)} "
-              f"llm={shadow} question={question!r}")
 
     calc = income_brackets.compute_ebl_carryover_ca_tax(
         conn, other_income, business_result, carryover_balance, is_loss_year, fs)
@@ -2506,7 +2519,8 @@ def _income_ebl_carryover_answer(conn, question: str, base: dict):
               "amount": other_income, "taxable_income": calc["taxable_income"],
               "standard_deduction": calc["standard_deduction"],
               "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
-              "citation": calc["citation"], "source_url": calc["source_url"]}
+              "citation": calc["citation"], "source_url": calc["source_url"],
+              "extraction_method": "llm_fallback" if used_llm_fallback else "regex"}
     surtax_note = ""
     if calc["surtax"]:
         surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
@@ -2545,6 +2559,12 @@ def _income_ebl_carryover_answer(conn, question: str, base: dict):
         "result and carryover balance (not independently re-derived from Form 3461 components) "
         "-- your actual liability may differ."
     )
+    if used_llm_fallback:
+        result["answer_text"] += (
+            " (Your figures were interpreted using AI-assisted extraction, since the wording "
+            "didn't match this assistant's standard pattern-matching -- please double-check "
+            "that the amounts above match what you intended.)"
+        )
     return result
 
 

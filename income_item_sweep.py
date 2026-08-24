@@ -1446,6 +1446,37 @@ ITEMS = [
     ("how much california tax do I owe on $80,000 in wages with a $700,000 excess business loss single",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 0.0}),
 
+    # --- Phase 2a LLM extraction FALLBACK, promoted to live 2026-08-23
+    # with explicit user sign-off (scoped to "fallback only" -- regex
+    # stays primary and decides the answer whenever it succeeds; the LLM
+    # is called ONLY when regex returns None entirely). Backed by a
+    # same-day adversarial test: regex fails outright on phrasing a
+    # fixed keyword-anchor approach can't generalize past (reordered
+    # facts, an anchor-phrase-to-value disconnect), while the LLM
+    # extracted every fact correctly in both cases (hand-verified
+    # against the question text before promotion).
+    #
+    # REORDERED FACTS: other-income stated first, then business result,
+    # then carryover, in one flowing sentence with non-adjacent
+    # connectors -- regex returns None (used to `needs_review`); the LLM
+    # fallback now answers. $80,000 other income, $25,000 business loss
+    # this year, $10,000 carryover -> combined loss $35,000 (under the
+    # $313k single threshold, fully deductible) -> AGI $45,000, taxable
+    # $39,294 -> $935.69.
+    ("Single, my other income is $80,000. Even though my business actually lost $25,000 this year, I'm carrying an excess business loss carryover of $10,000 from before that too. How much tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 935.69}),
+    # ANCHOR-PHRASE-TO-VALUE DISCONNECT: the trigger phrase "excess
+    # business loss carryover" appears with no nearby dollar figure at
+    # all; the actual carryover amount is stated much later as "prior
+    # carryover balance," different wording than any EBL_CARRYOVER_TERMS
+    # anchor -- regex returns None (used to fall through to a bare
+    # `informational` non-answer); the LLM fallback now answers. $95,000
+    # wages, $40,000 business loss this year, $15,000 carryover ->
+    # combined loss $55,000 (fully deductible) -> AGI $55,000, taxable
+    # $49,294 -> $735.69.
+    ("How much California tax do I owe with an excess business loss carryover? I make $95,000 in wages, and after my business's $40,000 loss this year, I'm told my prior carryover balance is $15,000, filing single.",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 735.69}),
+
     # --- Foreign income of nonresident aliens -- worldwide-income
     # true-up (Schedule CA Line 8z) -- verified against the 2025 FTB
     # Instructions for Schedule CA (540): "Foreign income of nonresident
