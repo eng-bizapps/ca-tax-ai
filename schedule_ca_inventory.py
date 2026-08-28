@@ -97,7 +97,23 @@ ITEMS = [
      "by the generic FTB Pub. 1001 disclaimer instead of a dedicated feature."),
     ("I", "A", "4a/4b", "IRA distribution basis/timing differences",
      "both", "moderate", "Sched CA (540) Pt I Sec A line 4a/4b; FTB Pub 1005",
-     "deferred_new_engine", None, "Requires historical CA-vs-federal contribution basis, not a single stated fact"),
+     "built", None,
+     "Built via income_brackets.compute_ira_distribution_basis_diff_ca_tax / "
+     "engine._income_ira_distribution_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. This was the item the basis-difference "
+     "batch was originally named for, but got built LAST (7th of 7) after 'trust the stated "
+     "already-computed figure' was applied to Lines 5-6 (rental/farm depreciation) first while "
+     "sweeping Schedule CA in line order. The original 'requires historical CA-vs-federal "
+     "contribution basis' framing conflated deriving the divergence with simply asking for it: "
+     "the taxpayer's own federal and California Form 1099-R-derived taxable-distribution figures "
+     "are exactly the two already-computed numbers Line 4a/4b needs, same precedent as every "
+     "other item this pass. Own anchor vocabulary ('federal/California taxable distribution', "
+     "not 'capital gain', since a distribution isn't a gain). Own out-of-scope population: Roth "
+     "conversions and early distributions each have their own distinct mechanic, already modeled "
+     "elsewhere, so this feature explicitly redirects rather than silently mis-answering. Zero "
+     "extraction bugs found live -- seventh and final basis-difference item this pass, benefiting "
+     "from every lesson (detect_compute_signal exclusion, dispatcher ordering before the generic "
+     "feature) applied proactively before verification rather than discovered by it."),
     ("I", "A", "5a/5b", "Tier 2 railroad retirement benefits",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec A line 5a/5b",
      "not_applicable", None, None),
@@ -160,20 +176,67 @@ ITEMS = [
      "checked BEFORE the generic path in the dispatcher). Nonresident/part-year-resident "
      "history excluded -- FTB requires a year-by-year recalculation this model can't perform."),
     ("I", "A", "7a", "Generic CA/federal basis differences (pre-1987, depreciation, inherited property, credits)",
-     "both", "moderate", "Sched CA (540) Pt I Sec A line 7a; Schedule D (540) Column (c)",
-     "deferred_new_engine", None,
-     "Same historical-multi-year-basis-tracking problem as Line 4a/4b's IRA basis -- the "
-     "needed 'California basis' figure isn't something most taxpayers have on hand from any "
-     "single document. Left deferred, not reclassified, after 2026-08-14 research."),
+     "both", "moderate", "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a; "
+     "Schedule D (540) Instructions, Column (c)",
+     "built", None,
+     "Built via income_brackets.compute_generic_basis_diff_ca_tax / "
+     "engine._income_generic_basis_diff_answer. Re-examined 2026-08-23: the original deferral "
+     "reasoning (needs cumulative historical CA-vs-federal basis tracking nobody has on hand) "
+     "is true if this feature tried to DERIVE the CA-adjusted gain from raw acquisition/"
+     "depreciation history -- but Line 7a doesn't care HOW that figure was derived, only what "
+     "it IS. Reuses the SAME 'trust the stated figure' precedent as every K-1/carryover/credit "
+     "feature already built: asks for the taxpayer's own already-computed federal AND "
+     "California capital gain figures directly. CA AGI only ever needs the CA gain (federal "
+     "gain is used purely to compute/disclose the Line 7a adjustment amount, mirroring the "
+     "form's own column structure). Scoped to GAINS only (a basis difference affecting a LOSS "
+     "interacts with the separate capital-loss annual-limit mechanic, a genuinely different "
+     "case). QSBS/K-1-capital-gain/home-sale/installment-sale language routes to a dedicated "
+     "out-of-scope redirect (each has its own genuinely different mechanic). One real bug found "
+     "live: detect_compute_signal's pre-existing 'capital gain' income-type label meant a "
+     "'basis difference' question mentioning 'federal capital gain'/'California capital gain' "
+     "would otherwise be silently answered by the plain wage-compute path using the FIRST "
+     "dollar figure (often unrelated other income, not either gain) -- fixed with the same "
+     "NOL-precedent exclusion pattern. A second bug (undirected proximity picking a PRECEDING "
+     "amount over the one the anchor actually describes) was fixed by switching to the "
+     "established forward-only extraction pattern before any regression values were locked in."),
     ("I", "A", "7a", "Installment sale gain (FTB 3805E) with CA/federal basis difference",
-     "both", "narrow", "Sched CA (540) Pt I Sec A line 7a; FTB 3805E",
-     "deferred_new_engine", None,
-     "Inherits the generic basis-differences problem when a divergence exists; even absent "
-     "one, FTB 3805E is a multi-input form (price/basis/gross-profit-ratio/payments-received) "
-     "rather than a single stated fact."),
+     "both", "narrow", "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a; "
+     "FTB Form 3805E Instructions",
+     "built", None,
+     "Built via income_brackets.compute_installment_sale_basis_diff_ca_tax / "
+     "engine._income_installment_sale_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. Re-examined 2026-08-23: the 'multi-"
+     "input form' concern only applies if this feature tried to compute the gross-profit-"
+     "ratio-times-payments-received recognition math from scratch; it doesn't need to -- a "
+     "taxpayer with an ongoing installment sale already has a federal Form 6252/3805E "
+     "computing THIS YEAR's recognized gain, so this just asks for the already-computed "
+     "federal AND California recognized-gain figures, same 'trust the stated figure' "
+     "precedent as the generic basis-difference feature. Scoped to the current year's "
+     "recognized gain only, not the full remaining installment schedule. One real dispatcher-"
+     "ordering bug found live: a natural phrasing like 'installment sale with a basis "
+     "difference' contains both a generic-feature trigger AND the generic feature's own "
+     "out-of-scope exclusion term, so without checking this more specific feature FIRST, the "
+     "generic feature's redirect would claim the question -- fixed by reordering, same 'move "
+     "the more specific check earlier' pattern as K-1 capital gain/EBL carryover."),
     ("I", "A", "7a", "Gain on personal residence sale where CA/federal depreciation diverged",
-     "both", "narrow", "Sched CA (540) Pt I Sec A line 7a",
-     "deferred_new_engine", None, "Same historical-depreciation-tracking family as the generic basis-differences item."),
+     "both", "narrow", "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a",
+     "built", None,
+     "Built via income_brackets.compute_home_sale_basis_diff_ca_tax / "
+     "engine._income_home_sale_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. Re-examined 2026-08-23 with the same "
+     "'trust the stated already-computed gain figures' reframing as the other basis-"
+     "difference items. Scoped narrowly and deliberately: this population specifically means "
+     "a residence with BUSINESS/RENTAL USE (home office, partial rental conversion) generating "
+     "a depreciation history to diverge on -- trigger requires BOTH home/residence-sale "
+     "language AND an explicit depreciation mention together (an ordinary personal-use-only "
+     "home sale has no depreciation at all and correctly does not match). Assumes the stated "
+     "federal/California gain figures are already NET of any IRC Section 121 exclusion "
+     "($250k/$500k MFJ) -- CA generally conforms to Section 121 itself, so only the "
+     "depreciation-driven basis/gain difference underneath it needs this feature. Zero "
+     "extraction bugs found live -- benefited directly from the dispatcher-ordering lesson "
+     "just learned building the installment-sale item (checked before the generic feature's "
+     "own out-of-scope guard from the start, since home/residence-sale language is one of "
+     "that guard's own exclusion terms)."),
     ("I", "A", "7a", "Kiddie-tax capital gain pass-through (FTB 3803, child's gain reported on parent's return)",
      "addition", "narrow", "Sched CA (540) Pt I Sec A line 7a",
      "not_applicable", None,
@@ -226,32 +289,49 @@ ITEMS = [
     ("I", "B", "3", "Business expense disallowance -- Edge College/Key Worldwide ('Varsity Blues')",
      "addition", "one_time", "Sched CA (540) Pt I Sec B line 3",
      "not_applicable", None, "Specific fraud-scheme defendants only"),
-    ("I", "B", "4", "Other gains/losses basis differences (Schedule D-1)",
-     "both", "narrow", "Sched CA (540) Pt I Sec B line 4",
-     "deferred_new_engine", None,
-     "Researched 2026-08-15: confirmed against FTB's 2025 Schedule CA (540) and Schedule D-1 "
-     "instructions -- Schedule D-1 parallels federal Form 4797 (Sales of Business Property), "
-     "ORDINARY gains/losses on business-property sales (1231/1245/1250 recapture), distinct "
-     "from capital-asset gains on Line 7a. Divergence driver is BASIS, not recapture "
-     "characterization (1245 'generally the same as federal'; 1250 has only a narrow R&TC "
-     "18171 carve-out). Root cause: CA's standing non-conformity to bonus depreciation (IRC "
-     "168(k), never adopted, unaffected by SB 711 -- a durable specific decoupling, not a "
-     "conformity-date artifact) plus pre-1987 ACRS non-conformity -- both require the "
-     "taxpayer's cumulative CA-basis depreciation history, same 'not a single document away' "
-     "problem as Line 4a/4b IRA basis and the generic Line 7a basis-differences item. No "
-     "narrower tractable sub-slice found. Left deferred, not reclassified -- OBBBA (2025) made "
-     "100% bonus depreciation permanent federally, so this divergence is not closing over time."),
-    ("I", "B", "5", "Rental RE/royalties/partnership/S-corp/trust depreciation differences (ordinary passive activities)",
-     "both", "moderate", "Sched CA (540) Pt I Sec B line 5; FTB 3885A",
-     "deferred_new_engine", None,
-     "Researched 2026-08-15: for an activity that's PASSIVE under both CA and federal law "
-     "(the ordinary landlord/K-1 case, dominant real-world driver of this line), the PAL "
-     "mechanic itself is confirmed identical CA/federal -- FTB 3801: 'Generally, California "
-     "law is the same as federal law concerning PAL limitations.' Any divergence comes purely "
-     "from feeding CA-basis vs federal-basis income/loss (FTB 3885A, depreciation/bonus-"
-     "depreciation non-conformity) into that otherwise-identical calculation -- same "
-     "cumulative-historical-CA-depreciation problem as Line 4/4a/4b, left deferred. See the "
-     "separate 'IRC 469(c)(7) real estate professional' row for the one tractable slice found."),
+    ("I", "B", "4", "Other gains/losses basis differences (Schedule D-1) -- GAINS only",
+     "both", "narrow", "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 4; "
+     "Schedule D-1 Instructions (parallels federal Form 4797)",
+     "built", None,
+     "Built via income_brackets.compute_schedule_d1_basis_diff_ca_tax / "
+     "engine._income_schedule_d1_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. Re-examined 2026-08-23: the 2026-08-15 "
+     "research's root-cause finding (CA's standing bonus-depreciation non-conformity requiring "
+     "cumulative CA-basis history to DERIVE) still holds, but this feature doesn't need to "
+     "derive that history -- only accept the taxpayer's own already-computed federal and "
+     "California Form 4797/Schedule D-1 gain figures directly, same 'trust the stated figure' "
+     "precedent as the other basis-difference items. Scoped to GAINS only -- an ordinary "
+     "Section 1231/1245/1250 LOSS is not subject to the capital-loss annual limit, a genuinely "
+     "different mechanic not attempted here (see the separate not_applicable-adjacent note: "
+     "this narrows the item's own frequency from its original 'narrow' rating). One real bug "
+     "found live: this feature's own trigger vocabulary ('form 4797', 'section 1231/1245/1250') "
+     "contains digits that parse as phantom dollar amounts via the shared extraction regex -- "
+     "fixed with a local phantom-filter, same established pattern as 9+ prior collisions this "
+     "session (280E, QSBS, Form 2555, CDC credit's '3506', etc.). Also proactively applied the "
+     "dispatcher-ordering and detect_compute_signal exclusion fixes learned from the earlier "
+     "basis-difference items, before testing rather than after."),
+    ("I", "B", "5", "Rental RE/royalties/partnership/S-corp/trust depreciation differences (ordinary passive activities) -- INCOME only",
+     "both", "moderate", "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 5; "
+     "FTB 3885A Instructions",
+     "built", None,
+     "Built via income_brackets.compute_rental_depreciation_basis_diff_ca_tax / "
+     "engine._income_rental_depreciation_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. Re-examined 2026-08-23: the 2026-08-15 "
+     "research's finding still holds (PAL mechanic confirmed identical CA/federal -- FTB 3801: "
+     "'Generally, California law is the same as federal law concerning PAL limitations'; "
+     "divergence comes purely from feeding CA-basis vs federal-basis income/loss into that "
+     "otherwise-identical calculation) -- but this feature doesn't need to reproduce the PAL "
+     "calculation or the depreciation history behind it, only accept the taxpayer's own "
+     "already-computed federal and California NET RENTAL/ROYALTY INCOME figures directly. "
+     "Scoped to INCOME (gains) only, a real and meaningful limitation for this line "
+     "specifically -- rental activities commonly show a LOSS after depreciation, and a net "
+     "loss here would need to interact with either the ALREADY-BUILT real-estate-professional "
+     "allowance (see the separate 'IRC 469(c)(7)' row) or the unmodeled passive-activity-loss "
+     "suspension, genuinely more than a sign flip. Zero extraction bugs found live -- "
+     "proactively applied every lesson learned building the prior 4 basis-difference items "
+     "(self-referential 'rental' exclusion, detect_compute_signal exclusion, phantom-digit "
+     "guard for '3885', dispatcher ordering before the generic feature's own checks) before "
+     "ever testing, and all of them were needed on the very first live run."),
     ("I", "B", "5b", "CA non-conformity to IRC 469(c)(7) real estate professional exception",
      "addition", "narrow", "Sched CA (540) Pt I Sec B line 5; FTB 3801 General Information",
      "built", "ca_income_tax_bracket",
@@ -267,25 +347,27 @@ ITEMS = [
      "if lived-apart status isn't stated, not guessed. Narrow population (real estate "
      "professionals specifically) despite the parent row's 'moderate' frequency, which mixes "
      "in the much more common (and untractable) ordinary-landlord case."),
-    ("I", "B", "6", "Farm income depreciation/passive-activity/NOL differences",
-     "both", "narrow", "Sched CA (540) Pt I Sec B line 6; FTB 3801/3885A",
-     "deferred_new_engine", None,
-     "Researched 2026-08-15, per-component (checked for a Line-5-style hidden tractable slice, "
-     "found none this time): (1) DEPRECIATION -- confirmed same bonus-depreciation/168(k) "
-     "CA-basis problem as Lines 4/5, applied to Schedule F assets via FTB 3885A; needs "
-     "cumulative history, left deferred. (2) PASSIVE-ACTIVITY -- verified NO CA non-conformity "
-     "exists for farming (FTB 3801's exhaustive non-conformity list names only real-estate "
-     "professionals/IRC 469(c)(7); the actual farm-specific federal provision, IRC 469(h)(3) "
-     "retired/disabled farmers, isn't flagged as a CA divergence anywhere and predates every "
-     "conformity-date cutoff; farming also gets no $25k-style special allowance to begin with, "
-     "unlike rental real estate) -- genuinely not tractable, not just deferred. (3) 'NOLs' in "
-     "the line's own framing sentence is boilerplate, not a distinct Line 6 mechanism -- Line 6 "
-     "cites only FTB 3801/3885A, never 3805V; the real NOL addback lives at Line 8a (own "
-     "deferred row) with the $1M-suspension slice already BUILT at Line 9b2. CA's uniform "
-     "no-carryback rule (R&TC 17276) also defeats IRC 172(b)(1)(B)'s farm-specific carryback, "
-     "so nothing farm-specific survives there either. Net: unlike Line 5, no piece of Line 6 is "
-     "buildable -- all three named triggers resolve to 'same basis problem' or 'not actually "
-     "this line, already tracked elsewhere.'"),
+    ("I", "B", "6", "Farm income depreciation/passive-activity/NOL differences -- DEPRECIATION, INCOME only",
+     "both", "narrow", "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 6; "
+     "FTB 3801/3885A Instructions",
+     "built", None,
+     "Built via income_brackets.compute_farm_depreciation_basis_diff_ca_tax / "
+     "engine._income_farm_depreciation_basis_diff_answer -- a thin wrapper reusing "
+     "compute_generic_basis_diff_ca_tax's exact math. Re-examined 2026-08-23: the 2026-08-15 "
+     "research checked for a Line-5-style tractable SUB-POPULATION (a farm-specific carve-out "
+     "analogous to the real-estate-professional exception) and correctly found none -- but "
+     "that's a different question from whether the 'trust the stated already-computed figure' "
+     "reframing (used across every basis-difference item this pass) applies, which it does: "
+     "structurally this is Line 5's exact mechanic substituting Schedule F farm income for "
+     "Schedule E rental income. Scoped to INCOME (gains) only, same discipline as rental "
+     "depreciation. The research's OTHER two 2026-08-15 findings remain correct and UNCHANGED: "
+     "PASSIVE-ACTIVITY has no CA divergence for farming at all (genuinely not tractable, not "
+     "just deferred -- nothing to build), and 'NOLs' in this line's own framing sentence is "
+     "boilerplate, not a distinct Line 6 mechanism (the real NOL addback lives at the separate "
+     "Line 8a rows). Zero extraction bugs found live -- sixth and final basis-difference item "
+     "this pass, benefiting from every lesson (self-referential exclusions, "
+     "detect_compute_signal exclusion, phantom-digit guards, dispatcher ordering) applied "
+     "proactively before testing."),
     ("I", "B", "7", "Unemployment compensation",
      "subtraction", "common", "Sched CA (540) Pt I Sec B line 7",
      "built", "unemployment_compensation", None),

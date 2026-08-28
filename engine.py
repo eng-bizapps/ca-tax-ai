@@ -2923,6 +2923,612 @@ def _income_disaster_loss_carryover_missing_filing_status_answer(question: str, 
     return result
 
 
+def _income_generic_basis_diff_answer(conn, question: str, base: dict):
+    """Generic CA/federal capital-gain basis difference (Schedule CA
+    (540) Line 7a) -- see income_brackets.compute_generic_basis_diff_ca_tax's
+    docstring for the "trust the stated federal AND California gain
+    figures directly" pattern this reuses. Extracts federal gain and CA
+    gain as two anchors, remainder is other income -- uses
+    _amount_after_filtered_span (forward-only), not the undirected
+    variant, since this feature's phrasing is always "X is $Y" (found
+    live: with "other income is $80,000" stated right before "federal
+    capital gain is $50,000", the undirected nearest-distance version
+    picked the PRECEDING $80,000 over the $50,000 the anchor actually
+    describes -- the same collision class as OSTC/Underpayment)."""
+    fs = income_brackets.detect_generic_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    fed_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this gain), a "
+        f"${federal_gain:,.2f} federal capital gain, and a ${ca_gain:,.2f} California capital "
+        f"gain (using your California basis), filing status {label}: your Schedule CA (540) "
+        f"Line 7a adjustment is {adj_direction} ${abs(calc['adjustment']):,.2f} "
+        f"({income_brackets.GENERIC_BASIS_DIFF_CITATION}). Your California AGI is about "
+        f"${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated California capital gain figure is the correct, "
+        "already-computed CA-basis result (not independently re-derived from your acquisition/"
+        "depreciation history) -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_generic_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_generic_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a basis difference on a capital gain, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse. Please also state your other "
+        "income, your federal capital gain, and your California capital gain.")
+    return result
+
+
+def _income_generic_basis_diff_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when QSBS/K-1/home-sale/installment-
+    sale language is present -- each has its own genuinely different
+    mechanic, not just a basis question this simplified path can
+    answer."""
+    if not income_brackets.detect_generic_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles a generic California/federal capital-gain basis "
+        "difference for the common case -- Qualified Small Business Stock (Section 1202/1045), "
+        "K-1 capital gains, home/residence sales (Section 121 exclusion), and installment sales "
+        "(FTB 3805E) each have their own distinct mechanic beyond a simple basis difference. "
+        "Please ask about the specific situation directly, or consult a tax professional."
+    )
+    return result
+
+
+def _income_installment_sale_basis_diff_answer(conn, question: str, base: dict):
+    """Installment sale gain (FTB 3805E) with a CA/federal basis
+    difference -- see income_brackets.compute_installment_sale_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged. Same extraction shape/anchor terms and same forward-only
+    span pattern as the generic basis-difference feature."""
+    fs = income_brackets.detect_installment_sale_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    fed_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_installment_sale_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this gain), a "
+        f"${federal_gain:,.2f} federal installment sale gain recognized this year, and a "
+        f"${ca_gain:,.2f} California installment sale gain recognized this year (using your "
+        f"California basis), filing status {label}: your Schedule CA (540) Line 7a adjustment "
+        f"is {adj_direction} ${abs(calc['adjustment']):,.2f} ({income_brackets.INSTALLMENT_SALE_BASIS_DIFF_CITATION}). "
+        f"Your California AGI is about ${calc['agi']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California recognized-gain figures "
+        "for THIS YEAR are correct (not independently re-derived from your sale price/basis/"
+        "gross-profit-ratio/payments-received) and covers only the current year's recognized "
+        "gain, not your full remaining installment schedule -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_installment_sale_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_installment_sale_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an installment sale basis difference, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse. Please also state your other "
+        "income, your federal recognized gain this year, and your California recognized gain "
+        "this year.")
+    return result
+
+
+def _income_installment_sale_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_installment_sale_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles installment sale gain with a California/federal basis "
+        "difference for the common case -- Qualified Small Business Stock (Section 1202/1045), "
+        "K-1 capital gains, and home/residence sales (Section 121 exclusion) each have their "
+        "own distinct mechanic. Please ask about the specific situation directly, or consult a "
+        "tax professional."
+    )
+    return result
+
+
+def _income_home_sale_basis_diff_answer(conn, question: str, base: dict):
+    """Gain on personal residence sale where CA/federal depreciation
+    diverged -- see income_brackets.compute_home_sale_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged, and for the "already net of Section 121 exclusion"
+    assumption. Same extraction shape as the other two basis-difference
+    features."""
+    fs = income_brackets.detect_home_sale_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    fed_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_home_sale_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this gain), a "
+        f"${federal_gain:,.2f} federal gain on your home sale, and a ${ca_gain:,.2f} California "
+        f"gain on your home sale (both already net of any Section 121 exclusion, using your "
+        f"California depreciation basis), filing status {label}: your Schedule CA (540) Line "
+        f"7a adjustment is {adj_direction} ${abs(calc['adjustment']):,.2f} "
+        f"({income_brackets.HOME_SALE_BASIS_DIFF_CITATION}). Your California AGI is about "
+        f"${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California gain figures already "
+        "correctly reflect any Section 121 exclusion and your diverged depreciation basis (not "
+        "independently re-derived) -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_home_sale_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_home_sale_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a home-sale depreciation basis "
+        "difference, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please also "
+        "state your other income, your federal gain on the sale, and your California gain on "
+        "the sale.")
+    return result
+
+
+def _income_home_sale_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_home_sale_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles a home-sale depreciation basis difference for the common "
+        "case -- Qualified Small Business Stock (Section 1202/1045), K-1 capital gains, and "
+        "installment sales (FTB 3805E) each have their own distinct mechanic. Please ask about "
+        "the specific situation directly, or consult a tax professional."
+    )
+    return result
+
+
+def _schedule_d1_strip_form_number_phantoms(amounts):
+    """Literal "4797" in "form 4797", or "1231"/"1245"/"1250" in "Section
+    1231"/"1245 recapture"/"1250 recapture" (this feature's own trigger
+    vocabulary) parse as phantom dollar amounts -- same collision class
+    as cannabis 280E/QSBS/Form 2555/CDC credit's "3506"/etc. Local
+    filter scoped to this feature."""
+    phantoms = {4797.0, 1231.0, 1245.0, 1250.0}
+    return [(a, s, e) for a, s, e in amounts if a not in phantoms]
+
+
+def _income_schedule_d1_basis_diff_answer(conn, question: str, base: dict):
+    """Schedule D-1/Form 4797 ordinary business-property GAIN with a CA/
+    federal basis difference -- see income_brackets.compute_schedule_d1_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged. GAINS only; loss-flavored language defers (see
+    detect_schedule_d1_basis_diff_out_of_scope)."""
+    fs = income_brackets.detect_schedule_d1_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _schedule_d1_strip_form_number_phantoms(_amounts(question))
+    fed_match = _amount_after_filtered_span(question, income_brackets.SCHEDULE_D1_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.SCHEDULE_D1_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_schedule_d1_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this gain), a "
+        f"${federal_gain:,.2f} federal Schedule D-1/Form 4797 business-property gain, and a "
+        f"${ca_gain:,.2f} California business-property gain (using your California basis), "
+        f"filing status {label}: your Schedule CA (540) Line 4 adjustment is {adj_direction} "
+        f"${abs(calc['adjustment']):,.2f} ({income_brackets.SCHEDULE_D1_BASIS_DIFF_CITATION}). "
+        f"Your California AGI is about ${calc['agi']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California gain figures are the "
+        "correct, already-computed Section 1231/1245/1250 results (not independently re-"
+        "derived from your acquisition/depreciation history) -- your actual liability may "
+        "differ."
+    )
+    return result
+
+
+def _income_schedule_d1_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_schedule_d1_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a Schedule D-1/Form 4797 basis "
+        "difference, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please also "
+        "state your other income, your federal gain, and your California gain.")
+    return result
+
+
+def _income_schedule_d1_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_schedule_d1_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles Schedule D-1/Form 4797 business-property GAINS with a "
+        "California/federal basis difference. A net LOSS on business-property sales isn't "
+        "subject to the capital-loss annual limit and has its own distinct mechanic this "
+        "assistant doesn't compute. Please consult a tax professional for an accurate figure."
+    )
+    return result
+
+
+def _rental_depreciation_strip_form_number_phantoms(amounts):
+    """Literal "3885" in "FTB 3885A"/"form 3885A" (this feature's own
+    trigger vocabulary) parses as a phantom dollar amount -- same
+    collision class as 9+ prior collisions this session. Local filter
+    scoped to this feature, added proactively before testing."""
+    return [(a, s, e) for a, s, e in amounts if a != 3885.0]
+
+
+def _income_rental_depreciation_basis_diff_answer(conn, question: str, base: dict):
+    """Rental/royalty depreciation basis difference, ordinary (non-real-
+    estate-professional) case -- see income_brackets.compute_rental_depreciation_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged. INCOME (gains) only; loss/real-estate-professional
+    language defers (see detect_rental_depreciation_basis_diff_out_of_scope)."""
+    fs = income_brackets.detect_rental_depreciation_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _rental_depreciation_strip_form_number_phantoms(_amounts(question))
+    fed_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_rental_depreciation_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this rental/royalty "
+        f"income), ${federal_gain:,.2f} in federal net rental/royalty income, and "
+        f"${ca_gain:,.2f} in California net rental/royalty income (using your California "
+        f"depreciation basis), filing status {label}: your Schedule CA (540) Line 5 adjustment "
+        f"is {adj_direction} ${abs(calc['adjustment']):,.2f} "
+        f"({income_brackets.RENTAL_DEPRECIATION_BASIS_DIFF_CITATION}). Your California AGI is "
+        f"about ${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California figures already "
+        "correctly reflect each jurisdiction's own (otherwise-identical) passive-activity-loss "
+        "limitation, and that this is NET INCOME, not a loss -- your actual liability may "
+        "differ."
+    )
+    return result
+
+
+def _income_rental_depreciation_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_rental_depreciation_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a rental/royalty depreciation basis "
+        "difference, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please also "
+        "state your other income, your federal net rental/royalty income, and your California "
+        "net rental/royalty income.")
+    return result
+
+
+def _income_rental_depreciation_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_rental_depreciation_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles rental/royalty depreciation basis differences for a "
+        "PROFITABLE (net income) ordinary activity. A net LOSS needs either the real estate "
+        "professional allowance or the passive-activity-loss limitation, and real estate "
+        "professional status has its own dedicated calculation -- please ask about your "
+        "specific situation directly, or consult a tax professional."
+    )
+    return result
+
+
+def _income_farm_depreciation_basis_diff_answer(conn, question: str, base: dict):
+    """Farm income (Schedule F) depreciation basis difference -- see
+    income_brackets.compute_farm_depreciation_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged. INCOME (gains) only; loss language defers."""
+    fs = income_brackets.detect_farm_depreciation_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    fed_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_gain = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.GENERIC_BASIS_DIFF_CA_GAIN_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_gain = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_farm_depreciation_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this farm income), "
+        f"${federal_gain:,.2f} in federal net farm income, and ${ca_gain:,.2f} in California "
+        f"net farm income (using your California depreciation basis), filing status {label}: "
+        f"your Schedule CA (540) Line 6 adjustment is {adj_direction} "
+        f"${abs(calc['adjustment']):,.2f} ({income_brackets.FARM_DEPRECIATION_BASIS_DIFF_CITATION}). "
+        f"Your California AGI is about ${calc['agi']:,.2f}. After the standard deduction "
+        f"(${calc['standard_deduction']:,.0f}), your California taxable income is about "
+        f"${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California figures are the "
+        "correct, already-computed net farm income results, and that this is NET INCOME, not "
+        "a loss -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_farm_depreciation_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_farm_depreciation_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with a farm income depreciation basis "
+        "difference, I need your filing status: single, married filing jointly, married "
+        "filing separately, head of household, or qualifying surviving spouse. Please also "
+        "state your other income, your federal net farm income, and your California net farm "
+        "income.")
+    return result
+
+
+def _income_farm_depreciation_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_farm_depreciation_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles farm income depreciation basis differences for a "
+        "PROFITABLE (net income) activity. A net farm LOSS has its own distinct mechanic this "
+        "assistant doesn't compute. Please consult a tax professional for an accurate figure."
+    )
+    return result
+
+
+def _income_ira_distribution_basis_diff_answer(conn, question: str, base: dict):
+    """IRA distribution basis/timing difference -- see
+    income_brackets.compute_ira_distribution_basis_diff_ca_tax's
+    docstring for why this reuses the generic basis-difference math
+    unchanged. Roth/early-distribution language defers."""
+    fs = income_brackets.detect_ira_distribution_basis_diff_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    fed_match = _amount_after_filtered_span(question, income_brackets.IRA_DISTRIBUTION_BASIS_DIFF_FEDERAL_TERMS, amounts)
+    if fed_match is None:
+        return None
+    federal_distribution = fed_match[0]
+    remaining = _remove_amount_span(amounts, fed_match)
+    ca_match = _amount_after_filtered_span(question, income_brackets.IRA_DISTRIBUTION_BASIS_DIFF_CA_TERMS, remaining)
+    if ca_match is None:
+        return None
+    ca_distribution = ca_match[0]
+    remaining = _remove_amount_span(remaining, ca_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    other_income = others[0]
+    calc = income_brackets.compute_ira_distribution_basis_diff_ca_tax(conn, other_income, federal_distribution, ca_distribution, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": other_income, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    adj_direction = "an addition of" if calc["adjustment"] > 0 else ("a subtraction of" if calc["adjustment"] < 0 else "no change from")
+    result["answer_text"] = (
+        f"Assuming ${other_income:,.2f} in other income (not including this distribution), a "
+        f"${federal_distribution:,.2f} federal taxable IRA distribution, and a "
+        f"${ca_distribution:,.2f} California taxable IRA distribution (using your California "
+        f"contribution basis), filing status {label}: your Schedule CA (540) Line 4a/4b "
+        f"adjustment is {adj_direction} ${abs(calc['adjustment']):,.2f} "
+        f"({income_brackets.IRA_DISTRIBUTION_BASIS_DIFF_CITATION}). Your California AGI is "
+        f"about ${calc['agi']:,.2f}. After the standard deduction (${calc['standard_deduction']:,.0f}), "
+        f"your California taxable income is about ${calc['taxable_income']:,.2f}. Your marginal "
+        f"CA tax bracket is {calc['marginal_rate']*100:g}%, and your estimated "
+        f"{income_brackets.DEFAULT_TAX_YEAR} California income tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes your stated federal and California taxable-distribution "
+        "figures are correct (typically derived via FTB Publication 1005's own worksheet, not "
+        "independently re-derived here) -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_ira_distribution_basis_diff_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_ira_distribution_basis_diff_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an IRA distribution basis difference, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse. Please also state your other "
+        "income, your federal taxable distribution, and your California taxable distribution.")
+    return result
+
+
+def _income_ira_distribution_basis_diff_out_of_scope_answer(question: str, base: dict):
+    if not income_brackets.detect_ira_distribution_basis_diff_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles a basic IRA distribution basis difference. Roth IRA "
+        "conversions and early-distribution additional tax each have their own distinct "
+        "mechanic -- please ask about the specific situation directly, or consult a tax "
+        "professional."
+    )
+    return result
+
+
 def _cannabis_strip_280e_phantom_amounts(question: str, amounts):
     """_amounts()'s shared regex (an optional dollar sign, then digits)
     has no letter-suffix guard -- by design, so it still cleanly matches
@@ -5757,6 +6363,118 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_disaster_loss_carryover_fs_result:
         return missing_disaster_loss_carryover_fs_result
 
+    # Installment sale basis difference checked BEFORE the generic basis-
+    # difference checks below -- found live: a natural phrasing like
+    # "installment sale with a basis difference" contains BOTH "basis
+    # difference" (a GENERIC_BASIS_DIFF_TERMS trigger) AND "installment
+    # sale" (one of GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS's own terms),
+    # so without this ordering the GENERIC feature's own out-of-scope
+    # redirect would claim the question first, before the MORE SPECIFIC
+    # installment-sale feature ever got a chance to answer it (same "move
+    # the more specific check earlier" fix as K-1 capital gain/EBL
+    # carryover's dispatcher placement).
+    installment_sale_basis_diff_result = _income_installment_sale_basis_diff_answer(conn, question, base)
+    if installment_sale_basis_diff_result:
+        return installment_sale_basis_diff_result
+
+    missing_installment_sale_basis_diff_fs_result = _income_installment_sale_basis_diff_missing_filing_status_answer(question, base)
+    if missing_installment_sale_basis_diff_fs_result:
+        return missing_installment_sale_basis_diff_fs_result
+
+    installment_sale_basis_diff_out_of_scope_result = _income_installment_sale_basis_diff_out_of_scope_answer(question, base)
+    if installment_sale_basis_diff_out_of_scope_result:
+        return installment_sale_basis_diff_out_of_scope_result
+
+    # Home-sale depreciation basis difference checked BEFORE the generic
+    # basis-difference checks below too, same reasoning as installment
+    # sale's own ordering fix -- "home sale"/"personal residence" is one
+    # of GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS's own exclusion terms.
+    home_sale_basis_diff_result = _income_home_sale_basis_diff_answer(conn, question, base)
+    if home_sale_basis_diff_result:
+        return home_sale_basis_diff_result
+
+    missing_home_sale_basis_diff_fs_result = _income_home_sale_basis_diff_missing_filing_status_answer(question, base)
+    if missing_home_sale_basis_diff_fs_result:
+        return missing_home_sale_basis_diff_fs_result
+
+    home_sale_basis_diff_out_of_scope_result = _income_home_sale_basis_diff_out_of_scope_answer(question, base)
+    if home_sale_basis_diff_out_of_scope_result:
+        return home_sale_basis_diff_out_of_scope_result
+
+    # Schedule D-1/Form 4797 basis difference checked BEFORE the generic
+    # basis-difference checks below too -- proactively applying the same
+    # ordering lesson from installment sale/home sale, since the generic
+    # feature's own out-of-scope guard doesn't know about Schedule D-1/
+    # Form 4797 vocabulary and could otherwise claim the question first.
+    schedule_d1_basis_diff_result = _income_schedule_d1_basis_diff_answer(conn, question, base)
+    if schedule_d1_basis_diff_result:
+        return schedule_d1_basis_diff_result
+
+    missing_schedule_d1_basis_diff_fs_result = _income_schedule_d1_basis_diff_missing_filing_status_answer(question, base)
+    if missing_schedule_d1_basis_diff_fs_result:
+        return missing_schedule_d1_basis_diff_fs_result
+
+    schedule_d1_basis_diff_out_of_scope_result = _income_schedule_d1_basis_diff_out_of_scope_answer(question, base)
+    if schedule_d1_basis_diff_out_of_scope_result:
+        return schedule_d1_basis_diff_out_of_scope_result
+
+    # Rental/royalty depreciation basis difference checked BEFORE the
+    # generic basis-difference checks below too, same proactive ordering
+    # as installment sale/home sale/Schedule D-1.
+    rental_depreciation_basis_diff_result = _income_rental_depreciation_basis_diff_answer(conn, question, base)
+    if rental_depreciation_basis_diff_result:
+        return rental_depreciation_basis_diff_result
+
+    missing_rental_depreciation_basis_diff_fs_result = _income_rental_depreciation_basis_diff_missing_filing_status_answer(question, base)
+    if missing_rental_depreciation_basis_diff_fs_result:
+        return missing_rental_depreciation_basis_diff_fs_result
+
+    rental_depreciation_basis_diff_out_of_scope_result = _income_rental_depreciation_basis_diff_out_of_scope_answer(question, base)
+    if rental_depreciation_basis_diff_out_of_scope_result:
+        return rental_depreciation_basis_diff_out_of_scope_result
+
+    # Farm depreciation basis difference checked BEFORE the generic
+    # basis-difference checks below too, same proactive ordering as the
+    # rest of this family.
+    farm_depreciation_basis_diff_result = _income_farm_depreciation_basis_diff_answer(conn, question, base)
+    if farm_depreciation_basis_diff_result:
+        return farm_depreciation_basis_diff_result
+
+    missing_farm_depreciation_basis_diff_fs_result = _income_farm_depreciation_basis_diff_missing_filing_status_answer(question, base)
+    if missing_farm_depreciation_basis_diff_fs_result:
+        return missing_farm_depreciation_basis_diff_fs_result
+
+    farm_depreciation_basis_diff_out_of_scope_result = _income_farm_depreciation_basis_diff_out_of_scope_answer(question, base)
+    if farm_depreciation_basis_diff_out_of_scope_result:
+        return farm_depreciation_basis_diff_out_of_scope_result
+
+    # IRA distribution basis difference checked BEFORE the generic
+    # basis-difference checks below too, same proactive ordering as the
+    # rest of this family.
+    ira_distribution_basis_diff_result = _income_ira_distribution_basis_diff_answer(conn, question, base)
+    if ira_distribution_basis_diff_result:
+        return ira_distribution_basis_diff_result
+
+    missing_ira_distribution_basis_diff_fs_result = _income_ira_distribution_basis_diff_missing_filing_status_answer(question, base)
+    if missing_ira_distribution_basis_diff_fs_result:
+        return missing_ira_distribution_basis_diff_fs_result
+
+    ira_distribution_basis_diff_out_of_scope_result = _income_ira_distribution_basis_diff_out_of_scope_answer(question, base)
+    if ira_distribution_basis_diff_out_of_scope_result:
+        return ira_distribution_basis_diff_out_of_scope_result
+
+    generic_basis_diff_result = _income_generic_basis_diff_answer(conn, question, base)
+    if generic_basis_diff_result:
+        return generic_basis_diff_result
+
+    missing_generic_basis_diff_fs_result = _income_generic_basis_diff_missing_filing_status_answer(question, base)
+    if missing_generic_basis_diff_fs_result:
+        return missing_generic_basis_diff_fs_result
+
+    generic_basis_diff_out_of_scope_result = _income_generic_basis_diff_out_of_scope_answer(question, base)
+    if generic_basis_diff_out_of_scope_result:
+        return generic_basis_diff_out_of_scope_result
+
     cannabis_280e_result = _income_cannabis_280e_answer(conn, question, base)
     if cannabis_280e_result:
         return cannabis_280e_result
@@ -6064,6 +6782,27 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_nol_wages_ambiguous,
     income_brackets.detect_disaster_loss_carryover_signal,
     income_brackets.detect_disaster_loss_carryover_missing_filing_status,
+    income_brackets.detect_generic_basis_diff_signal,
+    income_brackets.detect_generic_basis_diff_missing_filing_status,
+    income_brackets.detect_generic_basis_diff_out_of_scope,
+    income_brackets.detect_installment_sale_basis_diff_signal,
+    income_brackets.detect_installment_sale_basis_diff_missing_filing_status,
+    income_brackets.detect_installment_sale_basis_diff_out_of_scope,
+    income_brackets.detect_home_sale_basis_diff_signal,
+    income_brackets.detect_home_sale_basis_diff_missing_filing_status,
+    income_brackets.detect_home_sale_basis_diff_out_of_scope,
+    income_brackets.detect_schedule_d1_basis_diff_signal,
+    income_brackets.detect_schedule_d1_basis_diff_missing_filing_status,
+    income_brackets.detect_schedule_d1_basis_diff_out_of_scope,
+    income_brackets.detect_rental_depreciation_basis_diff_signal,
+    income_brackets.detect_rental_depreciation_basis_diff_missing_filing_status,
+    income_brackets.detect_rental_depreciation_basis_diff_out_of_scope,
+    income_brackets.detect_farm_depreciation_basis_diff_signal,
+    income_brackets.detect_farm_depreciation_basis_diff_missing_filing_status,
+    income_brackets.detect_farm_depreciation_basis_diff_out_of_scope,
+    income_brackets.detect_ira_distribution_basis_diff_signal,
+    income_brackets.detect_ira_distribution_basis_diff_missing_filing_status,
+    income_brackets.detect_ira_distribution_basis_diff_out_of_scope,
     income_brackets.detect_cannabis_280e_signal,
     income_brackets.detect_cannabis_280e_missing_filing_status,
     income_brackets.detect_ira_deduction_signal,

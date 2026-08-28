@@ -5130,6 +5130,684 @@ def compute_underpayment_penalty_ca_tax(conn, income_amount: float, filing_statu
             "prior_year_agi": prior_year_agi, "withholding": withholding, "penalty": penalty_calc}
 
 
+# --- Generic CA/federal capital-gain basis differences (Schedule CA (540)
+# Part I Section A Line 7a; Schedule D (540) Column (c)) -- previously
+# deferred as needing "cumulative historical CA-vs-federal basis tracking
+# nobody has on hand from any single document." Re-examined 2026-08-23:
+# that's true if this feature tried to DERIVE the CA basis from raw
+# acquisition/depreciation history -- but Schedule CA Line 7a doesn't
+# care HOW the CA-adjusted gain was derived, only what it IS. Reusing the
+# SAME "trust the stated figure" precedent already used for every K-1/
+# carryover/credit feature in this codebase: ask for the taxpayer's own
+# ALREADY-COMPUTED federal and California capital gain figures directly,
+# rather than trying to reconstruct either from scratch. This is a
+# genuine simplification, not a scope dodge -- CA AGI only ever needs the
+# CA-computed gain (other_income + ca_gain), the federal figure is used
+# purely to compute and disclose the Line 7a adjustment amount for
+# transparency, mirroring the form's own column structure.
+#
+# SCOPED to GAINS only (both figures non-negative) -- a basis difference
+# affecting a LOSS interacts with the separate capital-loss annual-limit
+# mechanic (already built elsewhere), a genuinely different case not
+# attempted here. Also explicitly OUT OF SCOPE, routes elsewhere or
+# defers rather than guesses: QSBS (Section 1202/1045 exclusions have
+# their own dedicated feature and different mechanic entirely), K-1
+# capital gains (own dedicated feature), home/residence sales (Section
+# 121 exclusion is a completely different formula, not just a basis
+# question -- tracked as ITS OWN separate deferred ledger item), and
+# installment sales (FTB 3805E has its own multi-payment structure --
+# also tracked as its own separate deferred ledger item).
+GENERIC_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a; Schedule D (540) Instructions, Column (c)"
+GENERIC_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+GENERIC_BASIS_DIFF_TERMS = {
+    "basis difference", "basis differences", "cost basis difference",
+    "cost basis differences", "different basis for california",
+    "california basis differs", "california basis is different",
+    "federal and california basis differ", "different cost basis for california",
+}
+GENERIC_BASIS_DIFF_FEDERAL_GAIN_TERMS = {
+    "federal capital gain", "federal capital gains", "federal gain",
+    "gain for federal purposes", "gain on my federal return",
+}
+GENERIC_BASIS_DIFF_CA_GAIN_TERMS = {
+    "california capital gain", "california capital gains", "ca capital gain",
+    "california gain", "gain for california purposes", "gain on my california return",
+}
+GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "section 1045", "irc 1045",
+    "k-1 capital gain", "k1 capital gain", "schedule k-1 capital gain",
+    "home sale", "sale of my home", "sale of my house", "sold my home",
+    "sold my house", "personal residence",
+    "installment sale", "installment payments", "installment agreement",
+}
+GENERIC_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _generic_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in GENERIC_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in GENERIC_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_generic_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'stated
+    federal capital gain + stated California capital gain (a basis
+    difference)' question."""
+    q = question.lower()
+    if not _generic_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_generic_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _generic_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_generic_basis_diff_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside QSBS/K-1/home-sale/installment-sale language -- each of
+    those has its own genuinely different mechanic, not just a basis
+    question this simplified path can answer."""
+    q = question.lower()
+    return (any(t in q for t in GENERIC_BASIS_DIFF_TERMS)
+            and any(t in q for t in GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_generic_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                        filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """other_income excludes the capital gain itself (stated separately).
+    CA AGI only ever needs ca_gain (the taxpayer's own CA-basis-computed
+    figure) -- federal_gain is used only to compute/disclose the
+    Line 7a adjustment amount, mirroring the form's own column
+    structure. Scoped to GAINS only (both figures >= 0)."""
+    if other_income is None or other_income < 0:
+        return None
+    if federal_gain is None or federal_gain < 0:
+        return None
+    if ca_gain is None or ca_gain < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    agi = other_income + ca_gain
+    taxable_income = max(0.0, agi - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    adjustment = round(ca_gain - federal_gain, 2)
+    return {**calc, "other_income": other_income, "federal_gain": federal_gain, "ca_gain": ca_gain,
+            "adjustment": adjustment, "agi": agi, "taxable_income": taxable_income,
+            "standard_deduction": dedu["amount"]}
+
+
+# --- Installment sale gain (FTB 3805E) with a CA/federal basis difference
+# (Schedule CA (540) Line 7a) -- previously deferred for TWO reasons: (1)
+# the generic basis-differences problem (now solved, see above), and (2)
+# FTB 3805E itself being "a multi-input form (price/basis/gross-profit-
+# ratio/payments-received) rather than a single stated fact." Re-examined
+# 2026-08-23: reason (2) only applies if this feature tried to COMPUTE
+# the gross-profit-ratio-times-payments-received recognition math from
+# scratch. It doesn't need to -- a taxpayer with an ongoing installment
+# sale already has (or, for the federal side, is legally required to
+# have) a Form 6252/3805E computing THIS YEAR's recognized gain; this
+# feature just needs that already-computed recognized-gain figure for
+# federal and for California, same as the generic basis-difference
+# feature. Reuses compute_generic_basis_diff_ca_tax's exact math (same
+# "CA AGI only needs the CA figure, federal figure is for the disclosed
+# adjustment" mechanic) -- installment-sale gain recognized this year is
+# structurally just another capital gain from CA AGI's perspective, only
+# the SOURCE of the basis difference (a multi-year payment schedule
+# instead of a one-time sale) differs, and that's already baked into
+# whatever recognized-gain figures the taxpayer states. Scoped to a
+# single installment sale's gain for the CURRENT year only (not the
+# taxpayer's full remaining installment schedule).
+INSTALLMENT_SALE_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a; FTB Form 3805E Instructions"
+INSTALLMENT_SALE_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+INSTALLMENT_SALE_BASIS_DIFF_TERMS = {
+    "installment sale", "installment sale gain", "form 3805e", "ftb 3805e", "3805e",
+    # deliberately does NOT include "installment sale basis difference" --
+    # found live: that compound phrase contains "basis difference" as a
+    # substring (a GENERIC_BASIS_DIFF_TERMS trigger) AND "installment
+    # sale" (one of GENERIC_BASIS_DIFF_OUT_OF_SCOPE_TERMS's own terms),
+    # so it satisfied the GENERIC feature's own out-of-scope collision
+    # check and got intercepted there, before this dedicated feature
+    # (checked later in the dispatcher) ever ran. "installment sale"
+    # alone is already a sufficient, unambiguous trigger.
+}
+INSTALLMENT_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "section 1045", "irc 1045",
+    "k-1 capital gain", "k1 capital gain", "schedule k-1 capital gain",
+    "home sale", "sale of my home", "sale of my house", "sold my home",
+    "sold my house", "personal residence",
+}
+INSTALLMENT_SALE_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _installment_sale_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_installment_sale_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'installment
+    sale, stated federal recognized gain this year + stated California
+    recognized gain this year' question."""
+    q = question.lower()
+    if not _installment_sale_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_installment_sale_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _installment_sale_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_installment_sale_basis_diff_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return (any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_TERMS)
+            and any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_installment_sale_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                                 filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- installment-
+    sale gain recognized this year is, from CA AGI's perspective,
+    structurally just another capital gain; see module note above for
+    why the multi-year payment-schedule mechanics don't need to be
+    reproduced here. Returns the SAME shape, with its own citation."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": INSTALLMENT_SALE_BASIS_DIFF_CITATION,
+            "source_url": INSTALLMENT_SALE_BASIS_DIFF_SOURCE_URL}
+
+
+# --- Gain on personal residence sale where CA/federal depreciation
+# diverged (Schedule CA (540) Line 7a) -- "same historical-depreciation-
+# tracking family as the generic basis-differences item." Re-examined
+# 2026-08-23 with the SAME reframing: reuses compute_generic_basis_diff_ca_tax
+# unchanged, asking for the taxpayer's already-computed federal and
+# California gain figures directly. Scoped NARROWLY on purpose -- this
+# population specifically means a residence that had BUSINESS/RENTAL USE
+# (home office, partial rental conversion) generating a depreciation
+# history to diverge on; an ordinary personal-use-only home sale has no
+# depreciation at all and isn't what this item is about. Trigger
+# therefore requires BOTH home/residence-sale language AND an explicit
+# depreciation mention together (an AND-combination, not a flat term
+# set, since the natural phrasing space is combinatorial) -- a bare home-
+# sale question without depreciation language does NOT match here.
+#
+# Explicitly assumes the stated gain figures are ALREADY NET of any IRC
+# Section 121 exclusion ($250k/$500k MFJ) -- CA generally conforms to
+# Section 121 itself, so the exclusion mechanic isn't re-derived here,
+# only the depreciation-driven basis/gain difference underneath it.
+HOME_SALE_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 7a"
+HOME_SALE_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+HOME_SALE_BASIS_DIFF_HOME_TERMS = {
+    "home sale", "house sale", "residence sale", "sale of my home",
+    "sale of my house", "sold my home", "sold my house", "personal residence",
+    "primary residence",
+}
+HOME_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "section 1045", "irc 1045",
+    "k-1 capital gain", "k1 capital gain", "schedule k-1 capital gain",
+    "installment sale", "installment payments",
+}
+HOME_SALE_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _home_sale_basis_diff_has_trigger(q: str) -> bool:
+    """Requires BOTH home/residence-sale language AND an explicit
+    depreciation mention -- an ordinary personal-use-only home sale has
+    no depreciation history to diverge on, so a bare home-sale question
+    is deliberately NOT matched here (falls through to whatever other
+    path, if any, handles a plain home sale)."""
+    return "depreciation" in q and any(t in q for t in HOME_SALE_BASIS_DIFF_HOME_TERMS)
+
+
+def _home_sale_basis_diff_base_signal_ok(q: str) -> bool:
+    if not _home_sale_basis_diff_has_trigger(q):
+        return False
+    if any(t in q for t in HOME_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in HOME_SALE_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_home_sale_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'home sale
+    with diverged CA/federal depreciation, stated federal gain + stated
+    California gain (both already net of any Section 121 exclusion)'
+    question."""
+    q = question.lower()
+    if not _home_sale_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_home_sale_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _home_sale_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_home_sale_basis_diff_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return (_home_sale_basis_diff_has_trigger(q)
+            and any(t in q for t in HOME_SALE_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_home_sale_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                          filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- both
+    federal_gain and ca_gain are assumed to already be NET of any
+    Section 121 exclusion (see module note above)."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": HOME_SALE_BASIS_DIFF_CITATION,
+            "source_url": HOME_SALE_BASIS_DIFF_SOURCE_URL}
+
+
+# --- Schedule D-1 ordinary business-property gain with a CA/federal
+# basis difference (Schedule CA (540) Part I Section B Line 4; parallels
+# federal Form 4797, Section 1231/1245/1250 gains) -- distinct from the
+# CAPITAL-asset gains on Line 7a (Section A) above. Re-examined
+# 2026-08-23 with the same reframing: the divergence driver (CA's
+# standing non-conformity to bonus depreciation, IRC 168(k)) requires
+# cumulative historical CA-basis depreciation tracking to DERIVE -- but
+# again, this feature doesn't need to derive it, only accept the
+# taxpayer's own already-computed federal and California Form 4797/
+# Schedule D-1 gain figures directly. Reuses compute_generic_basis_diff_ca_tax's
+# exact math -- an ordinary Section 1231/1245/1250 gain affects CA AGI
+# the same additive way a capital gain does.
+#
+# SCOPED to GAINS only, same as the other basis-difference features (a
+# NET LOSS on business-property sales is a real, disclosed limitation --
+# ordinary losses under this line are NOT subject to the capital-loss
+# annual limit, a genuinely different mechanic this build doesn't
+# attempt, to avoid introducing a new sign-detection extraction risk for
+# a comparatively rarer case).
+SCHEDULE_D1_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 4; Schedule D-1 Instructions (parallels federal Form 4797)"
+SCHEDULE_D1_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+SCHEDULE_D1_BASIS_DIFF_TERMS = {
+    "schedule d-1", "form 4797", "section 1231", "section 1245", "section 1250",
+    "business property sale", "sale of business property", "1231 gain",
+    "1245 recapture", "1250 recapture",
+}
+SCHEDULE_D1_BASIS_DIFF_FEDERAL_GAIN_TERMS = {
+    "federal gain", "federal capital gain", "gain for federal purposes",
+    "gain on my federal return", "federal 4797 gain", "federal section 1231 gain",
+}
+SCHEDULE_D1_BASIS_DIFF_CA_GAIN_TERMS = {
+    "california gain", "california capital gain", "gain for california purposes",
+    "gain on my california return", "california 4797 gain", "california section 1231 gain",
+}
+SCHEDULE_D1_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "loss", "net loss", "business property loss",
+}
+SCHEDULE_D1_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"business"}
+
+
+def _schedule_d1_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in SCHEDULE_D1_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in SCHEDULE_D1_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in SCHEDULE_D1_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_schedule_d1_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'Schedule D-1/
+    Form 4797 ordinary business-property GAIN with stated federal and
+    California figures (a basis difference)' question. GAINS only --
+    any loss-flavored language defers instead of guessing at the
+    ordinary-loss mechanic."""
+    q = question.lower()
+    if not _schedule_d1_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_schedule_d1_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _schedule_d1_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_schedule_d1_basis_diff_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside loss-flavored language -- an ordinary Section 1231/1245/
+    1250 LOSS is not subject to the capital-loss annual limit, a
+    genuinely different mechanic this scoped (gains-only) build doesn't
+    attempt."""
+    q = question.lower()
+    return (any(t in q for t in SCHEDULE_D1_BASIS_DIFF_TERMS)
+            and any(t in q for t in SCHEDULE_D1_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_schedule_d1_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                            filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- an ordinary
+    Section 1231/1245/1250 gain affects CA AGI the same additive way a
+    capital gain does. GAINS only (both figures >= 0); see module note
+    above for why a net loss isn't attempted here."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": SCHEDULE_D1_BASIS_DIFF_CITATION,
+            "source_url": SCHEDULE_D1_BASIS_DIFF_SOURCE_URL}
+
+
+# --- Rental/royalty depreciation basis difference, ORDINARY (non-real-
+# estate-professional) case (Schedule CA (540) Part I Section B Line 5;
+# FTB 3885A) -- "for an activity that's PASSIVE under both CA and
+# federal law (the ordinary landlord/K-1 case, dominant real-world
+# driver of this line), the PAL mechanic itself is confirmed identical
+# CA/federal... [divergence] comes purely from feeding CA-basis vs
+# federal-basis income/loss... into that otherwise-identical
+# calculation." Re-examined 2026-08-23 with the same reframing: asks
+# for the taxpayer's own already-computed federal and California net
+# rental/royalty income figures directly (each already reflecting its
+# own jurisdiction's PAL-limited result), rather than reproducing the
+# PAL mechanic or the depreciation history behind it. Reuses
+# compute_generic_basis_diff_ca_tax's exact math.
+#
+# SCOPED to GAINS (net rental/royalty INCOME) only, same as the other
+# basis-difference features -- unlike installment sale/home sale, this
+# is a real, disclosed limitation with meaningful reach: rental
+# activities commonly show a LOSS after depreciation, and a net loss
+# here would need to interact with the ALREADY-BUILT real-estate-
+# professional allowance (compute_real_estate_pro_ca_tax) or the
+# passive-activity-loss suspension (not modeled at all in this
+# codebase) for correctness -- genuinely more than a sign flip, not
+# attempted here. Real-estate-professional language explicitly routes
+# to that separate, already-built feature instead of this one.
+RENTAL_DEPRECIATION_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 5; FTB 3885A Instructions"
+RENTAL_DEPRECIATION_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+RENTAL_DEPRECIATION_BASIS_DIFF_TERMS = {
+    "rental depreciation", "royalty depreciation", "ftb 3885a", "form 3885a",
+    "rental basis difference", "royalty basis difference",
+    "passive activity depreciation", "rental property depreciation",
+}
+RENTAL_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "real estate professional", "real property professional",
+    "rental loss", "rental losses", "royalty loss", "royalty losses",
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "section 1045", "irc 1045",
+    "k-1 capital gain", "k1 capital gain",
+}
+RENTAL_DEPRECIATION_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"rental", "renting", "rented"}
+
+
+def _rental_depreciation_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_rental_depreciation_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'ordinary
+    rental/royalty activity, stated federal and California NET INCOME
+    figures (a depreciation basis difference)' question. INCOME (gains)
+    only -- a net loss defers instead of guessing at the PAL/real-
+    estate-professional interaction."""
+    q = question.lower()
+    if not _rental_depreciation_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_rental_depreciation_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _rental_depreciation_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_rental_depreciation_basis_diff_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside real-estate-professional or loss-flavored language --
+    both need a genuinely different mechanic (the already-built real-
+    estate-professional allowance, or the unmodeled PAL suspension),
+    not just this simplified income-only basis question."""
+    q = question.lower()
+    return (any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_TERMS)
+            and any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_rental_depreciation_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                                     filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- net rental/
+    royalty income affects CA AGI the same additive way a capital gain
+    does, once each jurisdiction's own (otherwise-identical) PAL
+    limitation has already been applied to produce the stated figures.
+    INCOME (gains) only; see module note above for why a net loss isn't
+    attempted here."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": RENTAL_DEPRECIATION_BASIS_DIFF_CITATION,
+            "source_url": RENTAL_DEPRECIATION_BASIS_DIFF_SOURCE_URL}
+
+
+# --- Farm income (Schedule F) depreciation basis difference, INCOME
+# only (Schedule CA (540) Part I Section B Line 6; FTB 3801/3885A) --
+# "confirmed same bonus-depreciation/168(k) CA-basis problem as Lines
+# 4/5, applied to Schedule F assets via FTB 3885A." Re-examined
+# 2026-08-23: the 2026-08-15 research checked for a Line-5-style
+# tractable sub-population (a farm-specific carve-out analogous to the
+# real-estate-professional exception) and correctly found none -- but
+# that's a DIFFERENT question than whether the SAME "trust the stated
+# already-computed figure" reframing (which doesn't need a carve-out at
+# all, just asks for the result directly) applies here too. It does --
+# structurally this is Line 5's exact mechanic, substituting Schedule F
+# farm income for Schedule E rental income. Reuses
+# compute_generic_basis_diff_ca_tax's exact math. The research's OTHER
+# two findings (passive-activity: no CA divergence exists for farming
+# at all; NOL: not actually a distinct Line 6 mechanism) are UNCHANGED
+# and still correctly out of scope for this line.
+#
+# SCOPED to INCOME (gains) only, same discipline as rental depreciation
+# -- a net farm LOSS is a real, disclosed limitation not attempted here,
+# for consistency across every basis-difference feature in this family
+# rather than introducing a new signed-value extraction risk this late.
+FARM_DEPRECIATION_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section B, Line 6; FTB 3801/3885A Instructions"
+FARM_DEPRECIATION_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+FARM_DEPRECIATION_BASIS_DIFF_TERMS = {
+    "farm depreciation", "farm income depreciation", "schedule f depreciation",
+    "farm basis difference", "farming depreciation",
+}
+FARM_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "farm loss", "farm losses", "farming loss",
+    "qsbs", "qualified small business stock", "section 1202", "irc 1202",
+    "section 1045", "irc 1045",
+    "k-1 capital gain", "k1 capital gain",
+}
+FARM_DEPRECIATION_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _farm_depreciation_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_farm_depreciation_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'farm
+    (Schedule F) activity, stated federal and California NET INCOME
+    figures (a depreciation basis difference)' question. INCOME (gains)
+    only -- a net loss defers instead of guessing."""
+    q = question.lower()
+    if not _farm_depreciation_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_farm_depreciation_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _farm_depreciation_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_farm_depreciation_basis_diff_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return (any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_TERMS)
+            and any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_farm_depreciation_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                                   filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- net farm
+    income affects CA AGI the same additive way a capital gain does.
+    INCOME (gains) only; see module note above for why a net loss isn't
+    attempted here."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": FARM_DEPRECIATION_BASIS_DIFF_CITATION,
+            "source_url": FARM_DEPRECIATION_BASIS_DIFF_SOURCE_URL}
+
+
+# --- IRA distribution basis/timing difference (Schedule CA (540) Part I
+# Section A Line 4a/4b; FTB Pub 1005) -- "requires historical CA-vs-
+# federal contribution basis, not a single stated fact." Re-examined
+# 2026-08-23 with the SAME reframing applied to every other basis-
+# difference item this pass: the taxable PORTION of an IRA distribution
+# can differ between CA and federal because of differing after-tax
+# contribution-basis history (e.g. a year CA didn't conform to a federal
+# IRA deduction, or vice versa) -- but this feature doesn't need to
+# reconstruct that contribution history. It only needs the taxpayer's
+# own already-computed federal AND California TAXABLE DISTRIBUTION
+# figures for this year (the CA figure typically already derived via
+# FTB Pub 1005's own worksheet). Reuses compute_generic_basis_diff_ca_tax's
+# exact math -- an IRA distribution's taxable portion affects CA AGI the
+# same additive way a capital gain does.
+IRA_DISTRIBUTION_BASIS_DIFF_CITATION = "2025 Schedule CA (540) Instructions -- Part I, Section A, Line 4a/4b; FTB Publication 1005"
+IRA_DISTRIBUTION_BASIS_DIFF_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html"
+
+IRA_DISTRIBUTION_BASIS_DIFF_TERMS = {
+    "ira distribution basis difference", "ira distribution basis",
+    "ira basis difference", "different ira basis for california",
+    "california ira basis differs", "ira distribution basis differs",
+}
+IRA_DISTRIBUTION_BASIS_DIFF_FEDERAL_TERMS = {
+    "federal taxable distribution", "federal taxable ira distribution",
+    "taxable for federal purposes", "federal distribution",
+}
+IRA_DISTRIBUTION_BASIS_DIFF_CA_TERMS = {
+    "california taxable distribution", "california taxable ira distribution",
+    "taxable for california purposes", "california distribution",
+}
+IRA_DISTRIBUTION_BASIS_DIFF_OUT_OF_SCOPE_TERMS = {
+    "roth ira", "roth conversion", "early distribution", "early withdrawal",
+}
+IRA_DISTRIBUTION_BASIS_DIFF_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE
+
+
+def _ira_distribution_basis_diff_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_TERMS):
+        return False
+    if any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_ira_distribution_basis_diff_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'IRA
+    distribution, stated federal AND California taxable-distribution
+    figures (a contribution-basis difference)' question."""
+    q = question.lower()
+    if not _ira_distribution_basis_diff_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_ira_distribution_basis_diff_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _ira_distribution_basis_diff_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_ira_distribution_basis_diff_out_of_scope(question: str) -> bool:
+    """True iff this feature's own trigger vocabulary is present
+    alongside Roth/early-distribution language -- both have their own
+    genuinely different mechanics (Roth conversions have no comparable
+    CA/federal basis-timing question the same way; early distributions
+    have their own dedicated additional-tax feature) not attempted here."""
+    q = question.lower()
+    return (any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_TERMS)
+            and any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_OUT_OF_SCOPE_TERMS))
+
+
+def compute_ira_distribution_basis_diff_ca_tax(conn, other_income: float, federal_gain: float, ca_gain: float,
+                                                 filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin wrapper over compute_generic_basis_diff_ca_tax -- an IRA
+    distribution's taxable portion affects CA AGI the same additive way
+    a capital gain does. federal_gain/ca_gain here mean the federal and
+    California TAXABLE DISTRIBUTION amounts, not a capital gain."""
+    calc = compute_generic_basis_diff_ca_tax(conn, other_income, federal_gain, ca_gain, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "citation": IRA_DISTRIBUTION_BASIS_DIFF_CITATION,
+            "source_url": IRA_DISTRIBUTION_BASIS_DIFF_SOURCE_URL}
+
+
 def detect_filing_status(question: str):
     """Abbreviations (mfj/mfs/hoh/qss) are recognized standalone -- they
     already encode "married"/etc on their own, so requiring the spelled-out
@@ -5187,6 +5865,29 @@ def detect_compute_signal(question: str):
                        # the question (often the NOL amount itself, not income) and
                        # answer with a silently wrong number instead of deferring to
                        # detect_nol_signal/detect_nol_wages_signal/detect_nol_wages_ambiguous
+    if any(t in q for t in GENERIC_BASIS_DIFF_TERMS):
+        return None   # basis difference -- SAME collision class as NOL, found live
+                       # building the generic-basis-difference path: this plain path's
+                       # "capital gain" income-type label (INCOME_TYPE_LABELS) already
+                       # recognizes bare "capital gain" wording, so a "basis difference"
+                       # question mentioning "federal capital gain"/"California capital
+                       # gain" would otherwise be answered here using the FIRST dollar
+                       # figure (often "other income", not either gain figure) instead
+                       # of deferring to detect_generic_basis_diff_signal
+    if any(t in q for t in INSTALLMENT_SALE_BASIS_DIFF_TERMS):
+        return None   # installment sale -- same collision class as the generic basis
+                       # difference above (same anchor vocabulary, same risk)
+    if any(t in q for t in SCHEDULE_D1_BASIS_DIFF_TERMS):
+        return None   # Schedule D-1/Form 4797 -- same collision class, added proactively
+                       # this time (found live 3 times already for basis-difference
+                       # features: generic, NOL, and by extension every sibling)
+    if any(t in q for t in RENTAL_DEPRECIATION_BASIS_DIFF_TERMS):
+        return None   # rental/royalty depreciation -- same collision class, added
+                       # proactively before testing
+    if any(t in q for t in FARM_DEPRECIATION_BASIS_DIFF_TERMS):
+        return None   # farm depreciation -- same collision class, added proactively
+    if any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_TERMS):
+        return None   # IRA distribution basis -- same collision class, added proactively
     if not any(trig in q for trig in COMPUTE_TRIGGERS):
         return None
     return detect_filing_status(question)

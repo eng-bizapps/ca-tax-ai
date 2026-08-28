@@ -1587,6 +1587,218 @@ ITEMS = [
     ("how much california tax do I owe on $80,000 in business income with a $50,000 nol carryover single",
      {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 375.09}),
 
+    # --- Generic CA/federal capital-gain basis difference (Schedule CA
+    # (540) Part I Section A Line 7a) -- previously deferred as needing
+    # cumulative historical CA-vs-federal basis tracking nobody has on
+    # hand from any single document. Re-examined 2026-08-23: Line 7a
+    # doesn't care HOW the CA-adjusted gain was derived, only what it
+    # IS -- reuses the SAME "trust the stated figure" precedent as every
+    # K-1/carryover/credit feature already built. Asks for the
+    # taxpayer's own already-computed federal AND California gain
+    # figures directly rather than trying to reconstruct either.
+    #
+    # Basic: $80,000 other income, $50,000 federal gain, $70,000 CA gain
+    # (a $20,000 addition adjustment) -> AGI $150,000, taxable $144,294
+    # -> $9,857.98.
+    ("how much California tax do I owe with a basis difference if my other income is $80,000, my federal capital gain is $50,000, and my california capital gain is $70,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 9857.98}),
+    # order independence.
+    ("single, my california capital gain is $70,000, my federal capital gain is $50,000, my other income is $80,000, how much california tax do I owe with a basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 9857.98}),
+    # ZERO-ADJUSTMENT CASE: CA gain equals federal gain -> $0 adjustment,
+    # still answered (not a degenerate/defer case). AGI $130,000, taxable
+    # $124,294 -> $7,997.98.
+    ("how much California tax do I owe with a basis difference if my other income is $80,000, my federal capital gain is $50,000, and my california capital gain is $50,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7997.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a basis difference if my other income is $80,000, my federal capital gain is $50,000, and my california capital gain is $70,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: QSBS mentioned -- genuinely different mechanic
+    # (Section 1202/1045 exclusion), not just a basis question.
+    ("how much California tax do I owe with a basis difference if my other income is $80,000, my federal capital gain is $50,000, and my california capital gain is $70,000, single, this was qsbs stock?",
+     {"status": "needs_review", "domain": "income"}),
+    # NON-REGRESSION CHECK: a plain "capital gain" question (no "basis
+    # difference" wording) must still route to the pre-existing generic
+    # income-type-labeled compute path unaffected by this new
+    # detect_compute_signal exclusion.
+    ("how much california tax do I owe on $80,000 in capital gain single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 3347.98}),
+
+    # --- Installment sale gain (FTB 3805E) with a CA/federal basis
+    # difference (Schedule CA Line 7a) -- previously deferred for TWO
+    # reasons (the generic basis-differences problem, now solved above,
+    # AND FTB 3805E's own multi-input gross-profit-ratio mechanic).
+    # Re-examined 2026-08-23: reused the generic basis-difference
+    # feature's exact math -- a taxpayer already has (or is legally
+    # required to have) a federal Form 6252/3805E computing THIS YEAR's
+    # recognized gain, so this just needs the already-computed federal
+    # AND California recognized-gain figures, same "trust the stated
+    # figure" precedent.
+    #
+    # Basic: $80,000 other income, $30,000 federal gain, $40,000 CA gain
+    # (a $10,000 addition adjustment) -> AGI $120,000, taxable $114,294
+    # -> $7,067.98.
+    ("how much California tax do I owe with an installment sale basis difference if my other income is $80,000, my federal capital gain is $30,000, and my california capital gain is $40,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7067.98}),
+    # order independence.
+    ("single, my california capital gain is $40,000, my federal capital gain is $30,000, my other income is $80,000, how much california tax do I owe with an installment sale gain?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 7067.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with an installment sale basis difference if my other income is $80,000, my federal capital gain is $30,000, and my california capital gain is $40,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: QSBS mentioned. Also exercises the DISPATCHER-ORDERING
+    # fix live: this exact phrasing ("installment sale basis difference")
+    # contains BOTH "basis difference" (a generic-feature trigger) and
+    # "installment sale" (the generic feature's own out-of-scope
+    # exclusion term) -- without checking the installment-sale-specific
+    # path FIRST, the generic feature's own out-of-scope redirect would
+    # have claimed this question instead of the more specific
+    # installment-sale redirect.
+    ("how much California tax do I owe with an installment sale basis difference if my other income is $80,000, my federal capital gain is $30,000, and my california capital gain is $40,000, single, this was qsbs stock?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Gain on personal residence sale where CA/federal depreciation
+    # diverged (Schedule CA Line 7a) -- "same historical-depreciation-
+    # tracking family as the generic basis-differences item." Re-
+    # examined 2026-08-23 with the same reframing: reuses
+    # compute_generic_basis_diff_ca_tax unchanged. Scoped narrowly on
+    # purpose -- requires BOTH home/residence-sale language AND an
+    # explicit depreciation mention together (an ordinary personal-use-
+    # only home sale has no depreciation history to diverge on).
+    #
+    # Basic: $80,000 other income, $20,000 federal gain, $30,000 CA gain
+    # (both already net of any Section 121 exclusion) -- a $10,000
+    # addition adjustment -> AGI $110,000, taxable $104,294 -> $6,137.98.
+    ("how much California tax do I owe with a home sale depreciation basis difference if my other income is $80,000, my federal capital gain is $20,000, and my california capital gain is $30,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # order independence.
+    ("single, my california capital gain is $30,000, my federal capital gain is $20,000, my other income is $80,000, how much california tax do I owe with a home sale depreciation basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6137.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a home sale depreciation basis difference if my other income is $80,000, my federal capital gain is $20,000, and my california capital gain is $30,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: QSBS mentioned.
+    ("how much California tax do I owe with a home sale depreciation basis difference if my other income is $80,000, my federal capital gain is $20,000, and my california capital gain is $30,000, single, this was qsbs stock?",
+     {"status": "needs_review", "domain": "income"}),
+    # NON-TRIGGER CHECK: bare home sale with NO depreciation mention must
+    # NOT fire this feature -- an ordinary personal-use-only home sale
+    # has no depreciation history at all, and this scoped feature
+    # requires both concepts together, not just home-sale language alone.
+    ("how much California tax do I owe if I sold my home and had a $20,000 capital gain, my other income is $80,000, single?",
+     {"status": "informational", "domain": "income"}),
+
+    # --- Schedule D-1/Form 4797 ordinary business-property GAIN with a
+    # CA/federal basis difference (Schedule CA Line 4, Section B) --
+    # distinct from the CAPITAL-asset gains on Line 7a (Section A)
+    # above. Re-examined 2026-08-23 with the same reframing: reuses
+    # compute_generic_basis_diff_ca_tax unchanged. GAINS only -- a net
+    # loss isn't subject to the capital-loss annual limit and has its
+    # own distinct mechanic, deliberately not attempted here.
+    #
+    # Basic: $80,000 other income, $25,000 federal gain, $35,000 CA gain
+    # (a $10,000 addition adjustment) -> AGI $115,000, taxable $109,294
+    # -> $6,602.98.
+    ("how much California tax do I owe with a form 4797 basis difference if my other income is $80,000, my federal capital gain is $25,000, and my california capital gain is $35,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6602.98}),
+    # order independence, alternate trigger phrasing ("section 1231").
+    # Also exercises the PHANTOM-AMOUNT GUARD live: "form 4797"/"section
+    # 1231" contain digits ("4797"/"1231") that would otherwise be
+    # misparsed as phantom dollar amounts by the shared amount-extraction
+    # regex -- found live building this feature, the ninth+ such
+    # collision this session.
+    ("single, my california capital gain is $35,000, my federal capital gain is $25,000, my other income is $80,000, how much california tax do I owe with a section 1231 basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 6602.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a form 4797 basis difference if my other income is $80,000, my federal capital gain is $25,000, and my california capital gain is $35,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: a net LOSS is explicitly not this scoped (gains-only)
+    # feature's population.
+    ("how much California tax do I owe with a form 4797 basis difference if my other income is $80,000, my federal capital gain is $25,000, and my california capital gain is $35,000, single, this was a business property loss?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Rental/royalty depreciation basis difference, ORDINARY (non-
+    # real-estate-professional) case (Schedule CA Line 5, Section B;
+    # FTB 3885A) -- "the PAL mechanic itself is confirmed identical CA/
+    # federal... [divergence] comes purely from feeding CA-basis vs
+    # federal-basis income/loss into that otherwise-identical
+    # calculation." Re-examined 2026-08-23 with the same reframing:
+    # reuses compute_generic_basis_diff_ca_tax unchanged. INCOME (gains)
+    # only -- a net loss needs the real-estate-professional allowance or
+    # the unmodeled PAL suspension, a genuinely different mechanic.
+    #
+    # Basic: $80,000 other income, $15,000 federal net rental income,
+    # $22,000 CA net rental income (a $7,000 addition adjustment) -> AGI
+    # $102,000, taxable $96,294 -> $5,393.98.
+    ("how much California tax do I owe with a rental depreciation basis difference if my other income is $80,000, my federal capital gain is $15,000, and my california capital gain is $22,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5393.98}),
+    # order independence, alternate trigger phrasing ("form 3885a") --
+    # also exercises the PHANTOM-AMOUNT GUARD live ("3885" parsed as a
+    # phantom dollar amount, caught proactively before ever testing).
+    ("single, my california capital gain is $22,000, my federal capital gain is $15,000, my other income is $80,000, how much california tax do I owe with a form 3885a basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5393.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a rental depreciation basis difference if my other income is $80,000, my federal capital gain is $15,000, and my california capital gain is $22,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: a rental LOSS is explicitly not this scoped
+    # (income-only) feature's population -- needs the real-estate-
+    # professional allowance or the unmodeled PAL suspension instead.
+    ("how much California tax do I owe with a rental depreciation basis difference if my other income is $80,000, my federal capital gain is $15,000, and my california capital gain is $22,000, single, this was a rental loss?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- Farm income (Schedule F) depreciation basis difference,
+    # INCOME only (Schedule CA Line 6, Section B; FTB 3801/3885A) --
+    # "confirmed same bonus-depreciation/168(k) CA-basis problem as
+    # Lines 4/5, applied to Schedule F assets." Re-examined 2026-08-23:
+    # the 2026-08-15 research checked for a Line-5-style tractable sub-
+    # population (a farm-specific carve-out) and correctly found none --
+    # but that's different from the "trust the stated already-computed
+    # figure" reframing, which doesn't need a carve-out at all. Reuses
+    # compute_generic_basis_diff_ca_tax unchanged. INCOME (gains) only,
+    # same discipline as rental depreciation.
+    #
+    # Basic: $80,000 other income, $10,000 federal net farm income,
+    # $16,000 CA net farm income (a $6,000 addition adjustment) -> AGI
+    # $96,000, taxable $90,294 -> $4,835.98.
+    ("how much California tax do I owe with a farm depreciation basis difference if my other income is $80,000, my federal capital gain is $10,000, and my california capital gain is $16,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4835.98}),
+    # order independence, alternate trigger phrasing ("schedule f
+    # depreciation").
+    ("single, my california capital gain is $16,000, my federal capital gain is $10,000, my other income is $80,000, how much california tax do I owe with a schedule f depreciation basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 4835.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with a farm depreciation basis difference if my other income is $80,000, my federal capital gain is $10,000, and my california capital gain is $16,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: a farm LOSS is explicitly not this scoped
+    # (income-only) feature's population.
+    ("how much California tax do I owe with a farm depreciation basis difference if my other income is $80,000, my federal capital gain is $10,000, and my california capital gain is $16,000, single, this was a farm loss?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- IRA distribution basis/timing difference (Schedule CA Line
+    # 4a/4b, Section A; FTB Publication 1005) -- the 7th and final item
+    # of this basis-difference batch, and the item this initiative was
+    # originally named for. Same "trust the stated already-computed
+    # figure" reframing, reusing compute_generic_basis_diff_ca_tax
+    # unchanged. Distinct anchor vocabulary (federal/CA "taxable
+    # distribution" rather than "capital gain"), own out-of-scope
+    # population (Roth conversions and early distributions each have
+    # their own distinct mechanic, already modeled elsewhere).
+    #
+    # Basic: $80,000 other income, $12,000 federal taxable distribution,
+    # $18,000 CA taxable distribution (a $6,000 addition adjustment) ->
+    # AGI $98,000, taxable $92,294 -> $5,021.98.
+    ("how much California tax do I owe with an ira distribution basis difference if my other income is $80,000, my federal taxable distribution is $12,000, and my california taxable distribution is $18,000, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5021.98}),
+    # order independence.
+    ("single, my california taxable distribution is $18,000, my federal taxable distribution is $12,000, my other income is $80,000, how much california tax do I owe with an ira distribution basis difference?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 5021.98}),
+    # missing filing status -> specific clarifying message.
+    ("how much California tax do I owe with an ira distribution basis difference if my other income is $80,000, my federal taxable distribution is $12,000, and my california taxable distribution is $18,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: a Roth conversion is explicitly not this feature's
+    # population -- it has its own distinct mechanic.
+    ("how much California tax do I owe with an ira distribution basis difference if my other income is $80,000, my federal taxable distribution is $12,000, and my california taxable distribution is $18,000, single, this was a roth conversion?",
+     {"status": "needs_review", "domain": "income"}),
+
     # --- Foreign housing DEDUCTION (Schedule CA Line 24j, Form 2555) --
     # distinct from the foreign earned income/housing EXCLUSION (Line
     # 8d, already built above) -- IRC 911(c)'s housing DEDUCTION is the
