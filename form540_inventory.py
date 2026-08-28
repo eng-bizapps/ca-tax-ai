@@ -87,10 +87,37 @@ ITEMS = [
      "distributions) and FTB 5870A (trust accumulation distributions) are both extremely "
      "narrow/aging populations -- not_applicable-adjacent, not built."),
     ("540", "lines", "31", "FTB 3800 kiddie tax on unearned income (child's tax computed at parent's rate)",
-     "both", "narrow", "FTB 2025 Form 540 Instructions, Line 31",
-     "deferred_new_engine", None,
-     "Needs the PARENT's marginal-rate/taxable-income figure -- a second return's data, same "
-     "multi-fact class as the already-deferred FTB 3803 item on the Schedule CA ledger."),
+     "both", "narrow", "FTB 2025 Instructions for Form FTB 3800",
+     "built", None,
+     "Built via income_brackets.compute_kiddie_tax_ca_tax / engine._income_kiddie_tax_answer. "
+     "Re-examined 2026-08-28 at the user's request via a 'one-shot template' reframing: the "
+     "original deferral ('needs the PARENT's marginal-rate/taxable-income figure -- a second "
+     "return's data') correctly identified the blocker but wrongly concluded it needed cross-"
+     "question persistent memory (Phase 1, not started) to solve -- this codebase's existing "
+     "multi-fact extraction (already proven on ~25 other features) handles asking for BOTH the "
+     "child's and parent's figures in ONE question fine. Verified against FTB's 2025 "
+     "Instructions for Form FTB 3800 directly (not assumed from general 'kiddie tax' knowledge, "
+     "given this session's 8-for-9 track record of shallow notes needing correction): California "
+     "kept the ORIGINAL 'parent's marginal rate' method, not the TCJA 2018-2019 trust-rate "
+     "method the federal government briefly used then reverted via the SECURE Act -- CA Form "
+     "3800 explicitly cross-references federal Form 8615's structure, confirmed line-for-line "
+     "against every line the CA instructions text spells out (1, 2, 6, 7, 9, 10, 15, 17, 18). "
+     "$2,700 threshold confirmed directly from FTB's own text. Scoped to a single child (no "
+     "multi-child Line 7/12 combination), standard deduction only, no earned income for the "
+     "child (child's AGI = child's unearned income), child's own filing status defaults to "
+     "single (disclosed) -- all deliberate, disclosed limitations, not oversights. Two real bugs "
+     "found live: (1) 'form 3800' itself is a phantom-digit collision (the form number is a bare "
+     "4-digit sequence the shared amount regex misparses as a dollar figure -- the same class "
+     "found 10+ times this session, missed on the first pass despite citing the pattern in this "
+     "feature's own module docstring, caught only once extraction was tested); (2) a bare "
+     "'earned income' out-of-scope term is a literal substring of 'UNearned income' -- this "
+     "feature's own core vocabulary was being wrongly rejected as out-of-scope until fixed to "
+     "compound phrases only ('has earned income', 'child's earned income'). A third issue -- the "
+     "edge-aware _amount_near_anchor_edge helper (built for the NOL-mixed feature's own "
+     "bidirectional phrasing) picked the WRONG figure here, since this feature's phrasing is "
+     "genuinely anchor-then-value only -- was fixed by switching to forward-only "
+     "_amount_after_filtered_span instead, which sidesteps the whole 'nearby wrong neighbor' bug "
+     "class by construction rather than tuning a distance metric."),
     ("540", "lines", "61", "Alternative Minimum Tax (Schedule P (540)) -- GENERAL case",
      "both", "moderate", "FTB 2025 Schedule P (540) Instructions",
      "deferred_new_engine", None,

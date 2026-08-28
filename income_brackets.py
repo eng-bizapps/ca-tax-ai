@@ -4912,6 +4912,228 @@ def compute_isr_penalty(filing_status: str, n_adults: int, n_children: int, hous
             "flat_dollar": flat_dollar, "pct_income": pct_income, "avg_premium_cap": avg_premium_cap}
 
 
+# --- FTB 3800 kiddie tax on a child's unearned income (Form 540 Line 31)
+# -- form540_inventory.py's LAST remaining deferred_new_engine item.
+# Re-examined 2026-08-28 at the user's request, proposing a "one-shot
+# template" reframing: instead of building persistent cross-question
+# memory (Phase 1, not started), ask for BOTH the child's AND the
+# parent's already-known figures in ONE question -- since the actual
+# blocker here was never a UI/memory problem, it was needing two
+# people's numbers simultaneously, which this codebase's existing
+# multi-fact extraction (already proven on ~25 other features) handles
+# fine within a single question.
+#
+# VERIFIED against FTB's 2025 Instructions for Form FTB 3800 (Tax
+# Computation for Certain Children with Unearned Income),
+# https://www.ftb.ca.gov/forms/2025/2025-3800-instructions.html --
+# fetched directly, not assumed from general "kiddie tax" knowledge,
+# given this session's 8-for-9 track record of shallow notes needing
+# correction once actually checked. CONFIRMED: California kept the
+# ORIGINAL "parent's marginal rate" method (not the TCJA 2018-2019
+# trust-rate method the federal government briefly used then reverted
+# via the SECURE Act) -- Form 3800 explicitly cross-references federal
+# Form 8615's parent-identification convention, and every line the CA
+# instructions text DID spell out (1, 2, 6, 7, 9, 10, 15, 17, 18) is
+# IDENTICAL to federal 8615's own well-established structure. The
+# instructions skip explicitly spelling out lines 3-5, 8, 11-14, 16
+# (pure arithmetic between the confirmed anchor lines, not new rules) --
+# reconstructed from federal 8615's known shape, cross-checked for
+# consistency against every CA-specific line that WAS spelled out (all
+# matched exactly). $2,700 threshold confirmed directly from FTB's own
+# text ("unearned income over $2,700 is taxed at the parent's rate").
+#
+# THE WORKSHEET (single child, no other 3800-filing siblings, standard
+# deduction, no earned income -- see SCOPE below):
+#   Line 1 = child's unearned income
+#   Line 2 = $2,700 (standard-deduction case)
+#   Line 3 = max(0, Line1 - Line2)
+#   Line 4 = child's own taxable income (AGI minus child's standard
+#            deduction -- under the no-earned-income assumption, child's
+#            AGI = child's unearned income)
+#   Line 5 = min(Line3, Line4) -- "net unearned income"; if <=0, Form
+#            3800 doesn't apply at all, FTB's own text: "figure the tax
+#            in the normal manner on the child's Form 540"
+#   Line 6 = parent's taxable income (TRUSTED AS STATED -- same "trust
+#            the already-computed figure" precedent as every other
+#            second-return input this session, e.g. OSTC/PTE credit;
+#            re-deriving it from a bare parent AGI would silently ignore
+#            whatever OTHER adjustments/credits the parent's own return
+#            might carry that this feature has no way of knowing about)
+#   Line 7 = 0 (no other children -- disclosed scope limit)
+#   Line 8 = Line5 + Line6 + Line7
+#   Line 9 = tax on Line8 at the PARENT's rate/filing status
+#   Line 10 = parent's own actual tax (tax on Line6 alone, parent's rate)
+#   Line 11 = max(0, Line9 - Line10) -- tentative tax attributable to
+#             stacking the net unearned income on top of parent's income
+#   Line 12 = Line5 / (Line5 + Line7) = 1.0 exactly (single-child case)
+#   Line 13 = Line11 x Line12 = Line11 (single-child case)
+#   Line 14 = max(0, Line4 - Line5) -- child's OWN remaining taxable
+#             income, taxed at the CHILD's own rate
+#   Line 15 = tax on Line14 at the CHILD's own rate/filing status
+#   Line 16 = Line13 + Line15 -- total tax under the kiddie-tax method
+#   Line 17 = tax on Line4 (child's FULL taxable income) at the CHILD's
+#             OWN rate -- a floor: what the child would owe WITHOUT
+#             kiddie tax at all
+#   Line 18 = max(Line16, Line17) -- FINAL amount, entered on the
+#             child's own Form 540 line 31
+# Lines 9/10/15/17 use BRACKET TAX ONLY (compute_ca_tax's "bracket_tax"),
+# matching Form 3800's own literal "use the tax table" semantics -- the
+# Behavioral Health Services Tax surtax is a SEPARATE Form 540 line
+# applied to the RETURN's own bottom-line taxable income, not part of
+# the worksheet's internal tax-table lookups, so it's added once at the
+# end (on the child's own Line 4 taxable income), not baked into every
+# intermediate line.
+#
+# SCOPE, disclosed not hidden: single child only (no line 7/12
+# multi-child combination); standard deduction only (no itemized Line-2
+# alternative); child assumed to have NO earned income (child's AGI =
+# child's unearned income exactly -- explicit earned-income language
+# routes to a dedicated out-of-scope redirect rather than silently
+# using the wrong Line-1 worksheet); child's own filing status DEFAULTS
+# to single (a dependent minor overwhelmingly files single, disclosed
+# in the answer text rather than demanding a fact nobody expects to
+# need); FTB's own age/support/joint-return qualification tests for
+# WHETHER Form 3800 applies at all are disclosed as an assumption, not
+# gated on (a user specifically asking about "kiddie tax" has already
+# self-selected into this population).
+KIDDIE_TAX_THRESHOLD = 2700.0
+KIDDIE_TAX_CITATION = "FTB 2025 Instructions for Form FTB 3800 -- Purpose, Part I, Part II, Part III"
+KIDDIE_TAX_SOURCE_URL = "https://www.ftb.ca.gov/forms/2025/2025-3800-instructions.html"
+
+KIDDIE_TAX_TERMS = {
+    "kiddie tax", "form 3800", "ftb 3800", "child's unearned income",
+    "my child's unearned income", "tax computation for certain children",
+    "child's investment income taxed at",
+}
+KIDDIE_TAX_CHILD_INCOME_TERMS = {
+    "child's unearned income", "my child's unearned income", "unearned income",
+    "child's investment income", "my child's investment income",
+}
+KIDDIE_TAX_PARENT_INCOME_TERMS = {
+    "parent's taxable income", "my taxable income", "parent's own taxable income",
+}
+KIDDIE_TAX_OUT_OF_SCOPE_TERMS = {
+    # NOT bare "earned income" -- it's a literal substring of "UNearned
+    # income," this feature's own core vocabulary; found live testing
+    # the feature's own basic phrasing before any regression test was
+    # locked in. Compound phrases only, each specific enough not to
+    # collide.
+    "has earned income", "child's earned income", "part-time job", "has a job",
+    "child's wages", "child's salary", "child's paycheck",
+    "other children", "another child", "multiple children",
+    "itemize", "itemized", "itemizing",
+}
+KIDDIE_TAX_COMPLEXITY_EXCLUDE = {
+    "dependent", "alimony", "gambling", "gambled", "betting", "wagering",
+    "disaster loss", "disaster", "trust", "estate",
+}
+
+
+def _kiddie_tax_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in KIDDIE_TAX_TERMS):
+        return False
+    if any(t in q for t in KIDDIE_TAX_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in KIDDIE_TAX_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_kiddie_tax_signal(question: str):
+    """Returns the PARENT's filing status iff this looks like a genuine
+    single-child, standard-deduction, no-earned-income kiddie-tax
+    question. The child's own filing status is not extracted -- it
+    defaults to single (see module note)."""
+    q = question.lower()
+    if not _kiddie_tax_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_kiddie_tax_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _kiddie_tax_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_kiddie_tax_out_of_scope(question: str) -> bool:
+    """True iff kiddie-tax vocabulary is present alongside language this
+    narrow build doesn't attempt (earned income, multiple children,
+    itemizing) -- routes to a dedicated redirect rather than silently
+    using the wrong worksheet branch."""
+    q = question.lower()
+    if not any(t in q for t in KIDDIE_TAX_TERMS):
+        return False
+    if any(t in q for t in KIDDIE_TAX_COMPLEXITY_EXCLUDE):
+        return False
+    return any(t in q for t in KIDDIE_TAX_OUT_OF_SCOPE_TERMS)
+
+
+def compute_kiddie_tax_ca_tax(conn, child_unearned_income: float, parent_taxable_income: float,
+                               parent_filing_status: str, child_filing_status: str = "single",
+                               tax_year: int = DEFAULT_TAX_YEAR):
+    """See module note above for the full worksheet derivation and its
+    disclosed scope (single child, standard deduction, no earned
+    income)."""
+    if child_unearned_income is None or child_unearned_income < 0:
+        return None
+    if parent_taxable_income is None or parent_taxable_income < 0:
+        return None
+    child_dedu = standard_deduction(conn, child_filing_status, tax_year)
+    if not child_dedu:
+        return None
+    line1 = child_unearned_income
+    line3 = max(0.0, line1 - KIDDIE_TAX_THRESHOLD)
+    line4 = max(0.0, child_unearned_income - child_dedu["amount"])
+    line5 = min(line3, line4)
+
+    child_own_calc = compute_ca_tax(conn, line4, child_filing_status, tax_year)
+    if not child_own_calc:
+        return None
+
+    if line5 <= 0:
+        total_tax = round(child_own_calc["bracket_tax"] + child_own_calc["surtax"], 2)
+        return {"kiddie_tax_applies": False, "child_taxable_income": line4,
+                "net_unearned_income": line5, "total_tax": total_tax,
+                "marginal_rate": child_own_calc["marginal_rate"],
+                "child_standard_deduction": child_dedu["amount"],
+                "citation": KIDDIE_TAX_CITATION, "source_url": KIDDIE_TAX_SOURCE_URL}
+
+    parent_calc_combined = compute_ca_tax(conn, line5 + parent_taxable_income, parent_filing_status, tax_year)
+    parent_calc_own = compute_ca_tax(conn, parent_taxable_income, parent_filing_status, tax_year)
+    if not parent_calc_combined or not parent_calc_own:
+        return None
+    line9 = parent_calc_combined["bracket_tax"]
+    line10 = parent_calc_own["bracket_tax"]
+    line11 = max(0.0, line9 - line10)
+    line13 = line11  # single-child case: line5/(line5+line7=0) = 1.0
+
+    line14 = max(0.0, line4 - line5)
+    child_remaining_calc = compute_ca_tax(conn, line14, child_filing_status, tax_year)
+    if not child_remaining_calc:
+        return None
+    line15 = child_remaining_calc["bracket_tax"]
+    line16 = round(line13 + line15, 2)
+    line17 = round(child_own_calc["bracket_tax"], 2)
+    line18 = max(line16, line17)
+    kiddie_tax_controls = line16 > line17
+
+    total_tax = round(line18 + child_own_calc["surtax"], 2)
+    return {"kiddie_tax_applies": True, "kiddie_tax_controls": kiddie_tax_controls,
+            "child_taxable_income": line4, "net_unearned_income": line5,
+            "parent_taxable_income": parent_taxable_income,
+            "tentative_tax_parent_rate": round(line13, 2),
+            "child_own_rate_tax_on_remaining": round(line15, 2),
+            "child_own_rate_tax_on_full": line17,
+            "total_tax": total_tax, "marginal_rate": child_own_calc["marginal_rate"],
+            "surtax": child_own_calc["surtax"], "surtax_citation": child_own_calc["surtax_citation"],
+            "child_standard_deduction": child_dedu["amount"],
+            "citation": KIDDIE_TAX_CITATION, "source_url": KIDDIE_TAX_SOURCE_URL}
+
+
 # --- California Alternative Minimum Tax "screen" (Schedule P (540), Form
 # 540 Line 61) -- Income Coverage Blueprint Phase 3's eleventh build, and
 # a DIFFERENT shape of tractable slice than every other Phase 3 item:
@@ -6026,6 +6248,12 @@ def detect_compute_signal(question: str):
         return None   # farm depreciation -- same collision class, added proactively
     if any(t in q for t in IRA_DISTRIBUTION_BASIS_DIFF_TERMS):
         return None   # IRA distribution basis -- same collision class, added proactively
+    if any(t in q for t in KIDDIE_TAX_TERMS):
+        return None   # kiddie tax -- same collision class: a stated "child's unearned
+                       # income" figure and a stated parent's filing status would
+                       # otherwise let this plain single-taxpayer path grab one of those
+                       # two figures and answer with a wrong number instead of deferring
+                       # to detect_kiddie_tax_signal, added proactively
     if not any(trig in q for trig in COMPUTE_TRIGGERS):
         return None
     return detect_filing_status(question)

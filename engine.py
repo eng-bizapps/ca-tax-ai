@@ -1855,6 +1855,118 @@ def _income_amt_screen_out_of_scope_answer(question: str, base: dict):
     return result
 
 
+def _income_kiddie_tax_answer(conn, question: str, base: dict):
+    """FTB 3800 kiddie tax on a child's unearned income (Form 540 Line
+    31) -- see income_brackets.compute_kiddie_tax_ca_tax's docstring for
+    the full worksheet derivation and its disclosed scope (single child,
+    standard deduction, no earned income, child's own filing status
+    defaults to single). Two anchors (child's unearned income, parent's
+    taxable income), no remainder needed since exactly 2 dollar figures
+    are expected. Uses forward-only _amount_after_filtered_span -- this
+    feature's own natural phrasing is always "ANCHOR is $VALUE" (anchor
+    before amount), unlike NOL-mixed's genuinely bidirectional "$Y in X"
+    habit. Found live: the edge-aware _amount_near_anchor_edge helper
+    (tried first, mirroring NOL-mixed) still picked the WRONG figure
+    here -- a short ", " connector before the anchor made an unrelated
+    PRECEDING amount from a different clause numerically closer than
+    the anchor's own value sitting slightly farther after it. Forward-
+    only sidesteps this by construction: it never considers a preceding
+    amount at all. Also strips the "3800" phantom (form 3800's own form
+    number, a bare 4-digit sequence the shared regex would otherwise
+    misparse as a dollar amount -- the same collision class found 10+
+    times this session, missed on the first pass here and caught only
+    once extraction was tested live)."""
+    parent_fs = income_brackets.detect_kiddie_tax_signal(question)
+    if not parent_fs:
+        return None
+    amounts = [(a, s, e) for a, s, e in _amounts(question) if a != 3800.0]
+    child_match = _amount_after_filtered_span(question, income_brackets.KIDDIE_TAX_CHILD_INCOME_TERMS, amounts)
+    if child_match is None:
+        return None
+    child_unearned_income = child_match[0]
+    remaining = _remove_amount_span(amounts, child_match)
+    parent_match = _amount_after_filtered_span(question, income_brackets.KIDDIE_TAX_PARENT_INCOME_TERMS, remaining)
+    if parent_match is None:
+        return None
+    parent_taxable_income = parent_match[0]
+    calc = income_brackets.compute_kiddie_tax_ca_tax(conn, child_unearned_income, parent_taxable_income, parent_fs)
+    if not calc:
+        return None
+    parent_label = income_brackets.FILING_STATUS_LABELS[parent_fs]
+    result = {**base, "status": "answered", "category": "kiddie_tax",
+              "amount": child_unearned_income, "tax": calc["total_tax"],
+              "marginal_rate": calc["marginal_rate"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc.get("surtax"):
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services Tax "
+                       f"(1% of the child's taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if not calc["kiddie_tax_applies"]:
+        result["answer_text"] = (
+            f"With ${child_unearned_income:,.2f} in your child's unearned income, the kiddie tax "
+            f"(FTB 3800) does NOT apply -- either the unearned income is at or below the "
+            f"{income_brackets.DEFAULT_TAX_YEAR} ${income_brackets.KIDDIE_TAX_THRESHOLD:,.0f} "
+            "threshold, or your child's own taxable income is $0. Your child's tax is figured the "
+            f"normal way: assuming a single filing status and the standard deduction "
+            f"(${calc['child_standard_deduction']:,.0f}), taxable income of "
+            f"${calc['child_taxable_income']:,.2f}, your child's estimated "
+            f"{income_brackets.DEFAULT_TAX_YEAR} California tax is about ${calc['total_tax']:,.2f} "
+            f"({calc['citation']}).{surtax_note}"
+        )
+        return result
+    controls_note = (
+        "the parent-rate kiddie-tax method controls (it produces a higher amount than your "
+        "child's own rate would)" if calc["kiddie_tax_controls"] else
+        "your child's own rate actually produces the same or a higher amount than the kiddie-tax "
+        "method, so it controls instead (FTB 3800 never produces a WORSE result than your child's "
+        "own tax)"
+    )
+    result["answer_text"] = (
+        f"With ${child_unearned_income:,.2f} in your child's unearned income and your (the "
+        f"parent's) taxable income of ${parent_taxable_income:,.2f}, filing status {parent_label}: "
+        f"${calc['net_unearned_income']:,.2f} of your child's unearned income is net unearned "
+        f"income subject to the kiddie tax. Taxed at your marginal rate, that portion contributes "
+        f"${calc['tentative_tax_parent_rate']:,.2f}; the rest of your child's taxable income "
+        f"(assuming a single filing status and the standard deduction of "
+        f"${calc['child_standard_deduction']:,.0f}) is taxed at your child's own rate, adding "
+        f"${calc['child_own_rate_tax_on_remaining']:,.2f} -- and {controls_note}. Your child's "
+        f"estimated {income_brackets.DEFAULT_TAX_YEAR} California tax is about "
+        f"${calc['total_tax']:,.2f} ({calc['citation']}).{surtax_note} This assumes a single "
+        "child (no siblings also filing FTB 3800 with the same parent), the standard deduction, "
+        "no earned income for your child, and that your child otherwise meets FTB's kiddie-tax "
+        "age/support/filing requirements -- your actual liability may differ."
+    )
+    return result
+
+
+def _income_kiddie_tax_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_kiddie_tax_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To figure your child's kiddie tax (FTB 3800), I need YOUR (the parent's) filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your child's unearned income and your "
+        "own taxable income.")
+    return result
+
+
+def _income_kiddie_tax_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when earned-income/multiple-children/
+    itemizing language is present -- this narrow build doesn't attempt
+    those branches of Form 3800's worksheet."""
+    if not income_brackets.detect_kiddie_tax_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant only handles the common FTB 3800 case: a single child with unearned "
+        "income only (no earned income/job), the standard deduction, and no other children also "
+        "filing FTB 3800 with the same parent. Based on what you described, that doesn't apply -- "
+        "please consult FTB 3800's full worksheet, or a tax professional, for an accurate figure."
+    )
+    return result
+
+
 def _amount_after_filtered_span(question: str, keywords, amounts, window: int = 80):
     """Forward-only counterpart to _amount_near_filtered_span -- see that
     function's docstring for why returning (and removing by) a span
@@ -2852,8 +2964,8 @@ def _income_nol_wages_ambiguous_answer(question: str, base: dict):
     return result
 
 
-def _nol_mixed_amount_near_anchor(question: str, keywords, amounts, window: int = 25):
-    """Anchor-boundary-aware amount lookup, built specifically for this
+def _amount_near_anchor_edge(question: str, keywords, amounts, window: int = 25):
+    """Anchor-boundary-aware amount lookup -- built for the NOL-mixed
     feature after _amount_near_filtered_span picked the WRONG amount
     live: that function measures distance from the anchor's START to
     the amount's MIDPOINT, which for a long anchor phrase ("business
@@ -2864,9 +2976,10 @@ def _nol_mixed_amount_near_anchor(question: str, keywords, amounts, window: int 
     so the wrong figure won under the shared function's metric). This
     measures from the anchor's NEAREST EDGE instead (its end, for a
     following amount; its start, for a preceding one) with a tight
-    window, since this feature's natural phrasing always has the anchor
-    and its value separated by only a few connector words ("is"/"of"/
-    "in") in either direction."""
+    window -- generically useful (not NOL-specific) for any feature
+    whose natural phrasing has the anchor and its value separated by
+    only a few connector words ("is"/"of"/"in") in either direction;
+    reused by the kiddie-tax feature below for the same reason."""
     ql = question.lower()
     if not amounts:
         return None
@@ -2913,7 +3026,7 @@ def _income_nol_mixed_answer(conn, question: str, base: dict):
     is naturally phrased either "$Y in business income" (amount before
     anchor) or "business income is $Y" (anchor before amount) depending
     on sentence order. Uses the boundary-aware
-    _nol_mixed_amount_near_anchor/_remove_amount_span pattern -- see
+    _amount_near_anchor_edge/_remove_amount_span pattern -- see
     that helper's docstring for why the shared _amount_near_filtered_
     span's start-to-midpoint metric picked the WRONG amount on a
     reordered-facts test (a long anchor phrase can end up numerically
@@ -2922,12 +3035,12 @@ def _income_nol_mixed_answer(conn, question: str, base: dict):
     if not fs:
         return None
     amounts = _nol_mixed_strip_form_number_phantoms(_amounts(question))
-    nol_match = _nol_mixed_amount_near_anchor(question, income_brackets.NOL_TERMS, amounts)
+    nol_match = _amount_near_anchor_edge(question, income_brackets.NOL_TERMS, amounts)
     if nol_match is None:
         return None
     nol_amount = nol_match[0]
     remaining = _remove_amount_span(amounts, nol_match)
-    biz_match = _nol_mixed_amount_near_anchor(question, income_brackets.NOL_MIXED_BUSINESS_INCOME_TERMS, remaining)
+    biz_match = _amount_near_anchor_edge(question, income_brackets.NOL_MIXED_BUSINESS_INCOME_TERMS, remaining)
     if biz_match is None:
         return None
     business_income = biz_match[0]
@@ -6387,6 +6500,18 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if amt_screen_out_of_scope_result:
         return amt_screen_out_of_scope_result
 
+    kiddie_tax_result = _income_kiddie_tax_answer(conn, question, base)
+    if kiddie_tax_result:
+        return kiddie_tax_result
+
+    missing_kiddie_tax_fs_result = _income_kiddie_tax_missing_filing_status_answer(question, base)
+    if missing_kiddie_tax_fs_result:
+        return missing_kiddie_tax_fs_result
+
+    kiddie_tax_out_of_scope_result = _income_kiddie_tax_out_of_scope_answer(question, base)
+    if kiddie_tax_out_of_scope_result:
+        return kiddie_tax_out_of_scope_result
+
     underpayment_result = _income_underpayment_answer(conn, question, base)
     if underpayment_result:
         return underpayment_result
@@ -6910,6 +7035,9 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_amt_screen_signal,
     income_brackets.detect_amt_screen_missing_filing_status,
     income_brackets.detect_amt_screen_out_of_scope,
+    income_brackets.detect_kiddie_tax_signal,
+    income_brackets.detect_kiddie_tax_missing_filing_status,
+    income_brackets.detect_kiddie_tax_out_of_scope,
     income_brackets.detect_underpayment_signal,
     income_brackets.detect_underpayment_missing_filing_status,
     income_brackets.detect_underpayment_out_of_scope,

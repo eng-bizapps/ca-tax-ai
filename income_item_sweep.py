@@ -2410,6 +2410,54 @@ ITEMS = [
     ("do i owe california amt if my income is $100,000, single, and i exercised incentive stock options?",
      {"status": "needs_review", "domain": "income"}),
 
+    # --- FTB 3800 kiddie tax on a child's unearned income (Form 540
+    # Line 31) -- form540_inventory.py's last remaining deferred_new_
+    # engine item, re-examined 2026-08-28 at the user's request via a
+    # "one-shot template" reframing: instead of building cross-question
+    # persistent memory (Phase 1, not started), ask for BOTH the child's
+    # and the parent's already-known figures in ONE question. Verified
+    # against FTB's 2025 Instructions for Form FTB 3800 directly (not
+    # assumed): California kept the ORIGINAL "parent's marginal rate"
+    # method (not the TCJA trust-rate method the federal government
+    # briefly used 2018-2019, reverted via the SECURE Act). $2,700
+    # threshold confirmed from FTB's own text. Scoped to a single child,
+    # standard deduction, no earned income; child's own filing status
+    # defaults to single (disclosed).
+    #
+    # Basic: $10,000 child's unearned income, $150,000 parent's taxable
+    # income, single. Child's taxable income = 10000-5706(std ded)=4294.
+    # Net unearned income = min(10000-2700, 4294) = 4294. Parent-rate
+    # tentative tax = tax(150000+4294) - tax(150000) = $399.34. Child's
+    # own-rate tax on remaining (4294-4294=0) = $0. Kiddie-tax total =
+    # $399.34, which exceeds child's own-rate tax on the full $4,294
+    # ($42.94), so the kiddie-tax method controls -> $399.34.
+    ("how much tax does my child owe under the kiddie tax if my child's unearned income is $10,000 and my taxable income is $150,000, filing single?",
+     {"status": "answered", "domain": "income", "category": "kiddie_tax", "tax": 399.34}),
+    # order independence, alternate trigger phrasing ("form 3800") --
+    # also exercises the "3800" phantom-digit guard (form 3800's own
+    # form number is a bare 4-digit sequence the shared regex would
+    # otherwise misparse as a dollar amount -- found live, an 11th+
+    # instance of this exact collision class this session).
+    ("filing single, my taxable income is $150,000, my child's unearned income is $10,000, how much tax does my child owe under the kiddie tax (form 3800)?",
+     {"status": "answered", "domain": "income", "category": "kiddie_tax", "tax": 399.34}),
+    # missing filing status -> specific clarifying message.
+    ("how much tax does my child owe under the kiddie tax if my child's unearned income is $10,000 and my taxable income is $150,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: earned income (a part-time job) mentioned -- this
+    # narrow build assumes unearned income only. Also confirms the
+    # out-of-scope check's "earned income" phrase doesn't falsely fire
+    # on this feature's own core vocabulary, "UNearned income" (found
+    # live: a bare "earned income" term is a literal substring of
+    # "unearned income", so the feature's OWN basic phrasing was being
+    # wrongly rejected before this was fixed to compound phrases only).
+    ("how much tax does my child owe under the kiddie tax if my child's unearned income is $10,000 and my taxable income is $150,000, filing single, my child also has a part-time job?",
+     {"status": "needs_review", "domain": "income"}),
+    # BELOW THRESHOLD: $2,000 unearned income is under the $2,700
+    # threshold -> kiddie tax does NOT apply at all, child's own tax
+    # computed normally (single, std deduction, taxable income $0) -> $0.
+    ("how much tax does my child owe under the kiddie tax if my child's unearned income is $2,000 and my taxable income is $150,000, filing single?",
+     {"status": "answered", "domain": "income", "category": "kiddie_tax", "tax": 0.0}),
+
     # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form
     # 540 Line 113, FTB Form 5805 Side 2 Part II) -- Income Coverage
     # Blueprint Phase 3's twelfth build, a THIRD consecutive case of a
