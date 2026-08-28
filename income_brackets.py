@@ -1783,6 +1783,144 @@ def compute_nol_wages_ca_tax(conn, wages: float, nol_carryover_amount: float,
             "citation": NOL_CITATION, "source_url": NOL_SOURCE_URL}
 
 
+# --- NOL carryover for a MIXED-SOURCE filer: BOTH wages/other income
+# AND current-year business income (Schedule CA (540) Line 8a
+# "8a-general" population, the LAST item left in schedule_ca_inventory.py
+# after the basis-difference batch -- originally deferred with the note
+# "real new scope... would require generalizing the MTI/suspension test
+# beyond business-income-only"). Re-examined 2026-08-28 at the user's
+# request -- that original deferral reasoning doesn't actually survive
+# contact with the suspension test's own text once you stop trying to
+# make ONE stated figure stand in for BOTH halves of it.
+#
+# THE KEY INSIGHT: compute_nol_ca_tax (business-only) and
+# compute_nol_wages_ca_tax (wages-only, closed business) both work
+# around having only one stated income figure by letting it stand in
+# for BOTH "net business income" and "modified AGI" at once -- a
+# necessary simplification when only one number exists. A mixed-source
+# taxpayer removes the NEED for that workaround entirely: asked for
+# BOTH figures directly, "net business income" is simply the stated
+# business_income figure (no conflation with total income required),
+# and "modified AGI" is wages + business_income (a two-source sum, same
+# disclosed "no other income/adjustments" simplification the other two
+# paths already carry, just widened by one explicit source). No new
+# algorithm, no new FTB research -- the SAME suspension AND test
+# already verified and cited above, applied to its two actual inputs
+# instead of one approximated input. If anything this is a MORE literal
+# application of FTB's own test than the business-only path's
+# necessary approximation.
+#
+# SCOPE: requires an EXPLICIT ongoing-business signal (reusing the same
+# vocabulary compute_nol_wages_ca_tax already excludes ON, since that's
+# exactly what distinguishes "current business exists" from "closed") AND
+# explicit wage/other-income vocabulary (what distinguishes "mixed" from
+# the business-only path, which already steps aside the moment wage
+# vocabulary appears -- see NOL_COMPLEXITY_EXCLUDE above). A question with
+# only business+NOL vocabulary (no wages stated) is NOT this path -- it
+# correctly falls through to the existing business-only path unchanged.
+NOL_MIXED_ONGOING_BUSINESS_TERMS = {
+    # deliberately excludes "s-corp"/"llc"/"partnership" -- found live
+    # colliding with the already-established entity_annual_tax feature
+    # ("I run an s-corp with..." reads as an entity-tax question, not a
+    # personal-income one); those terms belong to that feature's own
+    # population, not this one's.
+    "self-employ", "self employ",
+    "freelance", "freelancing", "contractor", "contracting", "contracted",
+    "sole proprietor", "k-1", "schedule c", "schedule e",
+    "business income this year", "current business income", "still run", "still operate",
+}
+NOL_MIXED_WAGE_TERMS = {
+    "wage", "wages", "salary", "salaried", "w-2", "w2", "w-2 income", "other income",
+}
+NOL_MIXED_BUSINESS_INCOME_TERMS = {
+    "business income", "self-employment income", "self employment income",
+    "net business income", "schedule c income", "k-1 income",
+}
+# same population-scoping discipline as the sibling NOL paths -- EBL and
+# NOL are explicitly different buckets per FTB, so "business loss"/
+# "excess business loss" language here means real ambiguity, deferred
+# rather than guessed at, not folded into this feature's own trigger.
+NOL_MIXED_COMPLEXITY_EXCLUDE = {
+    "itemize", "itemized", "itemizing", "dependent", "alimony",
+    "gambling", "gambled", "betting", "wagering",
+    "capital gain", "capital loss", "stock", "rsu", "trust", "estate",
+    "disaster loss", "disaster", "business loss", "excess business loss",
+}
+
+
+def _nol_mixed_base_signal_ok(q: str) -> bool:
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False  # closed-business language means the sibling wages-only path applies
+    # "ongoing business" evidence: either an explicit self-employment-
+    # flavored phrase, OR simply stating a "business income" figure at
+    # all (a stated business-income anchor is itself direct evidence
+    # current-year business income exists -- found live: the natural
+    # phrasing "$X in business income" alone, with no separate
+    # self-employed/schedule-C phrase, was being wrongly rejected before
+    # this OR was added).
+    if not (any(t in q for t in NOL_MIXED_ONGOING_BUSINESS_TERMS)
+            or any(t in q for t in NOL_MIXED_BUSINESS_INCOME_TERMS)):
+        return False
+    if not any(t in q for t in NOL_MIXED_WAGE_TERMS):
+        return False
+    if any(t in q for t in NOL_MIXED_COMPLEXITY_EXCLUDE):
+        return False
+    if not any(trig in q for trig in COMPUTE_TRIGGERS):
+        return False
+    return True
+
+
+def detect_nol_mixed_signal(question: str):
+    """Returns filing_status iff this looks like a genuine 'wages/other
+    income AND current-year business income, with a stated federal NOL
+    carryover' question."""
+    q = question.lower()
+    if not _nol_mixed_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_nol_mixed_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _nol_mixed_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def compute_nol_mixed_ca_tax(conn, wages: float, business_income: float, nol_carryover_amount: float,
+                              filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """See module note above. Unlike compute_nol_ca_tax and
+    compute_nol_wages_ca_tax, both suspension-test halves are genuinely
+    separate stated figures here: net business income is business_income
+    alone; modified AGI is wages + business_income."""
+    if wages is None or wages < 0:
+        return None
+    if business_income is None or business_income < 0:
+        return None
+    if nol_carryover_amount is None or nol_carryover_amount <= 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    modified_agi = wages + business_income
+    mti = max(0.0, modified_agi - dedu["amount"])
+    suspended = business_income >= NOL_THRESHOLD and modified_agi >= NOL_THRESHOLD
+    nol_deduction = 0.0 if suspended else min(nol_carryover_amount, mti)
+    remaining_carryover = nol_carryover_amount - nol_deduction
+    taxable_income = max(0.0, mti - nol_deduction)
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    return {**calc, "wages": wages, "business_income": business_income,
+            "modified_agi": modified_agi, "nol_carryover_amount": nol_carryover_amount,
+            "suspended": suspended, "nol_deduction": nol_deduction,
+            "remaining_carryover": remaining_carryover, "mti": mti,
+            "standard_deduction": dedu["amount"],
+            "citation": NOL_CITATION, "source_url": NOL_SOURCE_URL}
+
+
 # --- California disaster loss carryover deduction (Schedule CA (540)
 # Line 9b1, FTB Form 3805V) -- verified against FTB's 2025 Schedule CA
 # (540) instructions: "If you have a California disaster loss carryover

@@ -391,12 +391,32 @@ ITEMS = [
     ("I", "B", "8a-general", "Federal NOL addback for taxpayers with wages/other income AND "
      "current-year business income (mixed sources)",
      "addition", "narrow", "Sched CA (540) Pt I Sec B line 8a; FTB 3805V",
-     "deferred_new_engine", None,
-     "Genuinely still deferred: a taxpayer with BOTH wages AND ongoing current-year business "
-     "income needs the FULL suspension-test generalization (net business income and modified "
-     "AGI as two genuinely separate, possibly-nonzero figures) -- real new scope. See the "
-     "'wages-only, closed business' row below, which IS built, for the population this general "
-     "case's own deferral does NOT block."),
+     "built", None,
+     "Built via income_brackets.compute_nol_mixed_ca_tax / engine._income_nol_mixed_answer. "
+     "Re-examined 2026-08-28 at the user's request, the last remaining deferred item after the "
+     "basis-difference batch: the original 'needs the full suspension-test generalization' "
+     "reasoning doesn't survive contact with the suspension test's own text once you stop "
+     "trying to make ONE stated figure stand in for BOTH halves of it. Asked for directly, net "
+     "business income is simply the stated business_income figure (no conflation with total "
+     "income needed at all), and modified AGI is wages + business_income (a two-source sum, "
+     "same disclosed 'no other income/adjustments' simplification the sibling wages-only row "
+     "already carries, just widened by one explicit source). No new algorithm, no new FTB "
+     "research -- the SAME suspension AND test already verified and cited for the sibling rows, "
+     "applied to its two actual inputs instead of one approximated input. Requires an EXPLICIT "
+     "ongoing-business signal (or a stated business-income figure, which is itself direct "
+     "evidence of one) to distinguish from the wages-only-closed-business row, and explicit "
+     "wage/other-income vocabulary to distinguish from the business-only row -- both already "
+     "correctly step aside for this population unchanged. One extraction bug found live: the "
+     "shared _amount_near_filtered_span helper's anchor-start-to-amount-midpoint distance "
+     "metric picked the wrong figure on a reordered-facts phrasing (a long anchor phrase like "
+     "'business income' can land numerically closer to an unrelated PRECEDING amount than to "
+     "its own value right after it); fixed with a dedicated boundary-aware helper measuring "
+     "from the anchor's nearest edge instead. Also found live: 's-corp'/'llc'/'partnership' as "
+     "trigger vocabulary collided with the already-established entity_annual_tax feature ('I "
+     "run an s-corp...' reads as an entity question, not a personal-income one) -- dropped from "
+     "the trigger set, scope limited to unambiguous personal-income phrasing (self-employed, "
+     "freelance, contractor, sole proprietor, K-1, Schedule C/E, or simply stating a business-"
+     "income figure)."),
     ("I", "B", "8a-wages-only", "Federal NOL addback for WAGE-ONLY filers with NO current-year "
      "business income (closed prior business)",
      "addition", "moderate", "FTB 2025 Instructions for Form 3805V -- NOL Suspension / General "

@@ -2852,6 +2852,150 @@ def _income_nol_wages_ambiguous_answer(question: str, base: dict):
     return result
 
 
+def _nol_mixed_amount_near_anchor(question: str, keywords, amounts, window: int = 25):
+    """Anchor-boundary-aware amount lookup, built specifically for this
+    feature after _amount_near_filtered_span picked the WRONG amount
+    live: that function measures distance from the anchor's START to
+    the amount's MIDPOINT, which for a long anchor phrase ("business
+    income") can make an unrelated PRECEDING amount from a different
+    clause look numerically closer than the anchor's own value sitting
+    right after it ("my business income is $500,000" -- the preceding
+    "$100,000, my " connector was shorter than "business income" itself,
+    so the wrong figure won under the shared function's metric). This
+    measures from the anchor's NEAREST EDGE instead (its end, for a
+    following amount; its start, for a preceding one) with a tight
+    window, since this feature's natural phrasing always has the anchor
+    and its value separated by only a few connector words ("is"/"of"/
+    "in") in either direction."""
+    ql = question.lower()
+    if not amounts:
+        return None
+    best = None
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = ql.find(kw, start)
+            if idx == -1:
+                break
+            end = idx + len(kw)
+            for amount, a_start, a_end in amounts:
+                if a_start >= end:
+                    dist = a_start - end
+                elif a_end <= idx:
+                    dist = idx - a_end
+                else:
+                    continue
+                if dist <= window and (best is None or dist < best[1]):
+                    best = ((amount, a_start, a_end), dist)
+            start = idx + len(kw)
+    return best[0] if best else None
+
+
+def _nol_mixed_strip_form_number_phantoms(amounts):
+    # "1099" (a common ongoing-business trigger term, e.g. "1099 income")
+    # is a bare 4-digit sequence that _amounts()'s regex parses as a
+    # phantom dollar amount -- the same collision class found 10+ times
+    # this session (280E/QSBS/2555/951-8992/1040/3804/3805/3506/3592/
+    # 4797-1231-1245-1250/3885), fixed proactively here before any live
+    # test rather than waiting to discover it as a bug.
+    return [(a, s, e) for a, s, e in amounts if a != 1099.0]
+
+
+def _income_nol_mixed_answer(conn, question: str, base: dict):
+    """NOL carryover for a filer with BOTH wages/other income AND
+    current-year business income -- see
+    income_brackets.compute_nol_mixed_ca_tax's docstring. Two anchors
+    (business income, NOL carryover) plus wages as the sole remainder,
+    same 'N anchors + 1 remainder' pattern as the basis-difference
+    features -- but unlike that family (whose phrasing is always
+    "X is $Y", anchor before amount), this feature's own family
+    (mirroring the sibling compute_nol_ca_tax's established convention)
+    is naturally phrased either "$Y in business income" (amount before
+    anchor) or "business income is $Y" (anchor before amount) depending
+    on sentence order. Uses the boundary-aware
+    _nol_mixed_amount_near_anchor/_remove_amount_span pattern -- see
+    that helper's docstring for why the shared _amount_near_filtered_
+    span's start-to-midpoint metric picked the WRONG amount on a
+    reordered-facts test (a long anchor phrase can end up numerically
+    closer to an unrelated preceding value than to its own)."""
+    fs = income_brackets.detect_nol_mixed_signal(question)
+    if not fs:
+        return None
+    amounts = _nol_mixed_strip_form_number_phantoms(_amounts(question))
+    nol_match = _nol_mixed_amount_near_anchor(question, income_brackets.NOL_TERMS, amounts)
+    if nol_match is None:
+        return None
+    nol_amount = nol_match[0]
+    remaining = _remove_amount_span(amounts, nol_match)
+    biz_match = _nol_mixed_amount_near_anchor(question, income_brackets.NOL_MIXED_BUSINESS_INCOME_TERMS, remaining)
+    if biz_match is None:
+        return None
+    business_income = biz_match[0]
+    remaining = _remove_amount_span(remaining, biz_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    wages = others[0]
+    calc = income_brackets.compute_nol_mixed_ca_tax(conn, wages, business_income, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "ca_income_tax_bracket",
+              "amount": wages, "taxable_income": calc["taxable_income"],
+              "standard_deduction": calc["standard_deduction"],
+              "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    surtax_note = ""
+    if calc["surtax"]:
+        surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
+                       f"Tax (1% of taxable income over $1,000,000) ({calc['surtax_citation']}).")
+    if calc["suspended"]:
+        nol_note = (f"your NOL carryover deduction is SUSPENDED this year because both your "
+                    f"business income (${business_income:,.2f}) AND your modified AGI "
+                    f"(${calc['modified_agi']:,.2f}, wages plus business income) are at or "
+                    f"above the {income_brackets.DEFAULT_TAX_YEAR} $1,000,000 suspension "
+                    f"threshold -- none of your ${nol_amount:,.2f} carryover is deductible this "
+                    "year, and the full amount carries forward (with an extended carryforward "
+                    "period) to a later year")
+    elif calc["remaining_carryover"]:
+        nol_note = (f"${calc['nol_deduction']:,.2f} of your ${nol_amount:,.2f} NOL carryover "
+                    "is deductible this year (capped at your Modified Taxable Income of "
+                    f"${calc['mti']:,.2f}, not a percentage -- California has no 80%-of-income "
+                    "cap like current federal law), with the remaining "
+                    f"${calc['remaining_carryover']:,.2f} continuing to carry forward")
+    else:
+        nol_note = (f"your full ${nol_amount:,.2f} NOL carryover is deductible this year "
+                    "(the suspension does not apply, and it's within your Modified Taxable "
+                    "Income)")
+    result["answer_text"] = (
+        f"With ${wages:,.2f} in wages/other income and ${business_income:,.2f} in current-year "
+        f"business income (modified AGI of ${calc['modified_agi']:,.2f} for the suspension "
+        f"test), filing status {label}: {nol_note} ({income_brackets.NOL_CITATION}). After the "
+        f"standard deduction (${calc['standard_deduction']:,.0f}), your California taxable "
+        f"income is about ${calc['taxable_income']:,.2f}. Your marginal CA tax bracket is "
+        f"{calc['marginal_rate']*100:g}%, and your estimated {income_brackets.DEFAULT_TAX_YEAR} "
+        f"California income tax is about ${calc['total_tax']:,.2f} ({calc['citation']})."
+        f"{surtax_note} This assumes an ordinary business NOL (not a disaster-loss carryover, "
+        "which is exempt from suspension regardless of income) and that you have no other "
+        "income or adjustments beyond your stated wages and business income -- your actual "
+        "liability may differ."
+    )
+    return result
+
+
+def _income_nol_mixed_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_nol_mixed_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California income tax with an NOL carryover deduction alongside "
+        "wages and current-year business income, I need your filing status: single, married "
+        "filing jointly, married filing separately, head of household, or qualifying surviving "
+        "spouse. Please also state your wages/other income and your business income "
+        "separately.")
+    return result
+
+
 def _income_disaster_loss_carryover_answer(conn, question: str, base: dict):
     """Other income + a stated California disaster loss carryover
     deduction -- see income_brackets.compute_disaster_loss_carryover_ca_
@@ -6351,6 +6495,19 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_nol_wages_fs_result:
         return missing_nol_wages_fs_result
 
+    # Mixed-source NOL checked BEFORE nol_wages_ambiguous below -- both
+    # require an ongoing-business signal to differ from the closed-
+    # business case, so they're mutually exclusive by construction, but
+    # this ordering keeps the more specific "here's a computed answer"
+    # path ahead of the generic clarifying-question fallback regardless.
+    nol_mixed_result = _income_nol_mixed_answer(conn, question, base)
+    if nol_mixed_result:
+        return nol_mixed_result
+
+    missing_nol_mixed_fs_result = _income_nol_mixed_missing_filing_status_answer(question, base)
+    if missing_nol_mixed_fs_result:
+        return missing_nol_mixed_fs_result
+
     nol_wages_ambiguous_result = _income_nol_wages_ambiguous_answer(question, base)
     if nol_wages_ambiguous_result:
         return nol_wages_ambiguous_result
@@ -6779,6 +6936,8 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_nol_missing_filing_status,
     income_brackets.detect_nol_wages_signal,
     income_brackets.detect_nol_wages_missing_filing_status,
+    income_brackets.detect_nol_mixed_signal,
+    income_brackets.detect_nol_mixed_missing_filing_status,
     income_brackets.detect_nol_wages_ambiguous,
     income_brackets.detect_disaster_loss_carryover_signal,
     income_brackets.detect_disaster_loss_carryover_missing_filing_status,

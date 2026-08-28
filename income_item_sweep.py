@@ -796,12 +796,13 @@ ITEMS = [
     # missing filing status -> specific clarifying message.
     ("how much california tax do I owe on $500,000 in business income with a $100,000 nol carryover",
      {"status": "needs_review", "domain": "income"}),
-    # wage income mixed in -- real complexity this MVP doesn't attempt
-    # (the sole-income-source assumption behind collapsing "net business
-    # income" and "modified AGI" into one figure would no longer hold) --
-    # correctly defers.
+    # wage income mixed in -- previously deferred here ("real complexity
+    # this MVP doesn't attempt"), now handled by the dedicated mixed-
+    # source path below (compute_nol_mixed_ca_tax): $60,000 wages +
+    # $500,000 business income -> modified AGI $560,000, MTI $554,294,
+    # full $100,000 carryover deductible -> taxable $454,294 -> $39,601.37.
     ("how much california tax do I owe on $60,000 in wages and $500,000 in business income with a $100,000 nol carryover single",
-     {"status": "needs_review"}),
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 39601.37}),
     # SELF-EMPLOYMENT COLLISION, TWO amounts stated: before the
     # SE_COMPLEXITY_EXCLUDE fix, "self-employed" + a business-income
     # figure would have been intercepted by the self-employment path,
@@ -865,6 +866,61 @@ ITEMS = [
     # population and the real suspension-test complexity still applies.
     ("how much California tax do I owe with an NOL carryover of $20,000, I'm self-employed, if my wages are $80,000, single?",
      {"status": "informational", "domain": "income"}),
+
+    # --- NOL carryover for a MIXED-SOURCE filer: BOTH wages/other income
+    # AND current-year business income (Schedule CA (540) Line 8a
+    # "8a-general" population -- the LAST item in schedule_ca_inventory.py
+    # after the basis-difference batch, re-examined 2026-08-28 at the
+    # user's request. Found tractable: the original "needs generalizing
+    # the MTI/suspension test" deferral reasoning doesn't survive once
+    # both suspension-test halves are genuinely separate stated figures
+    # instead of one figure standing in for both -- net business income
+    # is business_income alone, modified AGI is wages + business_income.
+    # No new algorithm, same suspension AND test already verified above.
+    #
+    # Basic: $60,000 wages, $500,000 business income (an explicit
+    # ongoing-business signal or a stated business-income figure is
+    # required to distinguish this from the wages-only-closed-business
+    # sibling), $100,000 NOL carryover -> modified AGI $560,000, MTI
+    # $554,294, not suspended (business income <$1M), full $100,000
+    # deductible -> taxable $454,294 -> $39,601.37.
+    ("how much california tax do I owe on $60,000 in wages and $500,000 in business income with a $100,000 nol carryover, self-employed, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 39601.37}),
+    # order independence (all 3 facts reordered, with the wage/business
+    # anchors adjacent to EACH OTHER's connector words -- this exact
+    # phrasing found a real bug live: the shared _amount_near_filtered_
+    # span's anchor-start-to-amount-midpoint distance metric picked the
+    # NOL figure instead of the business-income figure, since "business
+    # income"'s own length made its start position land numerically
+    # closer to the PRECEDING $100,000 than to its own $500,000 sitting
+    # right after it. Fixed with a dedicated boundary-aware helper,
+    # _nol_mixed_amount_near_anchor, measuring from the anchor's nearest
+    # EDGE instead of its start).
+    ("single, my nol carryover is $100,000, my business income is $500,000, my wages are $60,000, self-employed, how much california tax do I owe?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 39601.37}),
+    # SUSPENDED: both business income ($1,200,000) AND modified AGI
+    # ($1,260,000 = $60,000 wages + $1,200,000 business) clear the $1M
+    # threshold -> entire $50,000 carryover disallowed this year ->
+    # taxable income is modified AGI minus std deduction: $1,254,294,
+    # crosses the BHS surtax threshold -> $137,657.72.
+    ("how much california tax do I owe on $60,000 in wages and $1,200,000 in business income with a $50,000 nol carryover, self-employed, single",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 137657.72}),
+    # missing filing status -> falls through to the sibling wages-only
+    # path's clarifying message (this feature has no dedicated one of
+    # its own -- same "reuse the closest sibling's fallback" choice
+    # already made for other multi-fact features' missing-non-filing-
+    # status gaps).
+    ("how much california tax do I owe on $60,000 in wages and $500,000 in business income with a $100,000 nol carryover, self-employed",
+     {"status": "needs_review", "domain": "income"}),
+    # a "1099" ongoing-business mention alongside a genuine phantom-digit
+    # risk -- "1099" itself is a bare 4-digit sequence the shared
+    # _amounts() regex would otherwise misparse as a dollar amount (the
+    # 11th+ instance of this exact collision class this session).
+    # Confirms the proactive _nol_mixed_strip_form_number_phantoms guard
+    # doesn't break real extraction when "1099" appears only as
+    # descriptive text, not a dollar figure.
+    ("I am a 1099 contractor. How much California tax do I owe with $60,000 in wages and $500,000 in business income and a $100,000 nol carryover, single?",
+     {"status": "answered", "domain": "income", "category": "ca_income_tax_bracket", "tax": 39601.37}),
 
     # --- cannabis 280E business-expense decoupling (Ring 3 extension,
     # R&TC Section 17209) -- verified against the statute and the 2025
