@@ -7466,15 +7466,71 @@ def _log_query(question: str, result: dict, source: str) -> None:
 
 
 def answer(question: str, compose: bool = True, location: str = None,
-           router: str = None, source: str = "live", tax_type: str = None) -> dict:
+           router: str = None, source: str = "live", tax_type: str = None,
+           remembered_filing_status: str = None) -> dict:
     """Public entry point: runs _answer(), then logs the outcome to query_log
     (see db.py) for the usage-driven feedback loop -- mining real questions and
     low-confidence answers instead of guessing what to test next. `source`
     tags internal test-script traffic (item_sweep/coverage/smoke_test) so it
     can be told apart from real usage; defaults to 'live'. `tax_type` is the
-    optional UI hint (None|"sales"|"income") -- see _answer()'s docstring."""
+    optional UI hint (None|"sales"|"income") -- see _answer()'s docstring.
+
+    `remembered_filing_status` (None|"single"|"mfs"|"mfj"|"hoh"|"qss") is an
+    OPTIONAL session-memory hint (see app.py): a filing status the user
+    stated earlier in the same chat session, not necessarily in THIS
+    question. Never trusted blindly -- pass 1 always runs on the question
+    exactly as asked, identical to today's behavior with no new kwarg. Only
+    if pass 1 comes back needing a filing status SPECIFICALLY (an income-
+    domain needs_review whose own answer_text says so -- the literal
+    convention every _income_*missing_filing_status*/_missing_fs_answer
+    function in this file already uses) do we retry ONCE with the
+    remembered status appended as plain trailing text, using
+    income_brackets.FILING_STATUS_LABELS -- text detect_filing_status
+    itself already recognizes, verified to round-trip for all 5 keys.
+    Scoped this narrowly on purpose: unconditionally splicing filing-status
+    text into EVERY question risks feeding it into sales-tax routing for
+    questions never about income tax -- verified live that COMPUTE_TRIGGERS'
+    bare "how much tax" phrase can hijack a genuinely sales-phrased question
+    ("how much tax do I owe on a $500 couch") into a confidently WRONG
+    income-bracket computation once a filing status is present in the text.
+    Gating the retry on pass 1's OWN result (income domain + needs_review +
+    mentions filing status) keeps this feature from ever running on a
+    question that didn't already, on its own, ask for one -- though this is
+    a mitigation, not a full fix, since that exact couch phrasing already
+    independently triggers a filing-status defer on pass 1 today; the root
+    cause (COMPUTE_TRIGGERS' breadth) is a separate, pre-existing
+    engine limitation, not something this memory feature is responsible
+    for closing."""
+    detected_filing_status = income_brackets.detect_filing_status(question)
+    detected_filing_status_label = (
+        income_brackets.FILING_STATUS_LABELS[detected_filing_status]
+        if detected_filing_status else None)
+
     result = _answer(question, compose=compose, location=location, router=router,
                       tax_type=tax_type)
+
+    used_remembered_filing_status = False
+    remembered_filing_status_label = None
+    if (detected_filing_status is None
+            and remembered_filing_status in income_brackets.FILING_STATUS_LABELS
+            and result.get("domain") == "income"
+            and result.get("status") == "needs_review"
+            and "filing status" in (result.get("answer_text") or "").lower()):
+        remembered_filing_status_label = income_brackets.FILING_STATUS_LABELS[remembered_filing_status]
+        augmented_question = f"{question}, {remembered_filing_status_label}"
+        retry_result = _answer(augmented_question, compose=compose, location=location,
+                                router=router, tax_type=tax_type)
+        if retry_result:
+            result = retry_result
+            used_remembered_filing_status = True
+        else:
+            remembered_filing_status_label = None
+
+    result["detected_filing_status"] = detected_filing_status
+    result["detected_filing_status_label"] = detected_filing_status_label
+    result["used_remembered_filing_status"] = used_remembered_filing_status
+    result["remembered_filing_status_label"] = remembered_filing_status_label
+
     _log_query(question, result, source)
     return result
 

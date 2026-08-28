@@ -46,6 +46,10 @@ st.caption("CDTFA sales/use tax + FTB income tax → Postgres/pgvector (two sepa
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "remembered_filing_status" not in st.session_state:
+    st.session_state.remembered_filing_status = None
+if "remembered_filing_status_label" not in st.session_state:
+    st.session_state.remembered_filing_status_label = None
 
 with st.sidebar:
     st.subheader("Options")
@@ -69,11 +73,28 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    st.divider()
+    st.subheader("Filing status")
+    if st.session_state.remembered_filing_status:
+        st.caption(f"Remembered: **{st.session_state.remembered_filing_status_label}**")
+        if st.button("Forget filing status", use_container_width=True):
+            st.session_state.remembered_filing_status = None
+            st.session_state.remembered_filing_status_label = None
+            st.rerun()
+    else:
+        st.caption("Not stated yet this session.")
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("result"):
             res = msg["result"]
+            if res.get("used_remembered_filing_status"):
+                st.caption(
+                    f"Used your remembered filing status "
+                    f"({res['remembered_filing_status_label']}) to answer this."
+                )
+
             amount_field = "tax" if res.get("tax") is not None else "amount"
             if res.get(amount_field) is not None:
                 st.metric("Estimated amount", f"${res[amount_field]:,.2f}")
@@ -106,13 +127,24 @@ if question and question.strip():
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            res = answer(question, tax_type=tax_type)
+            res = answer(question, tax_type=tax_type,
+                         remembered_filing_status=st.session_state.remembered_filing_status)
+
+        if res.get("detected_filing_status"):
+            st.session_state.remembered_filing_status = res["detected_filing_status"]
+            st.session_state.remembered_filing_status_label = res["detected_filing_status_label"]
 
         display_text = md_safe(res["answer_text"])
         if res["status"] == "needs_review":
             st.warning(display_text)
         else:
             st.success(display_text)
+
+        if res.get("used_remembered_filing_status"):
+            st.caption(
+                f"Used your remembered filing status "
+                f"({res['remembered_filing_status_label']}) to answer this."
+            )
 
         amount_field = "tax" if res.get("tax") is not None else "amount"
         if res.get(amount_field) is not None:
