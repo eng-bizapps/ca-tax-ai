@@ -9,6 +9,7 @@ For every question:
 """
 import json
 import re
+from datetime import date
 
 import google.generativeai as genai
 
@@ -57,6 +58,69 @@ def _amounts(question: str):
         except ValueError:
             continue
     return out
+
+
+# --- Date parsing, built for the Underpayment Regular Method (FTB 5805
+# Worksheet II) -- the first date-handling code anywhere in this
+# codebase; everything else here is dollar-amount/keyword-phrase based.
+_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")
+
+
+def _dates(question: str):
+    """Mirrors _amounts()'s (value, start, end) shape for calendar dates
+    -- MM/DD/YYYY or MM/DD/YY (2-digit year normalized by +2000).
+    Invalid calendar dates (e.g. 2/30) are skipped, not raised."""
+    out = []
+    for m in _DATE_RE.finditer(question):
+        month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            out.append((date(year, month, day), m.start(), m.end()))
+        except ValueError:
+            continue
+    return out
+
+
+def _mask_dates(question: str, dates) -> str:
+    """Overwrites each matched date's character span with 'X' (same
+    length -- preserves every OTHER character's offset, so
+    _amount_after_filtered_span's keyword-distance arithmetic keeps
+    working unmodified on the masked copy). Necessary because
+    _amounts()'s digit-sweeping regex (above) has no word-boundary
+    guard: verified live that a literal date like "4/15/2025" produces
+    PHANTOM amounts 15.0 and 2025.0 without this -- the same collision
+    class found 10+ times this session for form/section numbers, just
+    triggered by dates instead."""
+    chars = list(question)
+    for _, start, end in dates:
+        for i in range(start, end):
+            chars[i] = "X"
+    return "".join(chars)
+
+
+def _pair_amounts_with_dates(amounts, dates, window: int = 25):
+    """Forward-only: pairs each amount with the closest date within
+    `window` chars AFTER it -- this feature's required phrasing is
+    always '$X on/paid DATE'. Each date claimed by at most one amount,
+    removed from the candidate pool by position once claimed. Amounts
+    with no date within range are simply dropped from the result (the
+    caller checks length to detect this)."""
+    remaining = list(dates)
+    pairs = []
+    for amount, a_start, a_end in amounts:
+        best = None
+        for d, d_start, d_end in remaining:
+            if d_start < a_end:
+                continue
+            dist = d_start - a_end
+            if dist <= window and (best is None or dist < best[1]):
+                best = ((d, d_start, d_end), dist)
+        if best:
+            d, d_start, d_end = best[0]
+            pairs.append((amount, d))
+            remaining = [(dd, ds, de) for dd, ds, de in remaining if (ds, de) != (d_start, d_end)]
+    return pairs
 
 
 def _amount_near(question: str, keywords, window: int = 60):
@@ -2195,22 +2259,179 @@ def _income_underpayment_missing_filing_status_answer(question: str, base: dict)
 
 
 def _income_underpayment_out_of_scope_answer(question: str, base: dict):
-    """Specific clarifying message when the question mentions any
-    estimated tax payment, or the Farmer/Fisherman exception -- both
-    need the regular (date-dependent) method or an entirely different
-    form, not this short-method-only slice."""
+    """Specific clarifying message for the Farmer/Fisherman exception or
+    the annualized-income installment method -- both need an entirely
+    different form/worksheet, not either method built here. NARROWED
+    2026-08-28: plain estimated-tax-payment mentions now route to the
+    Regular Method feature below instead of landing here."""
     if not income_brackets.detect_underpayment_out_of_scope(question):
         return None
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
-        "This assistant only estimates California's Underpayment of Estimated Tax Penalty for "
-        "the common case of a withholding-only filer who made NO estimated tax payments this "
-        "year, using FTB's simplified Short Method. If you made any estimated tax payments, "
-        "whether this simplified method still applies to you depends on whether those payments "
-        "were made exactly on the required due dates (not early, not late) -- a timing detail "
-        "this assistant can't verify from a single question. Farmers and fishermen use a "
-        "separate form (FTB 5805F) with different rules entirely. Please consult FTB Form 5805's "
-        "instructions directly, or a tax professional, for an accurate figure."
+        "Farmers and fishermen use a separate form (FTB 5805F) with different rules entirely, "
+        "and the annualized income installment method needs its own full worksheet (Form 5805 "
+        "Part III) this assistant doesn't attempt. Please consult FTB Form 5805's instructions "
+        "directly, or a tax professional, for an accurate figure."
+    )
+    return result
+
+
+def _underpayment_regular_extract_common_facts(masked_question: str, amounts):
+    """Shared extraction for the 4 non-payment facts (withholding,
+    prior-year tax, prior-year AGI, current-year income), same order and
+    anchor-removal discipline as the Short Method's own
+    _income_underpayment_answer. Returns (withholding, prior_year_tax,
+    prior_year_agi, current_year_income, remaining_amounts) or None."""
+    match = _amount_after_filtered_span(masked_question, income_brackets.UNDERPAYMENT_WITHHOLDING_TERMS, amounts)
+    if match is None:
+        return None
+    withholding = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(masked_question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_TAX_TERMS, amounts)
+    if match is None:
+        return None
+    prior_year_tax = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(masked_question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS, amounts)
+    if match is None:
+        return None
+    prior_year_agi = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(masked_question, income_brackets.UNDERPAYMENT_CURRENT_INCOME_TERMS, amounts)
+    if match is None:
+        return None
+    current_year_income = match[0]
+    amounts = _remove_amount_span(amounts, match)
+    return withholding, prior_year_tax, prior_year_agi, current_year_income, amounts
+
+
+def _income_underpayment_regular_answer(conn, question: str, base: dict):
+    """Underpayment of Estimated Tax Penalty, REGULAR METHOD (FTB 5805
+    Worksheet II) -- see income_brackets.compute_underpayment_penalty_
+    regular's module note for the full verified mechanic. Extracts the
+    4 common facts (same anchors as the Short Method) plus a flat list
+    of estimated-payment (amount, date) pairs, buckets them by actual
+    payment date into the FTB due-date windows, then runs the Worksheet
+    II arithmetic. Dates are masked out of the question BEFORE dollar-
+    amount extraction runs -- see _mask_dates's docstring for why this
+    is required, not optional, for this specific feature."""
+    fs = income_brackets.detect_underpayment_regular_method_signal(question)
+    if not fs:
+        return None
+    dates = _dates(question)
+    if not dates:
+        return None
+    masked = _mask_dates(question, dates)
+    amounts = _amounts(masked)
+    common = _underpayment_regular_extract_common_facts(masked, amounts)
+    if common is None:
+        return None
+    withholding, prior_year_tax, prior_year_agi, current_year_income, remaining = common
+    if not remaining:
+        return None
+    pairs = _pair_amounts_with_dates(remaining, dates)
+    if len(pairs) != len(remaining):
+        return None
+    buckets = income_brackets.bucket_regular_method_payments(pairs)
+    if buckets is None:
+        return None
+    calc = income_brackets.compute_underpayment_penalty_regular_ca_tax(
+        conn, current_year_income, fs, prior_year_tax, prior_year_agi, withholding, buckets)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    penalty = calc["penalty"]
+    result = {**base, "status": "answered", "category": "underpayment_penalty_regular",
+              "amount": current_year_income, "tax": penalty["penalty"],
+              "citation": income_brackets.UNDERPAYMENT_REGULAR_CITATION,
+              "source_url": income_brackets.UNDERPAYMENT_SOURCE_URL}
+    common_facts = (
+        f"With ${current_year_income:,.2f} in California income (current-year tax "
+        f"${calc['current_year_tax']:,.2f}), filing status {label}, ${calc['prior_year_tax']:,.2f} "
+        f"in prior-year CA tax, ${calc['prior_year_agi']:,.2f} in prior-year CA AGI, "
+        f"${calc['withholding']:,.2f} in California withholding, and ${sum(buckets):,.2f} in "
+        f"estimated payments (Q1 ${buckets[0]:,.2f}, Q2 ${buckets[1]:,.2f}, Q3 ${buckets[2]:,.2f}, "
+        f"Q4 ${buckets[3]:,.2f}, bucketed by the date each was actually paid)"
+    )
+    if penalty["reason"] == "de_minimis_balance":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- your "
+            "balance due (current-year tax minus withholding) is under the $500 ($250 if married "
+            f"filing separately) de minimis threshold ({income_brackets.UNDERPAYMENT_REGULAR_CITATION})."
+        )
+        return result
+    if penalty["reason"] == "zero_prior_year_liability":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- you had "
+            f"no California tax liability last year ({income_brackets.UNDERPAYMENT_REGULAR_CITATION})."
+        )
+        return result
+    if penalty["reason"] == "safe_harbor_met":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- your "
+            f"withholding alone meets the required annual payment safe harbor "
+            f"(${penalty['required_annual_payment']:,.2f}, the LESSER of 90% of your current-year "
+            f"tax or 100%/110% of your prior-year tax) ({income_brackets.UNDERPAYMENT_REGULAR_CITATION})."
+        )
+        return result
+    if penalty["reason"] == "no_underpayment":
+        result["answer_text"] = (
+            f"{common_facts}: you do NOT owe an Underpayment of Estimated Tax Penalty -- your "
+            "quarterly payments (plus withholding) covered each required installment on time "
+            f"({income_brackets.UNDERPAYMENT_REGULAR_CITATION})."
+        )
+        return result
+    col_lines = "; ".join(
+        f"Q{i+1}: ${c['underpayment']:,.2f} underpaid, ${c['penalty']:,.2f} penalty"
+        for i, c in enumerate(penalty["columns"]) if c["underpayment"] > 0
+    )
+    result["answer_text"] = (
+        f"{common_facts}: your estimated Underpayment of Estimated Tax Penalty is "
+        f"${penalty['penalty']:,.2f}, computed using FTB's Regular Method (Worksheet II) against "
+        f"a required annual payment of ${penalty['required_annual_payment']:,.2f} (the LESSER of "
+        f"90% of your current-year tax or 100%/110% of your prior-year tax). Per-quarter "
+        f"breakdown: {col_lines} ({income_brackets.UNDERPAYMENT_REGULAR_CITATION}). This assumes "
+        "calendar-year filing, withholding spread evenly across all 4 quarters (not an actual-"
+        "date election), and that any underpaid quarter is resolved on the DUE DATE of the next "
+        "quarter whose payment covers it (a conservative assumption -- if that later payment "
+        "actually arrived earlier, your real penalty may be slightly lower). Doesn't model the "
+        "annualized income installment method. Your actual liability may differ."
+    )
+    return result
+
+
+def _income_underpayment_regular_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_underpayment_regular_method_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Underpayment of Estimated Tax Penalty using FTB's Regular Method, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse -- plus the facts described in the "
+        "payment template (ask again and I'll show it)."
+    )
+    return result
+
+
+def _income_underpayment_regular_template_answer(question: str, base: dict):
+    """Fallback: the Regular Method's own vocabulary is recognized (and
+    a filing status is stated) but full extraction failed -- no dates
+    found, a fact missing, or a payment couldn't be paired with a date.
+    Teaches the required template rather than guessing at what's
+    missing, same "give the user a template to fill in" pattern that
+    unblocked the kiddie-tax build."""
+    if not income_brackets.detect_underpayment_regular_method_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your Underpayment of Estimated Tax Penalty using FTB's Regular Method, "
+        "please restate your question with: your filing status; your California income ('my "
+        "income is $X'); your prior-year CA tax ('my prior year tax was $X'); your prior-year CA "
+        "AGI ('my prior year AGI was $X'); your California withholding ('my withholding was $X'); "
+        "and EACH estimated payment you made, one at a time, as '$AMOUNT on MM/DD/YYYY' -- for "
+        "example: 'I paid $1,000 on 5/1/2025 and $2,000 on 9/20/2025.' List every payment with "
+        "its own exact date. If you made no estimated payments beyond withholding, ask without "
+        "mentioning any estimated payments and I'll use the simpler Short Method instead."
     )
     return result
 
@@ -6634,6 +6855,26 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_underpayment_fs_result:
         return missing_underpayment_fs_result
 
+    # Underpayment REGULAR method (late/partial estimated payments) --
+    # mutually exclusive with the short method above by construction
+    # (the short method's own signal excludes on estimated-payment
+    # vocabulary; this one requires it), so order relative to it doesn't
+    # matter for correctness -- positioned here, before the now-narrowed
+    # out-of-scope check, so a question this feature CAN'T fully extract
+    # still gets its own template-teaching message instead of the
+    # generic farmer/fisherman redirect below.
+    underpayment_regular_result = _income_underpayment_regular_answer(conn, question, base)
+    if underpayment_regular_result:
+        return underpayment_regular_result
+
+    missing_underpayment_regular_fs_result = _income_underpayment_regular_missing_filing_status_answer(question, base)
+    if missing_underpayment_regular_fs_result:
+        return missing_underpayment_regular_fs_result
+
+    underpayment_regular_template_result = _income_underpayment_regular_template_answer(question, base)
+    if underpayment_regular_template_result:
+        return underpayment_regular_template_result
+
     underpayment_out_of_scope_result = _income_underpayment_out_of_scope_answer(question, base)
     if underpayment_out_of_scope_result:
         return underpayment_out_of_scope_result
@@ -7158,6 +7399,8 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_underpayment_signal,
     income_brackets.detect_underpayment_missing_filing_status,
     income_brackets.detect_underpayment_out_of_scope,
+    income_brackets.detect_underpayment_regular_method_signal,
+    income_brackets.detect_underpayment_regular_method_missing_filing_status,
     income_brackets.detect_self_employment_signal,
     income_brackets.detect_self_employment_missing_filing_status,
     income_brackets.detect_mixed_wage_se_signal,

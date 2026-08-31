@@ -2553,11 +2553,38 @@ ITEMS = [
     # missing filing status -> specific clarifying message.
     ("do I owe underpayment penalty if my income is $150,000, my prior year tax was $5,000, my prior year agi was $100,000, and my california withholding was $2,000?",
      {"status": "needs_review", "domain": "income"}),
-    # OUT OF SCOPE: estimated payments mentioned -- eligibility for the
-    # short method then depends on exact payment dates, a timing
-    # question this slice deliberately avoids.
+    # ESTIMATED PAYMENTS MENTIONED, NO DATE STATED: now routes to the
+    # REGULAR method's own template-teaching message (Regular Method
+    # shipped 2026-08-28 -- see the dedicated block below), not the old
+    # generic "not supported" redirect -- assertion still passes since it
+    # only checks status/domain, but the comment was going stale.
     ("do I owe underpayment penalty if my income is $150,000, filing single, my prior year tax was $5,000, my prior year agi was $100,000, my california withholding was $2,000, and I also made estimated payments?",
      {"status": "needs_review", "domain": "income"}),
+
+    # --- Underpayment of Estimated Tax Penalty, REGULAR METHOD (Form 540
+    # Line 113, FTB Form 5805 Worksheet II) -- re-examined 2026-08-28 at
+    # the user's explicit request, the last remaining deferred_new_engine
+    # item on the whole income-tax ledger. Genuinely different in kind
+    # from every other "too complex" reversal this session: not a
+    # missing-input problem, a whole new capability (this codebase had
+    # ZERO date-parsing infrastructure before this build). Covers the
+    # population the Short Method's own eligibility rule excludes: any
+    # LATE or partial estimated payment. Full design/verification
+    # documented in income_brackets.py's module note above
+    # compute_underpayment_penalty_regular and in
+    # underpayment_regular_method_test.py (31 pure-arithmetic/helper/
+    # integration assertions, all passing).
+    #
+    # Basic: $300,000 income, $40,000 prior-year tax, $100,000 prior-year
+    # AGI, $5,000 withholding, estimated payments $25,000 on 6/10/2025
+    # (buckets into Q2) and $10,000 on 1/10/2026 (buckets into Q4).
+    # required_annual_payment = min(90%*$23,807.98, 100%*$40,000) =
+    # $21,427.18 -> $5,356.80/quarter. Q1 underpays $4,106.80 (only
+    # ratable withholding covers it), resolved by Q2's large overpayment
+    # at Q2's 6/15/25 due date (61 days into the 8% rate period) ->
+    # $54.91 total penalty. Hand-verified independently before locking in.
+    ("I owe an underpayment penalty. my income is $300,000, my prior year tax was $40,000, my prior year AGI was $100,000, my withholding was $5,000, and I made estimated payments of $25,000 on 6/10/2025 and $10,000 on 1/10/2026, single",
+     {"status": "answered", "domain": "income", "category": "underpayment_penalty_regular", "tax": 54.91}),
 
     # --- deliberate defers: complexity disqualifiers (never guess) ---
     ("what is my tax bracket if I make $80,000",   # no filing status given

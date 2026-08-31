@@ -18,6 +18,7 @@ January 1st itself (FTB typically publishes the following autumn/winter).
 """
 import math
 import re
+from datetime import date, timedelta
 
 DEFAULT_TAX_YEAR = 2025   # 2025 is the most recently complete tax year as of
                            # this writing (mid-2026); most 2025 returns are
@@ -5458,8 +5459,14 @@ def compute_amt_iso_ca_tax(conn, income_amount: float, iso_bargain_element: floa
 # the late-filing/late-payment penalty build: per-installment days-
 # unpaid x a periodic interest rate that changes mid-year (8% through
 # 6/30/25, then 7% through 4/15/26), with payment-ordering rules across
-# 4 installment columns. That case STAYS deferred -- nothing here
-# changes it.
+# 4 installment columns. THIS WAS STAYING DEFERRED until re-examined
+# 2026-08-28 at the user's explicit request -- see the dedicated
+# "REGULAR METHOD" section below (compute_underpayment_penalty_regular)
+# for the full worksheet transcription and its own build notes. Unlike
+# every other "too complex" verdict reversed this session, this one
+# genuinely needed a whole new capability (date-math -- this codebase
+# had ZERO date-parsing infrastructure before this build), not just one
+# more stated fact on an existing formula.
 #
 # But FTB also publishes a SHORT METHOD (Form 5805 Side 2, Part II,
 # lines 7-13) that collapses the whole per-diem/rate-period computation
@@ -5576,19 +5583,37 @@ def detect_underpayment_missing_filing_status(question: str) -> bool:
 
 
 def detect_underpayment_out_of_scope(question: str) -> bool:
-    """True iff underpayment-penalty vocabulary is present alongside any
-    estimated-tax-payment mention, or the Farmer/Fisherman exception --
-    both need the REGULAR method's date-dependent mechanic (or an
-    entirely different form), not this short-method-only slice."""
+    """True iff underpayment-penalty vocabulary is present alongside the
+    Farmer/Fisherman exception or the annualized-income method -- both
+    need an entirely different form/worksheet, not either method built
+    here. NARROWED 2026-08-28 (was the full UNDERPAYMENT_OUT_OF_SCOPE_
+    TERMS set, back when any estimated-tax-payment mention meant "not
+    supported") -- now that the Regular Method is built, a plain
+    estimated-payment mention routes to THAT feature instead of this
+    generic redirect; only the genuinely still-unsupported terms remain
+    here. Intentional behavior change, not a regression."""
     q = question.lower()
     return (any(t in q for t in UNDERPAYMENT_TERMS)
-            and any(t in q for t in UNDERPAYMENT_OUT_OF_SCOPE_TERMS))
+            and any(t in q for t in UNDERPAYMENT_REGULAR_HARD_OUT_OF_SCOPE_TERMS))
 
 
-def compute_underpayment_penalty(current_year_tax: float, prior_year_tax: float, prior_year_agi: float,
-                                   withholding: float, filing_status: str, current_year_income: float):
-    """FTB 5805 Short Method, Side 2 Part II -- see module note above for
-    the verified 5-step mechanic and its scope."""
+def compute_required_annual_payment(current_year_tax: float, prior_year_tax: float, prior_year_agi: float,
+                                     withholding: float, filing_status: str, current_year_income: float):
+    """Shared steps 1-4 of FTB 5805's mechanic -- both the Short Method
+    (Side 2 Part II) and the Regular Method (Worksheet II) start here:
+    the two safe harbors that stop the ENTIRE penalty before any
+    per-method math, then the required annual payment (lesser of 90% of
+    current-year tax or 100%/110% of prior-year tax, with the forced-
+    90%-only override for current-year CA AGI >= $1M/$500k MFS) and the
+    resulting ANNUAL underpayment (required annual payment minus
+    withholding -- NOT minus any estimated payments, since safe-harbor
+    sufficiency is judged on withholding alone; estimated payments only
+    affect WHEN the shortfall gets made up, which is what the Regular
+    Method's own per-quarter mechanic figures out separately). Extracted
+    2026-08-28 out of what was compute_underpayment_penalty's own inlined
+    logic, so the Regular Method build could reuse it verbatim rather
+    than duplicating it -- refactor is behavior-preserving, verified
+    against all pre-existing Short Method regression cases."""
     if current_year_tax is None or current_year_tax < 0:
         return None
     if prior_year_tax is None or prior_year_tax < 0:
@@ -5601,9 +5626,9 @@ def compute_underpayment_penalty(current_year_tax: float, prior_year_tax: float,
     de_minimis = UNDERPAYMENT_DE_MINIMIS_MFS if is_mfs else UNDERPAYMENT_DE_MINIMIS_SINGLE
     balance_due = current_year_tax - withholding
     if balance_due < de_minimis:
-        return {"penalty": 0.0, "reason": "de_minimis_balance"}
+        return {"required_annual_payment": None, "safe_harbor_reason": "de_minimis_balance"}
     if prior_year_tax == 0:
-        return {"penalty": 0.0, "reason": "zero_prior_year_liability"}
+        return {"required_annual_payment": None, "safe_harbor_reason": "zero_prior_year_liability"}
     pct_current = UNDERPAYMENT_CURRENT_YEAR_SAFE_HARBOR_RATE * current_year_tax
     high_agi_threshold = UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_MFS if is_mfs else UNDERPAYMENT_PRIOR_AGI_HIGH_THRESHOLD_DEFAULT
     prior_year_rate = (UNDERPAYMENT_PRIOR_YEAR_SAFE_HARBOR_RATE_HIGH_AGI if prior_year_agi > high_agi_threshold
@@ -5616,11 +5641,30 @@ def compute_underpayment_penalty(current_year_tax: float, prior_year_tax: float,
         required_annual_payment = min(pct_current, pct_prior)
     underpayment = required_annual_payment - withholding
     if underpayment <= 0:
-        return {"penalty": 0.0, "reason": "safe_harbor_met", "required_annual_payment": round(required_annual_payment, 2)}
-    penalty = round(underpayment * UNDERPAYMENT_SHORT_METHOD_RATE, 2)
-    return {"penalty": penalty, "reason": "penalty_owed",
-            "required_annual_payment": round(required_annual_payment, 2),
+        return {"required_annual_payment": round(required_annual_payment, 2), "safe_harbor_reason": "safe_harbor_met"}
+    return {"required_annual_payment": round(required_annual_payment, 2), "safe_harbor_reason": None,
             "underpayment": round(underpayment, 2)}
+
+
+def compute_underpayment_penalty(current_year_tax: float, prior_year_tax: float, prior_year_agi: float,
+                                   withholding: float, filing_status: str, current_year_income: float):
+    """FTB 5805 Short Method, Side 2 Part II -- see module note above for
+    the verified 5-step mechanic and its scope. Steps 1-4 delegated to
+    compute_required_annual_payment; the only Short-Method-specific step
+    is the final flat-rate multiplication."""
+    rap = compute_required_annual_payment(current_year_tax, prior_year_tax, prior_year_agi,
+                                           withholding, filing_status, current_year_income)
+    if rap is None:
+        return None
+    if rap["safe_harbor_reason"] in ("de_minimis_balance", "zero_prior_year_liability"):
+        return {"penalty": 0.0, "reason": rap["safe_harbor_reason"]}
+    if rap["safe_harbor_reason"] == "safe_harbor_met":
+        return {"penalty": 0.0, "reason": "safe_harbor_met",
+                "required_annual_payment": rap["required_annual_payment"]}
+    penalty = round(rap["underpayment"] * UNDERPAYMENT_SHORT_METHOD_RATE, 2)
+    return {"penalty": penalty, "reason": "penalty_owed",
+            "required_annual_payment": rap["required_annual_payment"],
+            "underpayment": rap["underpayment"]}
 
 
 def compute_underpayment_penalty_ca_tax(conn, income_amount: float, filing_status: str, prior_year_tax: float,
@@ -5638,6 +5682,288 @@ def compute_underpayment_penalty_ca_tax(conn, income_amount: float, filing_statu
     current_year_tax = calc["total_tax"]
     penalty_calc = compute_underpayment_penalty(current_year_tax, prior_year_tax, prior_year_agi,
                                                   withholding, filing_status, income_amount)
+    if not penalty_calc:
+        return None
+    return {**calc, "income_amount": income_amount, "taxable_income": taxable_income,
+            "current_year_tax": current_year_tax, "prior_year_tax": prior_year_tax,
+            "prior_year_agi": prior_year_agi, "withholding": withholding, "penalty": penalty_calc}
+
+
+# --- Underpayment of Estimated Tax Penalty, REGULAR METHOD (Form 540
+# Line 113, FTB Form 5805 Worksheet II) -- re-examined 2026-08-28 at the
+# user's explicit request after four other "too complex" verdicts this
+# session turned out to have a tractable narrow slice hiding in them.
+# This one is genuinely different in kind, not degree: not a missing-
+# input problem, but a whole new capability -- this codebase had ZERO
+# date-parsing/date-math infrastructure anywhere before this build.
+# Covers the population the Short Method's own eligibility rule
+# excludes: anyone who made a LATE or partial estimated tax payment
+# (the Short Method requires either zero estimated payments, or all of
+# them made exactly on the required due dates).
+#
+# VERIFIED against FTB's 2025 Instructions for Form FTB 5805's
+# "Worksheet II Regular Method to Figure Your Underpayment and
+# Penalty," fetched and transcribed directly (line-by-line, not
+# paraphrased), then independently cross-checked against federal Form
+# 2210 Part III Section A, which California's worksheet mirrors almost
+# exactly (CA lines 1-9 correspond to federal lines 10-18, same
+# column-a bypass, same b/c-only Line 7, same Line 8/Line 9 mutual
+# exclusivity) -- a second source of confidence beyond the single FTB
+# fetch.
+#
+# PART I -- FIGURE YOUR UNDERPAYMENT, four columns in due-date order
+# (a=4/15/25, b=6/15/25, c=9/15/25, d=1/15/26). A genuine RUNNING LEDGER,
+# not a flat formula -- each column's carried-forward state feeds the
+# next:
+#   Line 1 = required_annual_payment / 4 (equal quarterly split -- the
+#            annualized-income-installment alternative, Worksheet
+#            Part III, is a separate and even bigger worksheet, NOT
+#            modeled, same as fiscal-year filers and the Farmer/
+#            Fisherman exception).
+#   Line 2 = payments credited to that column (estimated payments
+#            bucketed by ACTUAL PAYMENT DATE into that due-date window,
+#            same Form-2210 convention -- NOT self-labeled by the
+#            taxpayer, see bucket_regular_method_payments -- plus
+#            withholding allocated ratably 1/4 per column, the standard
+#            IRS/FTB default absent an actual-date election, which is
+#            not modeled).
+#   Line 3/4/5 (columns b,c,d only; column a bypasses straight to
+#            Line 6 = Line 2 directly): carry forward the previous
+#            column's overpayment (Line 9) and any still-unresolved
+#            shortfall (Line 7 + Line 8).
+#   Line 6 = max(0, Line4 - Line5).
+#   Line 7 (columns b,c ONLY -- N/A for a and d): if Line6 == 0, the
+#            still-unresolved carry-forward amount (max(0, Line5-Line4)),
+#            else 0.
+#   Line 8 ("Underpayment") / Line 9 ("Overpayment"): MUTUALLY
+#            EXCLUSIVE per column -- if Line1 >= Line6, Line8 =
+#            Line1-Line6 (Line9 stays 0); else Line9 = Line6-Line1
+#            (Line8 stays 0). Hand-traced multiple consecutive-
+#            underpayment chains to confirm no debt is ever silently
+#            dropped by the Line7/Line8 carry-forward -- it's a proper
+#            running ledger.
+#
+# PART II -- THE PENALTY, two rate periods (8% 4/15/25-6/30/25, 7%
+# 7/1/25-4/15/26 -- the mid-year rate change already verified for the
+# Short Method). Each column's Line8 underpayment accrues interest from
+# its OWN due date until it's "paid" -- FTB's text ("the date the
+# amount on line 8 was paid") assumes the taxpayer already knows this
+# by hand from filling out a paper form quarter-by-quarter; closing
+# that gap for a single-question format is the one genuinely
+# underspecified part of this build. Derivation, verified independently
+# rather than guessed: because Line8/Line9 are mutually exclusive per
+# column, and Line5 additively carries forward EVERYTHING still owed
+# via the previous column's Line7+Line8, the FIRST later column k where
+# Line9[k] > 0 is exactly the point where all debt accumulated through
+# column k-1 gets cleared -- no case exists where a later payment
+# PARTIALLY clears an older shortfall without producing a Line9 event.
+# So: resolved_date[col] = due_date[k] for the earliest later k with
+# Line9[k] > 0, else the worksheet's own stated backstop, 4/15/2026
+# ("...or 4/15/26, whichever is earlier").
+#
+# This deliberately uses column k's DUE DATE, not the exact stated
+# payment date within that column's bucket -- a conservative choice
+# (never understates the penalty, same "assumes payment was NOT made
+# early" philosophy already stated for the Short Method above) that is
+# also the NECESSARY one: since multiple payments can land in the same
+# due-date bucket (see bucketing above), there is no single well-
+# defined "the" payment date to point to once bucketed, and trying to
+# track which specific payment within a bucket resolves an old debt
+# reintroduces exactly the split-resolution complexity this design
+# avoids. Disclosed explicitly in the answer text as a modeling choice,
+# not hidden.
+#
+# EXTRACTION DESIGN -- date-bucketing, not quarter-labeling. Considered
+# asking users to label each payment "Q1/Q2/Q3/Q4" directly; rejected,
+# since a late payment made in August is FTB's OWN convention for
+# column (c) even if the user thinks of it as "catching up Q1" --
+# asking users to self-classify invites exactly the kind of mislabeling
+# this project's "never guess" discipline exists to avoid. Instead:
+# accept a flat list of "$AMOUNT on MM/DD/YYYY" pairs (also accepting
+# MM/DD/YY, but only TEACHING the 4-digit form in clarifying messages)
+# and let the engine bucket each into the due-date window its date
+# actually falls in -- removes the mislabeling risk entirely rather
+# than asking the user to get it right. See engine.py's _dates/
+# _mask_dates/_pair_amounts_with_dates for the extraction side --
+# _amounts()'s regex has no word-boundary guard and misparses a literal
+# date like "4/15/2025" into phantom amounts 15.0/2025.0 (verified
+# live), so dates must be masked out before dollar-amount extraction
+# runs, a new requirement this feature is the first to need.
+#
+# NOT SUPPORTED, disclosed not hidden: the annualized income
+# installment method (Part III); fiscal-year filers; the Farmer/
+# Fisherman exception (FTB 5805F, different rules entirely); a
+# withholding actual-date election (ratable 1/4-per-quarter is used,
+# the standard default); payments dated before the tax year starts or
+# after the 4th installment's due date (bucket_regular_method_payments
+# returns None for these, routing to the template-teaching message
+# rather than guessing how to treat them).
+UNDERPAYMENT_REGULAR_CITATION = "2025 FTB Form 5805 Instructions, Regular Method (Form 5805 Worksheet II); R&TC Section 19136"
+UNDERPAYMENT_REGULAR_DUE_DATES = (date(2025, 4, 15), date(2025, 6, 15), date(2025, 9, 15), date(2026, 1, 15))
+UNDERPAYMENT_REGULAR_TAX_YEAR_START = date(2025, 1, 1)
+UNDERPAYMENT_REGULAR_FINAL_BACKSTOP = date(2026, 4, 15)
+UNDERPAYMENT_REGULAR_RATE1_END = date(2025, 6, 30)
+UNDERPAYMENT_REGULAR_RATE2_START = date(2025, 7, 1)
+UNDERPAYMENT_REGULAR_RATE_PERIOD_1 = 0.08
+UNDERPAYMENT_REGULAR_RATE_PERIOD_2 = 0.07
+UNDERPAYMENT_REGULAR_DAY_BASIS = 365
+
+UNDERPAYMENT_CURRENT_INCOME_TERMS = {
+    "my income is", "my income was", "current year income", "current-year income",
+    "this year's income", "california income is", "income is", "income was",
+}
+# "farmer"/"fisherman"/"fisher"/"annualized income" stay hard-excluded
+# (need a different form or a separate, even bigger worksheet); every
+# OTHER term already in UNDERPAYMENT_OUT_OF_SCOPE_TERMS (estimated
+# payment/quarterly payment/paid estimated tax/"regular method" itself)
+# becomes THIS feature's own positive trigger instead of a dead end.
+UNDERPAYMENT_REGULAR_HARD_OUT_OF_SCOPE_TERMS = {"farmer", "fisherman", "fisher", "annualized income"}
+UNDERPAYMENT_REGULAR_METHOD_SIGNAL_TERMS = UNDERPAYMENT_OUT_OF_SCOPE_TERMS - UNDERPAYMENT_REGULAR_HARD_OUT_OF_SCOPE_TERMS
+
+
+def _underpayment_regular_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in UNDERPAYMENT_TERMS):
+        return False
+    if not any(t in q for t in UNDERPAYMENT_REGULAR_METHOD_SIGNAL_TERMS):
+        return False
+    if any(t in q for t in UNDERPAYMENT_REGULAR_HARD_OUT_OF_SCOPE_TERMS):
+        return False
+    if any(t in q for t in UNDERPAYMENT_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_underpayment_regular_method_signal(question: str):
+    q = question.lower()
+    if not _underpayment_regular_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_underpayment_regular_method_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _underpayment_regular_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def bucket_regular_method_payments(payment_date_pairs):
+    """Buckets each (amount, date) pair into the FTB due-date window it
+    falls in -- a payment's period is determined by WHEN it was
+    actually paid (Form 2210/5805 convention), not which quarter it was
+    "intended" for or self-labeled as. Returns None if any date falls
+    outside the modeled range (before the tax year starts, or after the
+    4th installment's own due date) -- a payment that late/early
+    interacts with the return-due-date mechanic differently, not
+    modeled, so this signals the caller to defer rather than guess."""
+    due = UNDERPAYMENT_REGULAR_DUE_DATES
+    window_starts = (
+        UNDERPAYMENT_REGULAR_TAX_YEAR_START,
+        due[0] + timedelta(days=1),
+        due[1] + timedelta(days=1),
+        due[2] + timedelta(days=1),
+    )
+    cols = [0.0, 0.0, 0.0, 0.0]
+    for amount, d in payment_date_pairs:
+        if d < UNDERPAYMENT_REGULAR_TAX_YEAR_START or d > due[3]:
+            return None
+        for i in (3, 2, 1, 0):
+            if d >= window_starts[i]:
+                cols[i] += amount
+                break
+    return tuple(cols)
+
+
+def compute_underpayment_penalty_regular(current_year_tax: float, prior_year_tax: float, prior_year_agi: float,
+                                          withholding: float, filing_status: str, current_year_income: float,
+                                          quarterly_payments):
+    """FTB 5805 REGULAR METHOD, Worksheet II Parts I & II -- see module
+    note above for the full verified mechanic and the resolution-date
+    derivation. `quarterly_payments` = (col_a, col_b, col_c, col_d),
+    already bucketed by due-date window via
+    bucket_regular_method_payments -- this function is pure arithmetic,
+    no date parsing here."""
+    rap = compute_required_annual_payment(current_year_tax, prior_year_tax, prior_year_agi,
+                                           withholding, filing_status, current_year_income)
+    if rap is None:
+        return None
+    if rap["safe_harbor_reason"] in ("de_minimis_balance", "zero_prior_year_liability"):
+        return {"penalty": 0.0, "reason": rap["safe_harbor_reason"]}
+    if rap["safe_harbor_reason"] == "safe_harbor_met":
+        return {"penalty": 0.0, "reason": "safe_harbor_met",
+                "required_annual_payment": rap["required_annual_payment"]}
+
+    required_installment = rap["required_annual_payment"] / 4.0
+    withholding_per_col = withholding / 4.0
+    line1 = [required_installment] * 4
+    line2 = [quarterly_payments[i] + withholding_per_col for i in range(4)]
+    line6 = [0.0, 0.0, 0.0, 0.0]
+    line7 = [0.0, 0.0, 0.0, 0.0]
+    line8 = [0.0, 0.0, 0.0, 0.0]
+    line9 = [0.0, 0.0, 0.0, 0.0]
+
+    for i in range(4):
+        if i == 0:
+            line6[0] = line2[0]
+        else:
+            line3 = line9[i - 1]
+            line4 = line2[i] + line3
+            line5 = line7[i - 1] + line8[i - 1]
+            line6[i] = max(0.0, line4 - line5)
+            if i in (1, 2) and line6[i] == 0.0:
+                line7[i] = max(0.0, line5 - line4)
+        if line1[i] >= line6[i]:
+            line8[i] = line1[i] - line6[i]
+        else:
+            line9[i] = line6[i] - line1[i]
+
+    due = UNDERPAYMENT_REGULAR_DUE_DATES
+    total_penalty = 0.0
+    columns = []
+    for i in range(4):
+        if line8[i] <= 0:
+            columns.append({"underpayment": 0.0, "penalty": 0.0})
+            continue
+        resolved = UNDERPAYMENT_REGULAR_FINAL_BACKSTOP
+        for k in range(i + 1, 4):
+            if line9[k] > 0:
+                resolved = due[k]
+                break
+        col_penalty = 0.0
+        if i in (0, 1):
+            end1 = min(resolved, UNDERPAYMENT_REGULAR_RATE1_END)
+            days1 = max(0, (end1 - due[i]).days)
+            col_penalty += line8[i] * (days1 / UNDERPAYMENT_REGULAR_DAY_BASIS) * UNDERPAYMENT_REGULAR_RATE_PERIOD_1
+        period2_start = UNDERPAYMENT_REGULAR_RATE2_START if i in (0, 1) else due[i]
+        if resolved > period2_start:
+            end2 = min(resolved, UNDERPAYMENT_REGULAR_FINAL_BACKSTOP)
+            days2 = max(0, (end2 - period2_start).days)
+            col_penalty += line8[i] * (days2 / UNDERPAYMENT_REGULAR_DAY_BASIS) * UNDERPAYMENT_REGULAR_RATE_PERIOD_2
+        col_penalty = round(col_penalty, 2)
+        total_penalty += col_penalty
+        columns.append({"underpayment": round(line8[i], 2), "penalty": col_penalty})
+
+    total_penalty = round(total_penalty, 2)
+    return {"penalty": total_penalty, "reason": "penalty_owed" if total_penalty > 0 else "no_underpayment",
+            "required_annual_payment": rap["required_annual_payment"], "columns": columns}
+
+
+def compute_underpayment_penalty_regular_ca_tax(conn, income_amount: float, filing_status: str,
+                                                 prior_year_tax: float, prior_year_agi: float, withholding: float,
+                                                 quarterly_payments, tax_year: int = DEFAULT_TAX_YEAR):
+    if income_amount is None or income_amount < 0:
+        return None
+    dedu = standard_deduction(conn, filing_status, tax_year)
+    if not dedu:
+        return None
+    taxable_income = max(0.0, income_amount - dedu["amount"])
+    calc = compute_ca_tax(conn, taxable_income, filing_status, tax_year)
+    if not calc:
+        return None
+    current_year_tax = calc["total_tax"]
+    penalty_calc = compute_underpayment_penalty_regular(current_year_tax, prior_year_tax, prior_year_agi,
+                                                          withholding, filing_status, income_amount,
+                                                          quarterly_payments)
     if not penalty_calc:
         return None
     return {**calc, "income_amount": income_amount, "taxable_income": taxable_income,
