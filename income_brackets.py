@@ -5447,6 +5447,156 @@ def compute_amt_iso_ca_tax(conn, income_amount: float, iso_bargain_element: floa
             "iso_bargain_element": iso_bargain_element}
 
 
+# --- California AMT, ITEMIZER extension (Schedule P (540) Part I Line 3)
+# -- re-examined 2026-08-28, continuing the same "dig into AMT" request
+# right after the ISO addback above. Covers a taxpayer who itemizes
+# deductions with NO other AMT preference items (no ISO, no passive
+# activity, no depreciation adjustments, no private activity bonds).
+#
+# VERIFIED against FTB's 2025 Schedule P (540) instructions, Part I Line
+# 3, fetched directly: "Enter on this line any of the following from
+# Schedule CA (540), Part II, lines 5b and 5c, column A and line 6
+# (column A minus column B): State and local personal property taxes;
+# State, local, or foreign real property taxes." This is specifically
+# PROPERTY tax (personal property + real estate) -- a REAL correction
+# caught before building anything: my initial hypothesis was that this
+# would mirror the "SALT addback" already built for CA's own REGULAR-
+# tax itemized-deduction rules (compute_itemized_ca_tax's salt_amount
+# parameter, which removes state/local INCOME tax entirely, since
+# California already disallows that for regular tax too). But Line 3 is
+# a DIFFERENT, narrower category -- property tax IS a valid CA itemized
+# deduction for REGULAR tax, unlike state/local income tax, and is only
+# disallowed specifically for AMT. Confirmed by reading the actual
+# instructions text directly rather than assuming the two "SALT-
+# flavored" addbacks meant the same thing.
+#
+# Reuses compute_itemized_ca_tax UNCHANGED for the regular-tax figure
+# (property tax stays IN the itemized total there, since it's a valid
+# regular-tax deduction) -- AMTI is computed SEPARATELY as that
+# function's own taxable_income PLUS the stated property-tax addback
+# (income_amount - allowed-for-AMT itemized deductions = taxable_income
+# + property_tax_addback, since property tax is the ONE component of
+# the allowed itemized total this scope removes for AMT purposes),
+# same thin-wrapper pattern as the ISO extension reusing
+# compute_amt_screen_ca_tax.
+#
+# SCOPE, disclosed not hidden: if the taxpayer's stated itemized amount
+# doesn't actually exceed the standard deduction (compute_itemized_ca_
+# tax's own "used_itemized" flag is False), this feature DECLINES --
+# they didn't really itemize on their real return, so no property-tax
+# AMT addback applies to them at all (Schedule P Line 1's own
+# instruction routes non-itemizers to the standard-deduction/Line-6
+# path instead, i.e. the ALREADY-BUILT base AMT screen). Does NOT
+# compose with the 6 other OPTIONAL itemized-deduction adjustments
+# compute_itemized_ca_tax already supports (SALT, mortgage-interest
+# addback, misc itemized, charitable cap, SALT-cap addback, casualty
+# loss) -- deliberately scoped to keep extraction to exactly 3 dollar
+# figures (income, itemized total, property-tax addback), the same
+# "narrow but real" discipline as every other build this session; a
+# question mentioning any of those 6 terms routes to a dedicated
+# redirect rather than silently ignoring them. Does NOT attempt CA's
+# own itemized-deduction AGI-based phaseout interacting differently
+# with AMT specifically -- taxable_income already reflects whatever
+# phaseout applied for regular tax, and this extension only adds back
+# the one verified AMT-specific disallowed component on top.
+AMT_ITEMIZED_CITATION = "2025 Schedule P (540), Part I Line 3; R&TC Section 17062.1"
+AMT_ITEMIZED_TERMS = ITEMIZED_TERMS
+AMT_ITEMIZED_PROPERTY_TAX_TERMS = {
+    "property tax", "property taxes", "real estate tax", "real estate taxes",
+    "real property tax", "real property taxes", "personal property tax",
+    "personal property taxes",
+}
+# the 6 optional itemized-deduction adjustments compute_itemized_ca_tax
+# already supports -- out of scope for THIS extension specifically, to
+# keep extraction to exactly 3 figures.
+AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS = (
+    SALT_TERMS | MORTGAGE_INTEREST_ADDBACK_TERMS | MISC_ITEMIZED_TERMS
+    | CHARITABLE_TERMS | SALT_CAP_ADDBACK_TERMS | CASUALTY_LOSS_TERMS
+)
+AMT_ITEMIZED_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"itemize", "itemized", "itemizing"}
+
+
+def _amt_itemized_base_signal_ok(q: str) -> bool:
+    """No COMPUTE_TRIGGERS requirement -- same precedent as the base AMT
+    screen and the ISO extension: AMT + itemizing + property-tax
+    vocabulary together is already specific enough on its own (found
+    live: requiring it too was a copy-paste inconsistency from a
+    DIFFERENT feature family, not an intentional choice -- it silently
+    rejected this feature's own natural phrasing, "do I owe california
+    amt if... single?", before being caught)."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not any(t in q for t in AMT_ITEMIZED_TERMS):
+        return False
+    if not any(t in q for t in AMT_ITEMIZED_PROPERTY_TAX_TERMS):
+        return False
+    if _amt_screen_has_preference_exclusion(q):
+        return False
+    if any(t in q for t in AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS):
+        return False
+    if any(t in q for t in AMT_ITEMIZED_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_amt_itemized_signal(question: str):
+    q = question.lower()
+    if not _amt_itemized_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_itemized_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_itemized_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_itemized_out_of_scope(question: str) -> bool:
+    """True iff AMT + itemizing vocabulary is present alongside any of
+    the 6 other optional itemized-deduction adjustments this extension
+    doesn't attempt together with AMT -- routes to a dedicated redirect
+    rather than silently dropping them."""
+    q = question.lower()
+    if not (any(t in q for t in AMT_SCREEN_TERMS) and any(t in q for t in AMT_ITEMIZED_TERMS)):
+        return False
+    return any(t in q for t in AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS)
+
+
+def compute_amt_itemized_ca_tax(conn, income_amount: float, itemized_amount: float,
+                                 property_tax_addback: float, filing_status: str,
+                                 tax_year: int = DEFAULT_TAX_YEAR):
+    """See module note above. Regular tax computed via the UNCHANGED
+    compute_itemized_ca_tax (property tax stays a valid regular-tax
+    itemized deduction); AMTI is that function's own taxable_income
+    PLUS the property-tax addback (disallowed for AMT specifically).
+    Returns None (declines) if the stated itemized amount doesn't
+    actually exceed the standard deduction -- Schedule P Line 1's own
+    instruction routes non-itemizers to the standard-deduction path
+    instead, where this addback doesn't apply at all."""
+    if property_tax_addback is None or property_tax_addback < 0:
+        return None
+    base = compute_itemized_ca_tax(conn, income_amount, itemized_amount, filing_status, tax_year)
+    if not base:
+        return None
+    if not base["used_itemized"]:
+        return None
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = base["taxable_income"] + property_tax_addback
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    regular_tax = base["total_tax"]
+    amt_owed = round(max(0.0, tmt - regular_tax), 2)
+    return {**base, "amti": amti, "exemption": exemption, "tmt": tmt,
+            "regular_tax": regular_tax, "amt_owed": amt_owed,
+            "property_tax_addback": property_tax_addback}
+
+
 # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540
 # Line 113, FTB Form 5805 Side 2 Part II) -- Income Coverage Blueprint
 # Phase 3's twelfth build, and a THIRD consecutive case where a dedicated

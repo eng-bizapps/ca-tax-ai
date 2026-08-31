@@ -2447,6 +2447,56 @@ ITEMS = [
     ("do i owe california amt if my income is $200,000 and i exercised incentive stock options with a $150,000 bargain element, single, and sold the stock the same year?",
      {"status": "needs_review", "domain": "income"}),
 
+    # --- AMT ITEMIZER extension (Schedule P (540) Part I Line 3) --
+    # re-examined 2026-08-28, continuing the same "dig into AMT" request
+    # right after the ISO addback above. Covers an itemizer with NO
+    # other AMT preference items. Verified against FTB's 2025 Schedule P
+    # (540) Part I Line 3 instructions directly: PROPERTY tax (personal
+    # property + real estate) is fully disallowed for AMT though still
+    # allowed for regular tax -- a real correction from an initial
+    # hypothesis that this would mirror CA's OWN regular-tax "SALT
+    # addback" (state/local INCOME tax, a different, already-disallowed-
+    # for-regular-tax category, see compute_itemized_ca_tax's
+    # salt_amount param). Reuses compute_itemized_ca_tax unchanged for
+    # regular tax; AMTI = that function's own taxable_income plus the
+    # stated property-tax addback.
+    #
+    # Basic: $200,000 income, $150,000 itemized deductions (all property
+    # tax), single. taxable_income (post-phaseout, post-standard-vs-
+    # itemized comparison) + $150,000 addback -> AMTI=$200,000,
+    # exemption=$92,749 (below phase-out threshold),
+    # TMT=7%*(200000-92749)=$7,507.57, regular tax=$1,534.89 -> TMT
+    # exceeds regular tax -> owes $5,972.68. Hand-verified independently
+    # (including the intermediate taxable_income/AMTI relationship)
+    # before locking in.
+    ("do i owe california amt if my income is $200,000 and i have itemized deductions of $150,000 including property tax of $150,000, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 5972.68}),
+    # order independence -- found live: BOTH figures stated as the same
+    # dollar value ($150,000 property tax, $150,000 itemized total)
+    # exposed a genuinely new bug in the shared _amount_near_anchor_edge
+    # helper itself (used by NOL-mixed and kiddie tax too, not previously
+    # hit by their own test phrasing): searching a keyword SET with
+    # variants of different lengths ("itemized deduction" vs "itemized
+    # deductions") can make a shorter variant's own edge distance tie
+    # EXACTLY between a genuinely-following amount and an unrelated
+    # preceding one -- the preceding amount (encountered first in
+    # left-to-right order) was silently winning the tie. Fixed at the
+    # shared helper (not worked around locally this time, given its
+    # small 3-caller blast radius and this session's precedent), by
+    # preferring a FOLLOWING match over a preceding one specifically on
+    # an EXACT distance tie -- re-verified NOL-mixed's and kiddie tax's
+    # own existing regression values unchanged after the fix.
+    ("single, my property tax is $150,000, my itemized deductions are $150,000, my income is $200,000, do i owe california amt?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 5972.68}),
+    # missing filing status -> specific clarifying message.
+    ("do i owe california amt if my income is $200,000 and i have itemized deductions of $150,000 including property tax of $150,000?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: mentions a SALT adjustment too -- this extension
+    # doesn't compose with compute_itemized_ca_tax's 6 other optional
+    # adjustments in the same question.
+    ("do i owe california amt if my income is $200,000 and i have itemized deductions of $150,000 including property tax of $150,000, single, and my state income tax was $10,000?",
+     {"status": "needs_review", "domain": "income"}),
+
     # --- FTB 3800 kiddie tax on a child's unearned income (Form 540
     # Line 31) -- form540_inventory.py's last remaining deferred_new_
     # engine item, re-examined 2026-08-28 at the user's request via a

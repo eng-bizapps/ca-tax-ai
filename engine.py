@@ -2016,6 +2016,109 @@ def _income_amt_iso_same_year_sale_answer(question: str, base: dict):
     return result
 
 
+def _income_amt_itemized_answer(conn, question: str, base: dict):
+    """AMT itemizer extension (Schedule P (540) Part I Line 3) -- see
+    income_brackets.compute_amt_itemized_ca_tax's docstring for the
+    property-tax-addback mechanic. Uses the edge-aware
+    _amount_near_anchor_edge/_remove_amount_span pattern (built for
+    NOL-mixed, reused by kiddie tax) rather than _income_itemized_
+    answer's own _amount_near/_tagged_amount -- found live that
+    _amount_near's anchor-start-to-amount-midpoint metric picks the
+    WRONG figure for this feature's own basic phrasing (the long anchor
+    "itemized deductions" landed numerically closer to an unrelated
+    PRECEDING amount than to its own value right after it, the same
+    collision class already found and fixed for NOL-mixed -- _amount_
+    near itself was flagged earlier this session as having this exact
+    issue, deliberately left unfixed there given its many existing
+    callers, so this feature works around it locally instead of
+    touching shared infrastructure)."""
+    fs = income_brackets.detect_amt_itemized_signal(question)
+    if not fs:
+        return None
+    amounts = _amounts(question)
+    itemized_match = _amount_near_anchor_edge(question, income_brackets.AMT_ITEMIZED_TERMS, amounts)
+    if itemized_match is None:
+        return None
+    itemized_amount = itemized_match[0]
+    remaining = _remove_amount_span(amounts, itemized_match)
+    property_match = _amount_near_anchor_edge(question, income_brackets.AMT_ITEMIZED_PROPERTY_TAX_TERMS, remaining)
+    if property_match is None:
+        return None
+    property_tax_addback = property_match[0]
+    remaining = _remove_amount_span(remaining, property_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_amt_itemized_ca_tax(
+        conn, income_amount, itemized_amount, property_tax_addback, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": income_amount, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_ITEMIZED_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${income_amount:,.2f} in California income, ${itemized_amount:,.2f} in "
+            f"itemized deductions, a ${property_tax_addback:,.2f} property tax addback (personal "
+            f"property tax and/or real estate tax claimed as an itemized deduction -- fully "
+            f"disallowed for AMT, though still allowed for regular tax), and filing status "
+            f"{label}: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of "
+            f"${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} exemption), which is "
+            f"below your regular California tax of ${calc['regular_tax']:,.2f} -- you do NOT owe "
+            f"California Alternative Minimum Tax ({income_brackets.AMT_ITEMIZED_CITATION}). This "
+            "assumes no OTHER AMT preference items (no ISO exercises, passive activity, "
+            "depreciation adjustments, or private activity bonds) and no other itemized-deduction "
+            "adjustments (SALT removal, mortgage-interest addback, misc. itemized, charitable "
+            "cap, casualty loss) beyond the stated property tax."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, ${itemized_amount:,.2f} in "
+        f"itemized deductions, a ${property_tax_addback:,.2f} property tax addback, and filing "
+        f"status {label}: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of "
+        f"${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} exemption), which EXCEEDS "
+        f"your regular California tax of ${calc['regular_tax']:,.2f} -- you owe an estimated "
+        f"${calc['amt_owed']:,.2f} in California Alternative Minimum Tax "
+        f"({income_brackets.AMT_ITEMIZED_CITATION}). This assumes no OTHER AMT preference items "
+        "and no other itemized-deduction adjustments beyond the stated property tax -- consult "
+        "Schedule P (540) or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_itemized_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_itemized_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure as an itemizer, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California income, your total "
+        "itemized deductions, and your property tax (personal property and/or real estate tax) "
+        "included in that total.")
+    return result
+
+
+def _income_amt_itemized_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when AMT + itemizing vocabulary is
+    present alongside any of the 6 other optional itemized-deduction
+    adjustments this extension doesn't attempt together with AMT."""
+    if not income_brackets.detect_amt_itemized_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant's AMT-for-itemizers check only handles the property-tax addback on its "
+        "own -- it doesn't yet combine AMT with SALT removal, a mortgage-interest addback, "
+        "miscellaneous itemized deductions, the charitable contribution cap, or a casualty loss "
+        "adjustment in the same question. Please consult Schedule P (540)'s full worksheet, or a "
+        "tax professional, for an accurate figure."
+    )
+    return result
+
+
 def _income_kiddie_tax_answer(conn, question: str, base: dict):
     """FTB 3800 kiddie tax on a child's unearned income (Form 540 Line
     31) -- see income_brackets.compute_kiddie_tax_ca_tax's docstring for
@@ -3301,7 +3404,7 @@ def _amount_near_anchor_edge(question: str, keywords, amounts, window: int = 25)
     ql = question.lower()
     if not amounts:
         return None
-    best = None
+    best = None  # (span, dist, is_following)
     for kw in keywords:
         start = 0
         while True:
@@ -3311,13 +3414,29 @@ def _amount_near_anchor_edge(question: str, keywords, amounts, window: int = 25)
             end = idx + len(kw)
             for amount, a_start, a_end in amounts:
                 if a_start >= end:
-                    dist = a_start - end
+                    dist, is_following = a_start - end, True
                 elif a_end <= idx:
-                    dist = idx - a_end
+                    dist, is_following = idx - a_end, False
                 else:
                     continue
-                if dist <= window and (best is None or dist < best[1]):
-                    best = ((amount, a_start, a_end), dist)
+                if dist > window:
+                    continue
+                # On a strict improvement, always take it. On an EXACT tie,
+                # prefer a FOLLOWING match over a preceding one -- found
+                # live: searching a keyword SET with variants of different
+                # lengths (e.g. "itemized deduction" vs "itemized
+                # deductions") can make a shorter variant's own edge
+                # distance tie exactly between a genuinely-following amount
+                # and an unrelated preceding one from an earlier clause;
+                # without this, the preceding amount (encountered first in
+                # amounts' left-to-right order) silently won the tie even
+                # though this feature family's phrasing is always anchor-
+                # then-value. Matches the "forward-only is the safe default
+                # when phrasing is ambiguous" precedent used throughout
+                # this session's basis-difference family.
+                if (best is None or dist < best[1]
+                        or (dist == best[1] and is_following and not best[2])):
+                    best = ((amount, a_start, a_end), dist, is_following)
             start = idx + len(kw)
     return best[0] if best else None
 
@@ -6823,6 +6942,22 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if missing_amt_iso_fs_result:
         return missing_amt_iso_fs_result
 
+    # AMT itemizer extension checked BEFORE the base AMT screen below --
+    # same "more specific before generic" ordering as the ISO checks
+    # above (an itemizer+property-tax question satisfies both this
+    # feature's own trigger AND the base screen's "itemize" exclusion).
+    amt_itemized_result = _income_amt_itemized_answer(conn, question, base)
+    if amt_itemized_result:
+        return amt_itemized_result
+
+    missing_amt_itemized_fs_result = _income_amt_itemized_missing_filing_status_answer(question, base)
+    if missing_amt_itemized_fs_result:
+        return missing_amt_itemized_fs_result
+
+    amt_itemized_out_of_scope_result = _income_amt_itemized_out_of_scope_answer(question, base)
+    if amt_itemized_out_of_scope_result:
+        return amt_itemized_out_of_scope_result
+
     amt_screen_result = _income_amt_screen_answer(conn, question, base)
     if amt_screen_result:
         return amt_screen_result
@@ -7393,6 +7528,9 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_amt_iso_signal,
     income_brackets.detect_amt_iso_missing_filing_status,
     income_brackets.detect_amt_iso_same_year_sale,
+    income_brackets.detect_amt_itemized_signal,
+    income_brackets.detect_amt_itemized_missing_filing_status,
+    income_brackets.detect_amt_itemized_out_of_scope,
     income_brackets.detect_kiddie_tax_signal,
     income_brackets.detect_kiddie_tax_missing_filing_status,
     income_brackets.detect_kiddie_tax_out_of_scope,
