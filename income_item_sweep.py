@@ -2405,9 +2405,46 @@ ITEMS = [
     # missing filing status -> specific clarifying message.
     ("do i owe california amt if my income is $100,000?",
      {"status": "needs_review", "domain": "income"}),
-    # OUT OF SCOPE: incentive stock options mentioned -- genuinely needs
-    # the full ~11-category AMTI build, not this scoped screen.
+    # ISO mentioned but NO bargain element figure stated -- falls through
+    # to this out-of-scope redirect (the dedicated ISO extension below
+    # requires an extractable bargain element; without one it correctly
+    # declines rather than guessing, same as before this extension existed).
     ("do i owe california amt if my income is $100,000, single, and i exercised incentive stock options?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- AMT ISO-exercise addback extension (Schedule P (540) Part I Line
+    # 10) -- re-examined 2026-08-28 at the user's request ("dig into AMT
+    # first"), the single most common real-world reason an ordinary
+    # (non-itemizing) taxpayer actually hits AMT post-TCJA. Verified
+    # against FTB's 2025 Schedule P (540) Part I Line 10 instructions
+    # directly: the ISO "bargain element" (FMV at exercise minus amount
+    # paid) creates NO regular-tax income at exercise, only an AMTI
+    # addback. General AMT population (itemizers, passive-activity/
+    # depreciation adjusters, etc.) still correctly stays deferred.
+    #
+    # Basic: $200,000 income, $150,000 ISO bargain element, single.
+    # AMTI=$350,000, exemption phases out to $92,201 (over the $347,808
+    # threshold), TMT=7%*(350000-92201)=$18,045.93, regular tax on
+    # $194,294 taxable income=$14,507.98 -> TMT exceeds regular tax ->
+    # owes $3,537.95.
+    ("do i owe california amt if my income is $200,000 and i exercised incentive stock options with a $150,000 bargain element, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 3537.95}),
+    # order independence.
+    ("single, my iso bargain element is $150,000, my income is $200,000, do i owe california amt?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 3537.95}),
+    # SMALL CASE: $80,000 income, $20,000 bargain element -- confirms the
+    # feature correctly finds $0 owed too, not just the positive case.
+    # AMTI=$100,000, exemption=$92,749 (no phase-out yet),
+    # TMT=7%*(100000-92749)=$507.57, regular tax on $74,294=$3,347.98 ->
+    # TMT well below regular tax -> $0.
+    ("do i owe california amt if my income is $80,000 and i exercised incentive stock options with a $20,000 bargain element, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # missing filing status -> specific clarifying message.
+    ("do i owe california amt if my income is $200,000 and i exercised incentive stock options with a $150,000 bargain element?",
+     {"status": "needs_review", "domain": "income"}),
+    # SAME-YEAR SALE: Schedule P's own carve-out -- no AMT adjustment
+    # applies at all, routes to a dedicated redirect rather than guessing.
+    ("do i owe california amt if my income is $200,000 and i exercised incentive stock options with a $150,000 bargain element, single, and sold the stock the same year?",
      {"status": "needs_review", "domain": "income"}),
 
     # --- FTB 3800 kiddie tax on a child's unearned income (Form 540

@@ -151,7 +151,25 @@ ITEMS = [
      "hard-coded 'always zero' assumption, so it self-verifies rather than trusting the "
      "empirical claim blindly. Itemizing/ISO/passive-activity/depreciation/private-activity-"
      "bond/NOL language routes to a dedicated out-of-scope redirect to the (still deferred) "
-     "general case above. Zero extraction bugs found live."),
+     "general case above. Zero extraction bugs found live. "
+     "EXTENDED 2026-08-28 with an ISO-exercise addback (income_brackets.compute_amt_iso_ca_tax / "
+     "engine._income_amt_iso_answer), the single most common real-world reason an ordinary "
+     "(non-itemizing) taxpayer actually hits AMT post-TCJA. Verified against FTB's 2025 "
+     "Schedule P (540) Part I Line 10 instructions directly: the ISO 'bargain element' (FMV at "
+     "exercise minus amount paid) creates NO regular-tax income at exercise, only an AMTI "
+     "addback -- confirmed CA conforms via IRC 55-59 'as of January 1, 2015,' and IRC 56(b)(3) "
+     "(the ISO AMT preference) is a long-stable pre-2015 provision, so no conformity-date "
+     "divergence risk. Critical carve-out also from the same source and modeled explicitly: "
+     "exercised-and-sold-in-the-same-year means NO adjustment applies at all -- routes to its "
+     "own dedicated redirect rather than guessing either direction. Deliberately requires "
+     "literal ISO language (word-boundary 'iso' or 'incentive stock option'), NOT a bare "
+     "'exercised stock options' mention, since that's genuinely ambiguous with a non-qualified "
+     "stock option (NSO -- ordinary income for both regular tax and AMT, no special preference "
+     "treatment); California Qualified Stock Options (CQSOs, a narrower CA-specific provision) "
+     "are also explicitly out of scope, not conflated with ISOs. One bug found live: bare "
+     "'stock' is already in the shared COMPLEXITY_EXCLUDE set (for K-1/QSBS questions), which "
+     "self-excluded this feature's own natural vocabulary ('stock options') -- fixed with the "
+     "same 'subtract the trigger term back out' pattern used elsewhere this session."),
     ("540", "lines", "62", "Behavioral Health Services Tax (formerly Mental Health Services Tax)",
      "addition", "moderate", "FTB 2025 Form 540 Instructions, Line 62",
      "built", "ca_income_tax_bracket",

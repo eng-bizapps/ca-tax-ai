@@ -1855,6 +1855,103 @@ def _income_amt_screen_out_of_scope_answer(question: str, base: dict):
     return result
 
 
+def _amt_iso_strip_form_number_phantoms(amounts):
+    # AMT_SCREEN_TERMS (shared with the base screen) includes "schedule p
+    # (540)"/"form 540 line 61" -- bare digit sequences the shared regex
+    # would otherwise misparse as dollar amounts if a user's question
+    # happens to include that phrasing. Same collision class found 10+
+    # times this session, fixed proactively before any live test.
+    return [(a, s, e) for a, s, e in amounts if a not in (540.0, 61.0)]
+
+
+def _income_amt_iso_answer(conn, question: str, base: dict):
+    """AMT ISO-exercise addback extension (Schedule P (540) Part I Line
+    10) -- see income_brackets.compute_amt_iso_ca_tax's docstring for the
+    bargain-element mechanic. One anchor (bargain element) plus income as
+    the sole remainder, using the edge-aware _amount_near_anchor_edge
+    helper (this feature's phrasing is bidirectional, same family as
+    NOL-mixed: "a $150,000 bargain element" and "bargain element of
+    $150,000" are both natural)."""
+    fs = income_brackets.detect_amt_iso_signal(question)
+    if not fs:
+        return None
+    amounts = _amt_iso_strip_form_number_phantoms(_amounts(question))
+    bargain_match = _amount_near_anchor_edge(question, income_brackets.AMT_ISO_BARGAIN_ELEMENT_TERMS, amounts)
+    if bargain_match is None:
+        return None
+    iso_bargain_element = bargain_match[0]
+    remaining = _remove_amount_span(amounts, bargain_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_amt_iso_ca_tax(conn, income_amount, iso_bargain_element, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": income_amount, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_SCREEN_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${income_amount:,.2f} in California income, a ${iso_bargain_element:,.2f} "
+            f"incentive stock option (ISO) bargain element (the excess of the stock's fair market "
+            f"value at exercise over what you paid), filing status {label}, and the standard "
+            f"deduction: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of "
+            f"${calc['amti']:,.2f} AMTI -- your income plus the ISO bargain element -- minus a "
+            f"${calc['exemption']:,.2f} exemption), which is below your regular California tax of "
+            f"${calc['regular_tax']:,.2f} -- you do NOT owe California Alternative Minimum Tax "
+            f"({income_brackets.AMT_SCREEN_CITATION}). Note the ISO exercise creates no REGULAR "
+            "tax income at all -- the bargain element only affects this AMT comparison. This "
+            "assumes you exercised and are still holding the stock (no sale this year), one "
+            "exercise event, and no other AMT preference items."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, a ${iso_bargain_element:,.2f} "
+        f"incentive stock option (ISO) bargain element, filing status {label}, and the standard "
+        f"deduction: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of "
+        f"${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} exemption), which EXCEEDS "
+        f"your regular California tax of ${calc['regular_tax']:,.2f} -- you owe an estimated "
+        f"${calc['amt_owed']:,.2f} in California Alternative Minimum Tax "
+        f"({income_brackets.AMT_SCREEN_CITATION}). This assumes you exercised and are still "
+        "holding the stock (no sale this year), one exercise event, and no other AMT preference "
+        "items -- consult Schedule P (540) or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_iso_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_iso_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure from an ISO exercise, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California income and your ISO "
+        "bargain element (the fair market value at exercise minus what you paid).")
+    return result
+
+
+def _income_amt_iso_same_year_sale_answer(question: str, base: dict):
+    """Schedule P (540)'s own carve-out: exercised-and-sold-the-same-year
+    means no AMT adjustment at all -- a direct consequence of the source
+    text, not a guess. Redirects rather than silently computing either
+    way, since assuming the wrong direction risks over- or understating
+    AMT owed."""
+    if not income_brackets.detect_amt_iso_same_year_sale(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Since you exercised and sold the ISO stock in the same year, no AMT adjustment applies "
+        "at all -- FTB's own instructions for Schedule P (540) confirm the regular-tax and AMT "
+        "treatment are identical in that case. If you still want to check your AMT exposure from "
+        "other income, ask again without mentioning the ISO sale."
+    )
+    return result
+
+
 def _income_kiddie_tax_answer(conn, question: str, base: dict):
     """FTB 3800 kiddie tax on a child's unearned income (Form 540 Line
     31) -- see income_brackets.compute_kiddie_tax_ca_tax's docstring for
@@ -6488,6 +6585,23 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if isr_penalty_ambiguous_result:
         return isr_penalty_ambiguous_result
 
+    # AMT ISO extension checked BEFORE the base AMT screen below -- an ISO-
+    # exercise question satisfies both this feature's own trigger AND the
+    # base screen's own out-of-scope exclusion (which defers to this
+    # feature), same "more specific before generic" ordering discipline
+    # used throughout this codebase (basis-difference family, NOL-mixed).
+    amt_iso_same_year_sale_result = _income_amt_iso_same_year_sale_answer(question, base)
+    if amt_iso_same_year_sale_result:
+        return amt_iso_same_year_sale_result
+
+    amt_iso_result = _income_amt_iso_answer(conn, question, base)
+    if amt_iso_result:
+        return amt_iso_result
+
+    missing_amt_iso_fs_result = _income_amt_iso_missing_filing_status_answer(question, base)
+    if missing_amt_iso_fs_result:
+        return missing_amt_iso_fs_result
+
     amt_screen_result = _income_amt_screen_answer(conn, question, base)
     if amt_screen_result:
         return amt_screen_result
@@ -7035,6 +7149,9 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_amt_screen_signal,
     income_brackets.detect_amt_screen_missing_filing_status,
     income_brackets.detect_amt_screen_out_of_scope,
+    income_brackets.detect_amt_iso_signal,
+    income_brackets.detect_amt_iso_missing_filing_status,
+    income_brackets.detect_amt_iso_same_year_sale,
     income_brackets.detect_kiddie_tax_signal,
     income_brackets.detect_kiddie_tax_missing_filing_status,
     income_brackets.detect_kiddie_tax_out_of_scope,

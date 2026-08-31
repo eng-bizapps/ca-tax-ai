@@ -5291,6 +5291,161 @@ def compute_amt_screen_ca_tax(conn, income_amount: float, filing_status: str,
             "regular_tax": regular_tax, "amt_owed": amt_owed}
 
 
+# --- California AMT, ISO exercise addback extension (Schedule P (540)
+# Part I Line 10) -- re-examined 2026-08-28 at the user's request ("dig
+# into AMT first"), extending the narrow screen above to the single most
+# common real-world reason an ordinary (non-itemizing) taxpayer actually
+# hits AMT post-TCJA: exercising incentive stock options and holding the
+# stock past year-end. The GENERAL AMT population (itemizers, passive-
+# activity/depreciation adjusters, private-activity-bond holders, other
+# Schedule P Part I preference items) still correctly stays deferred --
+# this is one more narrow, verified slice on top of the existing screen,
+# not a step toward the full ~11-category build.
+#
+# VERIFIED against FTB's 2025 Instructions for Schedule P (540), Part I,
+# Line 10, fetched directly (not assumed from general "ISO AMT"
+# knowledge): "you must generally include on line 10 the excess of: The
+# fair market value (FMV) of the stock acquired through the exercise of
+# the option ... when your rights in the stock first become
+# transferable, or when these rights are no longer subject to a
+# substantial risk of forfeiture, over The amount you paid for the
+# stock." This is the ISO "bargain element" -- for REGULAR tax, exercising
+# an ISO (without disposing of the stock) creates NO taxable income at
+# all (the entire point of an ISO); the bargain element is added ONLY to
+# AMTI, never to regular taxable income. Confirmed via general
+# information text: "In general, California law conforms to IRC Sections
+# 55 through 59, relating to alternative minimum tax (AMT), as of January
+# 1, 2015" -- IRC 56(b)(3) (the ISO AMT preference) is a long-stable,
+# pre-2015 provision, so this conformity-date snapshot creates no
+# divergence risk for this specific line, unlike several other
+# conformity-date items found elsewhere in this project.
+#
+# CRITICAL CARVE-OUT, directly from the same source: "If you acquired
+# stock by exercising an ISO and you disposed of that stock in the same
+# year, the tax treatment under regular tax and AMT is the same (no
+# adjustment is required)." A same-year sale means NO AMT preference item
+# at all -- routes to a dedicated redirect (not a guess either way, since
+# incorrectly assuming "still holding" when the stock was actually sold
+# same-year would OVERSTATE AMT owed, and incorrectly assuming "sold"
+# when actually still holding would UNDERSTATE it).
+#
+# SCOPE, disclosed not hidden: requires literal ISO language (word-
+# boundary "iso" or "incentive stock option") -- deliberately does NOT
+# trigger on a bare "exercised stock options" mention, since that phrase
+# alone is genuinely ambiguous between an ISO (this line's population)
+# and a non-qualified stock option (NSO, which is just ordinary W-2
+# income for BOTH regular tax and AMT, no special preference-item
+# treatment at all) -- guessing which one would risk silently applying
+# the wrong mechanic to an NSO exercise. California Qualified Stock
+# Options (CQSOs, R&TC 17502, a narrower CA-specific provision with its
+# own different regular-tax exclusion) are also explicitly out of scope,
+# not conflated with ISOs. Standard deduction only (matching the base
+# screen); one ISO exercise event only (no multi-grant aggregation); no
+# OTHER preference items alongside it (passive activity, depreciation,
+# private activity bonds, etc. -- reuses the base screen's own exclusion
+# set for these, unchanged).
+AMT_ISO_TERMS = {
+    "incentive stock option", "exercised my iso", "iso bargain element",
+    "exercised incentive stock options", "iso exercise",
+}
+AMT_ISO_CQSO_EXCLUDE_TERMS = {
+    "california qualified stock option", "cqso",
+}
+AMT_ISO_SAME_YEAR_SALE_TERMS = {
+    "sold the stock", "sold the shares", "sold my iso", "sold it the same year",
+    "disposed of the stock", "disqualifying disposition", "sold in the same year",
+    "sold them the same year", "sold same year",
+}
+AMT_ISO_BARGAIN_ELEMENT_TERMS = {
+    "bargain element", "iso bargain element", "iso spread",
+}
+# same non-ISO preference items the base screen already excludes on --
+# an ISO exercise ALONGSIDE, say, passive activity adjustments still
+# needs the full build, not this narrow extension.
+AMT_ISO_OTHER_PREFERENCE_EXCLUDE_TERMS = AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS - {
+    "incentive stock option", "iso exercise", "exercised stock options",
+}
+# bare "stock" is already in the shared COMPLEXITY_EXCLUDE (to defer to
+# K-1/QSBS-style stock questions), which would self-exclude THIS
+# feature's own natural vocabulary ("stock options", "the stock") --
+# found live testing the feature's own basic phrasing before any
+# regression test was locked in, same "subtract the trigger term back
+# out" fix as several other features this session (cannabis 280E,
+# exemption credit's "dependent", rental depreciation's "rental").
+AMT_ISO_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"stock"}
+
+
+def _amt_iso_has_iso_term(q: str) -> bool:
+    if any(t in q for t in AMT_ISO_TERMS):
+        return True
+    return re.search(r"\biso\b", q) is not None
+
+
+def _amt_iso_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not _amt_iso_has_iso_term(q):
+        return False
+    if any(t in q for t in AMT_ISO_CQSO_EXCLUDE_TERMS):
+        return False
+    if any(t in q for t in AMT_ISO_SAME_YEAR_SALE_TERMS):
+        return False
+    if any(t in q for t in AMT_ISO_COMPLEXITY_EXCLUDE):
+        return False
+    if any(t in q for t in AMT_ISO_OTHER_PREFERENCE_EXCLUDE_TERMS):
+        return False
+    return True
+
+
+def detect_amt_iso_signal(question: str):
+    q = question.lower()
+    if not _amt_iso_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_iso_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_iso_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_iso_same_year_sale(question: str) -> bool:
+    """True iff ISO language is present alongside same-year-sale/
+    disposition language -- routes to a dedicated redirect explaining
+    NO AMT adjustment applies at all in that case (not a guess, a direct
+    consequence of Schedule P's own carve-out text)."""
+    q = question.lower()
+    if not _amt_iso_has_iso_term(q):
+        return False
+    return any(t in q for t in AMT_ISO_SAME_YEAR_SALE_TERMS)
+
+
+def compute_amt_iso_ca_tax(conn, income_amount: float, iso_bargain_element: float,
+                            filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    """Thin extension of compute_amt_screen_ca_tax: regular tax is
+    computed identically (the ISO bargain element creates NO regular-tax
+    income at exercise), only AMTI/exemption/TMT are recomputed with the
+    bargain element folded in."""
+    if iso_bargain_element is None or iso_bargain_element < 0:
+        return None
+    base = compute_amt_screen_ca_tax(conn, income_amount, filing_status, tax_year)
+    if not base:
+        return None
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = income_amount + iso_bargain_element
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    amt_owed = round(max(0.0, tmt - base["regular_tax"]), 2)
+    return {**base, "amti": amti, "exemption": exemption, "tmt": tmt, "amt_owed": amt_owed,
+            "iso_bargain_element": iso_bargain_element}
+
+
 # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540
 # Line 113, FTB Form 5805 Side 2 Part II) -- Income Coverage Blueprint
 # Phase 3's twelfth build, and a THIRD consecutive case where a dedicated
