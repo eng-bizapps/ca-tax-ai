@@ -901,7 +901,7 @@ def _income_missing_filing_status_answer(question: str, amount, base: dict):
     return result
 
 
-def _income_exemption_credit_answer(conn, question: str, base: dict):
+def _income_exemption_credit_answer(conn, question: str, base: dict, remembered_dependent_count=None):
     """Wage income + a stated exemption-credit question (Form 540 Lines
     7-10) -- see income_brackets.compute_exemption_credit_ca_tax's
     docstring for the credit-vs-deduction mechanic and the phase-out.
@@ -917,17 +917,29 @@ def _income_exemption_credit_answer(conn, question: str, base: dict):
     appears first. Extracts the dependent count first, removes that
     specific value from the full amounts list, then requires exactly
     one remaining amount for income -- same "N anchors + 1 remainder"
-    discipline as the multi-figure paths built earlier this session."""
+    discipline as the multi-figure paths built earlier this session.
+
+    `remembered_dependent_count`, added 2026-08-31 for the session-
+    memory extension: a FALLBACK DEFAULT (not a retry-after-decline --
+    this feature never actually fails from a missing dependent count,
+    it already silently defaults to 0), used only when THIS question
+    doesn't state one itself. Critical correctness point: the amounts-
+    removal step below must stay gated on the STATED count specifically,
+    never the combined (stated-or-remembered) value -- a remembered
+    count was never literally written in this question's text, so
+    there is no matching digit to strip; gating removal on the combined
+    value would risk stripping an unrelated real dollar figure that
+    happens to numerically equal the remembered count."""
     fs = income_brackets.detect_exemption_credit_signal(question)
     if not fs:
         return None
-    dependent_count = income_brackets.detect_exemption_credit_dependent_count(question)
+    stated_dependent_count = income_brackets.detect_exemption_credit_dependent_count(question)
     amounts = _amounts(question)
-    if dependent_count is not None:
+    if stated_dependent_count is not None:
         removed = False
         remaining = []
         for a, s, e in amounts:
-            if not removed and a == float(dependent_count):
+            if not removed and a == float(stated_dependent_count):
                 removed = True
                 continue
             remaining.append((a, s, e))
@@ -936,6 +948,8 @@ def _income_exemption_credit_answer(conn, question: str, base: dict):
     if len(others) != 1:
         return None
     amount = others[0]
+    used_remembered_dependent_count = stated_dependent_count is None and remembered_dependent_count is not None
+    dependent_count = remembered_dependent_count if used_remembered_dependent_count else stated_dependent_count
     calc = income_brackets.compute_exemption_credit_ca_tax(
         conn, amount, fs, dependent_count=dependent_count or 0)
     if not calc:
@@ -945,7 +959,10 @@ def _income_exemption_credit_answer(conn, question: str, base: dict):
               "amount": amount, "taxable_income": calc["taxable_income"],
               "standard_deduction": calc["standard_deduction"],
               "marginal_rate": calc["marginal_rate"], "tax": calc["total_tax"],
-              "citation": calc["citation"], "source_url": calc["source_url"]}
+              "citation": calc["citation"], "source_url": calc["source_url"],
+              "used_remembered_exemption_credit_dependent_count": used_remembered_dependent_count,
+              "remembered_exemption_credit_dependent_count_label": (
+                  f"{dependent_count} dependent(s)" if used_remembered_dependent_count else None)}
     surtax_note = ""
     if calc["surtax"]:
         surtax_note = (f" This includes a ${calc['surtax']:,.2f} Behavioral Health Services "
@@ -2255,6 +2272,50 @@ def _amount_after_filtered_span(question: str, keywords, amounts, window: int = 
     return best[0] if best else None
 
 
+def _detect_prior_year_agi(question: str):
+    """Standalone, memory-purposes-only extractor for prior-year AGI --
+    NOT used by the actual Underpayment computation (which goes through
+    _underpayment_short_extract_facts's own positional 3-anchor
+    pipeline instead). Exists so answer() can tell, independent of
+    which feature actually ends up firing, "did THIS question itself
+    already state a prior-year AGI" -- mirrors detect_filing_status's
+    role for the filing-status memory feature. Deliberately loose (runs
+    against the full amounts list, no withholding/prior-year-tax
+    removal first) since it only needs to answer "is one present
+    somewhere," not extract it precisely for computation."""
+    amounts = _amounts(question)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS, amounts)
+    return match[0] if match is not None else None
+
+
+def _underpayment_short_extract_facts(question: str):
+    """Shared 3-anchor extraction for the Short Method (withholding,
+    prior-year tax, prior-year AGI), factored out of
+    _income_underpayment_answer so a caller can tell WHICH anchor
+    failed apart from "everything failed" -- unlike the original
+    all-or-nothing version, each result is independently None on
+    failure rather than short-circuiting the whole function. Same
+    forward-only, position-safe extraction discipline as before (see
+    _income_underpayment_answer's own docstring for why forward-only
+    matching and by-POSITION removal are both required here). Returns
+    (withholding, prior_year_tax, prior_year_agi, remaining_amounts)."""
+    amounts = _amounts(question)
+    withholding = prior_year_tax = prior_year_agi = None
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_WITHHOLDING_TERMS, amounts)
+    if match is not None:
+        withholding = match[0]
+        amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_TAX_TERMS, amounts)
+    if match is not None:
+        prior_year_tax = match[0]
+        amounts = _remove_amount_span(amounts, match)
+    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS, amounts)
+    if match is not None:
+        prior_year_agi = match[0]
+        amounts = _remove_amount_span(amounts, match)
+    return withholding, prior_year_tax, prior_year_agi, amounts
+
+
 def _income_underpayment_answer(conn, question: str, base: dict):
     """Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (FTB
     5805 Side 2 Part II) -- see income_brackets.compute_underpayment_penalty_ca_tax's
@@ -2271,26 +2332,18 @@ def _income_underpayment_answer(conn, question: str, base: dict):
     (or by first-list-order occurrence of that value) can strip the
     WRONG occurrence, misattributing the real one to a later anchor.
     Forward-only matching is safe here because this feature's phrasing
-    convention is always "X was $Y" (amount follows the anchor)."""
+    convention is always "X was $Y" (amount follows the anchor).
+    Delegates the actual 3-anchor extraction to
+    _underpayment_short_extract_facts (added 2026-08-31 alongside a
+    dedicated missing-AGI message, see
+    _income_underpayment_missing_agi_answer below) -- requires all 3
+    non-None here, same behavior as before this restructuring."""
     fs = income_brackets.detect_underpayment_signal(question)
     if not fs:
         return None
-    amounts = _amounts(question)
-    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_WITHHOLDING_TERMS, amounts)
-    if match is None:
+    withholding, prior_year_tax, prior_year_agi, amounts = _underpayment_short_extract_facts(question)
+    if withholding is None or prior_year_tax is None or prior_year_agi is None:
         return None
-    withholding = match[0]
-    amounts = _remove_amount_span(amounts, match)
-    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_TAX_TERMS, amounts)
-    if match is None:
-        return None
-    prior_year_tax = match[0]
-    amounts = _remove_amount_span(amounts, match)
-    match = _amount_after_filtered_span(question, income_brackets.UNDERPAYMENT_PRIOR_YEAR_AGI_TERMS, amounts)
-    if match is None:
-        return None
-    prior_year_agi = match[0]
-    amounts = _remove_amount_span(amounts, match)
     others = [a for a, _, _ in amounts]
     if len(others) != 1:
         return None
@@ -2358,6 +2411,36 @@ def _income_underpayment_missing_filing_status_answer(question: str, base: dict)
         "qualifying surviving spouse. Please also state your California income, your prior-year "
         "CA tax, your prior-year CA AGI, and your California withholding. (This assistant only "
         "handles the common case: no estimated tax payments made, only withholding.)")
+    return result
+
+
+def _income_underpayment_missing_agi_answer(conn, question: str, base: dict):
+    """Isolated missing-prior-year-AGI message -- added 2026-08-31 as
+    part of the session-memory extension's Phase 1 prerequisite. Fires
+    ONLY when withholding and prior-year tax both extracted but AGI
+    specifically didn't, so this is mutually exclusive with the missing-
+    filing-status message above (that one requires filing status itself
+    to be absent; this one requires it to be PRESENT, via detect_
+    underpayment_signal returning non-None). Sets a distinct `category`
+    (not just distinct text) so a session-memory retry can gate on it
+    reliably -- unlike filing status's ~42-producer "say the same
+    phrase" convention, this fact type has no such convention to lean
+    on, and a text-only gate risked colliding with the Regular method's
+    own generic template message (which also mentions "prior-year CA
+    AGI" among several other facts, deliberately NOT given its own
+    isolated message -- see the Regular method module note)."""
+    fs = income_brackets.detect_underpayment_signal(question)
+    if not fs:
+        return None
+    withholding, prior_year_tax, prior_year_agi, _ = _underpayment_short_extract_facts(question)
+    if withholding is None or prior_year_tax is None or prior_year_agi is not None:
+        return None
+    result = {**base, "status": "needs_review", "category": "underpayment_missing_prior_year_agi"}
+    result["answer_text"] = (
+        "To estimate your Underpayment of Estimated Tax Penalty, I also need your prior-year "
+        "California AGI (say something like \"my prior year AGI was $X\") -- it determines "
+        "whether the 110% (instead of 100%) safe-harbor rate applies."
+    )
     return result
 
 
@@ -5289,7 +5372,7 @@ def _income_caleitc_investment_missing_children_answer(question: str, base: dict
     aware CalEITC path."""
     if not income_credits.detect_caleitc_investment_missing_children(question):
         return None
-    result = {**base, "status": "needs_review"}
+    result = {**base, "status": "needs_review", "category": "caleitc_investment_missing_children"}
     result["answer_text"] = (
         "To estimate your CalEITC, I need to know your number of qualifying children "
         "(0, 1, 2, or 3 or more). Please ask again and include it (for example, "
@@ -5331,7 +5414,7 @@ def _income_missing_children_answer(question: str, amount, base: dict):
     actionable clarifying message instead of a generic dead end."""
     if amount is None or not income_credits.detect_caleitc_missing_children(question):
         return None
-    result = {**base, "status": "needs_review"}
+    result = {**base, "status": "needs_review", "category": "caleitc_missing_children"}
     result["answer_text"] = (
         "To estimate your CalEITC, I need to know your number of qualifying children "
         "(0, 1, 2, or 3 or more). Please ask again and include it (for example, "
@@ -6590,7 +6673,7 @@ def _cross_domain_income_override(question: str):
     return None
 
 
-def _answer_income(conn, question: str, compose: bool, qv):
+def _answer_income(conn, question: str, compose: bool, qv, remembered_exemption_credit_dependent_count=None):
     """FTB income-tax domain fallback. Only called from _answer()'s guard
     block, after the sales-tax path has already failed to answer -- see the
     module-level note above. Tries, in order: standard-deduction lookup ->
@@ -6825,7 +6908,8 @@ def _answer_income(conn, question: str, compose: bool, qv):
     if fiduciary_fallback_result:
         return fiduciary_fallback_result
 
-    exemption_credit_result = _income_exemption_credit_answer(conn, question, base)
+    exemption_credit_result = _income_exemption_credit_answer(
+        conn, question, base, remembered_dependent_count=remembered_exemption_credit_dependent_count)
     if exemption_credit_result:
         return exemption_credit_result
 
@@ -6989,6 +7073,10 @@ def _answer_income(conn, question: str, compose: bool, qv):
     missing_underpayment_fs_result = _income_underpayment_missing_filing_status_answer(question, base)
     if missing_underpayment_fs_result:
         return missing_underpayment_fs_result
+
+    missing_underpayment_agi_result = _income_underpayment_missing_agi_answer(conn, question, base)
+    if missing_underpayment_agi_result:
+        return missing_underpayment_agi_result
 
     # Underpayment REGULAR method (late/partial estimated payments) --
     # mutually exclusive with the short method above by construction
@@ -7648,13 +7736,19 @@ def _income_has_any_signal(question: str) -> bool:
 
 
 def _answer(question: str, compose: bool = True, location: str = None,
-            router: str = None, tax_type: str = None) -> dict:
+            router: str = None, tax_type: str = None,
+            remembered_exemption_credit_dependent_count=None) -> dict:
     """`tax_type` (None|"sales"|"income") is a HINT, not a hard gate --
     "income" tries the income domain first but still falls back to sales if
     income can't answer; None/"sales" behave identically to each other
     (sales first, income as the existing fallback/override). A wrong manual
     pick degrades gracefully instead of failing hard. See the Ring 2
-    database-split plan (design decision #4) for the full rationale."""
+    database-split plan (design decision #4) for the full rationale.
+    `remembered_exemption_credit_dependent_count` passes through
+    unconditionally to every _answer_income() call below -- see
+    _income_exemption_credit_answer's own docstring for why this is a
+    fallback default, not a retry-gated injection like the other
+    remembered facts in answer()."""
     router = router or ROUTER
     with db.get_conn() as conn:
         # cross-domain override -- checked BEFORE sales routing so a known
@@ -7689,7 +7783,9 @@ def _answer(question: str, compose: bool = True, location: str = None,
         if _income_has_any_signal(question):
             qv_income_signal = _embed(question)
             with income_db.get_conn() as iconn:
-                income_signal_result = _answer_income(iconn, question, compose, qv_income_signal)
+                income_signal_result = _answer_income(
+                    iconn, question, compose, qv_income_signal,
+                    remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
             if income_signal_result:
                 return income_signal_result
 
@@ -7705,7 +7801,9 @@ def _answer(question: str, compose: bool = True, location: str = None,
             # sales router below instead of embedding a second time.
             qv = _embed(question)
             with income_db.get_conn() as iconn:
-                income_first = _answer_income(iconn, question, compose, qv)
+                income_first = _answer_income(
+                    iconn, question, compose, qv,
+                    remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
             income_tried = True
             if income_first:
                 return income_first
@@ -7789,7 +7887,9 @@ def _answer(question: str, compose: bool = True, location: str = None,
             income_result = None
             if not income_tried:
                 with income_db.get_conn() as iconn:
-                    income_result = _answer_income(iconn, question, compose, qv_for_info)
+                    income_result = _answer_income(
+                        iconn, question, compose, qv_for_info,
+                        remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
             if income_result:
                 return income_result
             return {**base, "status": "needs_review",
@@ -7963,9 +8063,23 @@ def _log_query(question: str, result: dict, source: str) -> None:
         pass
 
 
+def _children_label(count: int) -> str:
+    """Mirrors the child_label formatting already duplicated at every CalEITC/
+    FYTC call site (e.g. engine.py:5340-5342) -- "no qualifying children" /
+    "1 qualifying child" / "N qualifying children (3 or more)"."""
+    if count == 0:
+        return "no qualifying children"
+    if count == 1:
+        return "1 qualifying child"
+    return f"{count} qualifying children" + (" (3 or more)" if count == 3 else "")
+
+
 def answer(question: str, compose: bool = True, location: str = None,
            router: str = None, source: str = "live", tax_type: str = None,
-           remembered_filing_status: str = None) -> dict:
+           remembered_filing_status: str = None,
+           remembered_prior_year_agi: float = None,
+           remembered_qualifying_children_count: int = None,
+           remembered_exemption_credit_dependent_count: int = None) -> dict:
     """Public entry point: runs _answer(), then logs the outcome to query_log
     (see db.py) for the usage-driven feedback loop -- mining real questions and
     low-confidence answers instead of guessing what to test next. `source`
@@ -7973,61 +8087,144 @@ def answer(question: str, compose: bool = True, location: str = None,
     can be told apart from real usage; defaults to 'live'. `tax_type` is the
     optional UI hint (None|"sales"|"income") -- see _answer()'s docstring.
 
-    `remembered_filing_status` (None|"single"|"mfs"|"mfj"|"hoh"|"qss") is an
-    OPTIONAL session-memory hint (see app.py): a filing status the user
+    Four OPTIONAL session-memory hints (see app.py), each a fact the user
     stated earlier in the same chat session, not necessarily in THIS
-    question. Never trusted blindly -- pass 1 always runs on the question
-    exactly as asked, identical to today's behavior with no new kwarg. Only
-    if pass 1 comes back needing a filing status SPECIFICALLY (an income-
-    domain needs_review whose own answer_text says so -- the literal
-    convention every _income_*missing_filing_status*/_missing_fs_answer
-    function in this file already uses) do we retry ONCE with the
-    remembered status appended as plain trailing text, using
-    income_brackets.FILING_STATUS_LABELS -- text detect_filing_status
-    itself already recognizes, verified to round-trip for all 5 keys.
-    Scoped this narrowly on purpose: unconditionally splicing filing-status
-    text into EVERY question risks feeding it into sales-tax routing for
-    questions never about income tax -- verified live that COMPUTE_TRIGGERS'
-    bare "how much tax" phrase can hijack a genuinely sales-phrased question
-    ("how much tax do I owe on a $500 couch") into a confidently WRONG
-    income-bracket computation once a filing status is present in the text.
-    Gating the retry on pass 1's OWN result (income domain + needs_review +
-    mentions filing status) keeps this feature from ever running on a
-    question that didn't already, on its own, ask for one -- though this is
-    a mitigation, not a full fix, since that exact couch phrasing already
-    independently triggers a filing-status defer on pass 1 today; the root
-    cause (COMPUTE_TRIGGERS' breadth) is a separate, pre-existing
-    engine limitation, not something this memory feature is responsible
-    for closing."""
+    question. `remembered_filing_status` (None|"single"|"mfs"|"mfj"|"hoh"|
+    "qss"), `remembered_prior_year_agi` (float), and
+    `remembered_qualifying_children_count` (0/1/2/3) are retry-gated: pass 1
+    always runs on the question exactly as asked, identical to today's
+    behavior with no new kwargs. Only if pass 1's OWN result independently
+    confirms a SPECIFIC missing-fact blocker do we retry ONCE with the
+    matching remembered value(s) appended as plain trailing text -- filing
+    status is gated on its existing, long-standing text convention ("filing
+    status" appears in every _income_*missing_filing_status*/_missing_fs_
+    answer function's answer_text); prior-year AGI and qualifying-children
+    count are gated on a dedicated `category` key
+    ("underpayment_missing_prior_year_agi" / "caleitc_missing_children" /
+    "caleitc_investment_missing_children") set only by the specific
+    producer functions that are unambiguously blocked on that one fact --
+    NOT text search, because neither fact has filing status's clean
+    single-phrase convention: the Underpayment regular method has no
+    isolated missing-AGI message at all (excluded from this retry by
+    construction -- its own catch-all template covers 4+ facts at once, so
+    gating a retry on it would fire on every miss regardless of cause), and
+    FYTC's own checklist message contains the literal substring "number of
+    qualifying children" that CalEITC's dedicated missing-children message
+    also uses -- a text gate would misfire on FYTC questions blocked on age
+    or foster-care status, not children count. FYTC is excluded from this
+    retry entirely for that reason; YCTC doesn't need a children count at
+    all. All matching injections are collected into ONE augmented question
+    and retried in a SINGLE pass, not iteratively -- matches the shipped
+    filing-status precedent, avoids extra Gemini round-trips, and the
+    category design makes the gates mutually exclusive by construction
+    today, so one pass already covers a session missing several facts
+    across different questions.
+
+    Scoped this narrowly on purpose, same reasoning as the original filing-
+    status feature: unconditionally splicing remembered facts into EVERY
+    question risks feeding them into sales-tax routing for questions never
+    about income tax -- verified live that COMPUTE_TRIGGERS' bare "how much
+    tax" phrase can hijack a genuinely sales-phrased question ("how much tax
+    do I owe on a $500 couch") into a confidently WRONG income-bracket
+    computation once a filing status is present in the text. The same
+    residual risk applies, undiminished, to appending an AGI figure or a
+    children count -- gating each retry on pass 1's OWN result (income
+    domain + needs_review + the specific signal) keeps this feature from
+    ever running on a question that didn't already, on its own, ask for
+    that fact, though this is a mitigation, not a full fix; the root cause
+    (COMPUTE_TRIGGERS' breadth) is a separate, pre-existing engine
+    limitation, not something this memory feature is responsible for
+    closing.
+
+    `remembered_exemption_credit_dependent_count` is structurally different
+    from the three facts above: Exemption Credit's dependent count never
+    blocks (it silently defaults to 0), so there is nothing to retry after
+    -- it passes straight through to every _answer()/_answer_income() call
+    as a fallback default, used only when the question itself states no
+    count. See _income_exemption_credit_answer's own docstring for the
+    amounts-removal bug this fallback deliberately avoids."""
     detected_filing_status = income_brackets.detect_filing_status(question)
     detected_filing_status_label = (
         income_brackets.FILING_STATUS_LABELS[detected_filing_status]
         if detected_filing_status else None)
+    detected_prior_year_agi = _detect_prior_year_agi(question)
+    detected_qualifying_children_count = income_credits.detect_children_count(question)
+    detected_exemption_credit_dependent_count = income_brackets.detect_exemption_credit_dependent_count(question)
 
     result = _answer(question, compose=compose, location=location, router=router,
-                      tax_type=tax_type)
+                      tax_type=tax_type,
+                      remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
 
     used_remembered_filing_status = False
     remembered_filing_status_label = None
+    used_remembered_prior_year_agi = False
+    used_remembered_qualifying_children_count = None
+    remembered_qualifying_children_count_label = None
+
+    injections = []
+    pending = {}
+
     if (detected_filing_status is None
             and remembered_filing_status in income_brackets.FILING_STATUS_LABELS
             and result.get("domain") == "income"
             and result.get("status") == "needs_review"
             and "filing status" in (result.get("answer_text") or "").lower()):
         remembered_filing_status_label = income_brackets.FILING_STATUS_LABELS[remembered_filing_status]
-        augmented_question = f"{question}, {remembered_filing_status_label}"
+        injections.append(remembered_filing_status_label)
+        pending["filing_status"] = True
+
+    if (detected_prior_year_agi is None
+            and remembered_prior_year_agi is not None
+            and result.get("domain") == "income"
+            and result.get("status") == "needs_review"
+            and result.get("category") == "underpayment_missing_prior_year_agi"):
+        injections.append(f"prior year AGI was ${remembered_prior_year_agi:,.2f}")
+        pending["prior_year_agi"] = True
+
+    if (detected_qualifying_children_count is None
+            and remembered_qualifying_children_count is not None
+            and result.get("domain") == "income"
+            and result.get("status") == "needs_review"
+            and result.get("category") in ("caleitc_missing_children", "caleitc_investment_missing_children")):
+        remembered_qualifying_children_count_label = _children_label(remembered_qualifying_children_count)
+        injections.append(remembered_qualifying_children_count_label)
+        pending["qualifying_children_count"] = True
+
+    if injections:
+        augmented_question = f"{question}, {', '.join(injections)}"
         retry_result = _answer(augmented_question, compose=compose, location=location,
-                                router=router, tax_type=tax_type)
+                                router=router, tax_type=tax_type,
+                                remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
         if retry_result:
             result = retry_result
-            used_remembered_filing_status = True
+            used_remembered_filing_status = pending.get("filing_status", False)
+            used_remembered_prior_year_agi = pending.get("prior_year_agi", False)
+            used_remembered_qualifying_children_count = pending.get("qualifying_children_count", False)
         else:
-            remembered_filing_status_label = None
+            if not pending.get("filing_status", False):
+                remembered_filing_status_label = None
+            if not pending.get("qualifying_children_count", False):
+                remembered_qualifying_children_count_label = None
+
+    if used_remembered_qualifying_children_count is None:
+        used_remembered_qualifying_children_count = False
 
     result["detected_filing_status"] = detected_filing_status
     result["detected_filing_status_label"] = detected_filing_status_label
     result["used_remembered_filing_status"] = used_remembered_filing_status
     result["remembered_filing_status_label"] = remembered_filing_status_label
+
+    result["detected_prior_year_agi"] = detected_prior_year_agi
+    result["used_remembered_prior_year_agi"] = used_remembered_prior_year_agi
+    result["remembered_prior_year_agi"] = remembered_prior_year_agi if used_remembered_prior_year_agi else None
+
+    result["detected_qualifying_children_count"] = detected_qualifying_children_count
+    result["used_remembered_qualifying_children_count"] = used_remembered_qualifying_children_count
+    result["remembered_qualifying_children_count_label"] = remembered_qualifying_children_count_label
+
+    result["detected_exemption_credit_dependent_count"] = detected_exemption_credit_dependent_count
+    result.setdefault("used_remembered_exemption_credit_dependent_count", False)
+    result.setdefault("remembered_exemption_credit_dependent_count_label", None)
 
     _log_query(question, result, source)
     return result

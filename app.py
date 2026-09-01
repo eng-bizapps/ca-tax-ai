@@ -1,7 +1,7 @@
 """Step 6 - Chat UI.  Run: streamlit run app.py"""
 import streamlit as st
 
-from engine import answer
+from engine import answer, _children_label
 
 EXAMPLES = [
     "How much tax on a $50 restaurant meal in California?",
@@ -50,6 +50,14 @@ if "remembered_filing_status" not in st.session_state:
     st.session_state.remembered_filing_status = None
 if "remembered_filing_status_label" not in st.session_state:
     st.session_state.remembered_filing_status_label = None
+if "remembered_prior_year_agi" not in st.session_state:
+    st.session_state.remembered_prior_year_agi = None
+if "remembered_qualifying_children_count" not in st.session_state:
+    st.session_state.remembered_qualifying_children_count = None
+if "remembered_qualifying_children_count_label" not in st.session_state:
+    st.session_state.remembered_qualifying_children_count_label = None
+if "remembered_exemption_credit_dependent_count" not in st.session_state:
+    st.session_state.remembered_exemption_credit_dependent_count = None
 
 with st.sidebar:
     st.subheader("Options")
@@ -84,6 +92,39 @@ with st.sidebar:
     else:
         st.caption("Not stated yet this session.")
 
+    st.divider()
+    st.subheader("Prior-year AGI")
+    if st.session_state.remembered_prior_year_agi is not None:
+        st.caption(f"Remembered: **${st.session_state.remembered_prior_year_agi:,.2f}**")
+        if st.button("Forget prior-year AGI", use_container_width=True):
+            st.session_state.remembered_prior_year_agi = None
+            st.rerun()
+    else:
+        st.caption("Not stated yet this session.")
+
+    st.divider()
+    st.subheader("Qualifying children (CalEITC)")
+    if st.session_state.remembered_qualifying_children_count is not None:
+        st.caption(f"Remembered: **{st.session_state.remembered_qualifying_children_count_label}**")
+        if st.button("Forget qualifying-children count", use_container_width=True):
+            st.session_state.remembered_qualifying_children_count = None
+            st.session_state.remembered_qualifying_children_count_label = None
+            st.rerun()
+    else:
+        st.caption("Not stated yet this session.")
+
+    st.divider()
+    st.subheader("Dependents (exemption credit)")
+    if st.session_state.remembered_exemption_credit_dependent_count is not None:
+        st.caption(
+            f"Remembered: **{st.session_state.remembered_exemption_credit_dependent_count} "
+            "dependent(s)**")
+        if st.button("Forget dependent count", use_container_width=True):
+            st.session_state.remembered_exemption_credit_dependent_count = None
+            st.rerun()
+    else:
+        st.caption("Not stated yet this session.")
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -93,6 +134,21 @@ for msg in st.session_state.messages:
                 st.caption(
                     f"Used your remembered filing status "
                     f"({res['remembered_filing_status_label']}) to answer this."
+                )
+            if res.get("used_remembered_prior_year_agi"):
+                st.caption(
+                    f"Used your remembered prior-year AGI "
+                    f"(${res['remembered_prior_year_agi']:,.2f}) to answer this."
+                )
+            if res.get("used_remembered_qualifying_children_count"):
+                st.caption(
+                    f"Used your remembered qualifying-children count "
+                    f"({res['remembered_qualifying_children_count_label']}) to answer this."
+                )
+            if res.get("used_remembered_exemption_credit_dependent_count"):
+                st.caption(
+                    f"Used your remembered dependent count "
+                    f"({res['remembered_exemption_credit_dependent_count_label']}) to answer this."
                 )
 
             amount_field = "tax" if res.get("tax") is not None else "amount"
@@ -127,12 +183,26 @@ if question and question.strip():
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            res = answer(question, tax_type=tax_type,
-                         remembered_filing_status=st.session_state.remembered_filing_status)
+            res = answer(
+                question, tax_type=tax_type,
+                remembered_filing_status=st.session_state.remembered_filing_status,
+                remembered_prior_year_agi=st.session_state.remembered_prior_year_agi,
+                remembered_qualifying_children_count=st.session_state.remembered_qualifying_children_count,
+                remembered_exemption_credit_dependent_count=st.session_state.remembered_exemption_credit_dependent_count,
+            )
 
         if res.get("detected_filing_status"):
             st.session_state.remembered_filing_status = res["detected_filing_status"]
             st.session_state.remembered_filing_status_label = res["detected_filing_status_label"]
+        if res.get("detected_prior_year_agi") is not None:
+            st.session_state.remembered_prior_year_agi = res["detected_prior_year_agi"]
+        if res.get("detected_qualifying_children_count") is not None:
+            st.session_state.remembered_qualifying_children_count = res["detected_qualifying_children_count"]
+            st.session_state.remembered_qualifying_children_count_label = _children_label(
+                res["detected_qualifying_children_count"])
+        if res.get("detected_exemption_credit_dependent_count") is not None:
+            st.session_state.remembered_exemption_credit_dependent_count = res[
+                "detected_exemption_credit_dependent_count"]
 
         display_text = md_safe(res["answer_text"])
         if res["status"] == "needs_review":
@@ -144,6 +214,21 @@ if question and question.strip():
             st.caption(
                 f"Used your remembered filing status "
                 f"({res['remembered_filing_status_label']}) to answer this."
+            )
+        if res.get("used_remembered_prior_year_agi"):
+            st.caption(
+                f"Used your remembered prior-year AGI "
+                f"(${res['remembered_prior_year_agi']:,.2f}) to answer this."
+            )
+        if res.get("used_remembered_qualifying_children_count"):
+            st.caption(
+                f"Used your remembered qualifying-children count "
+                f"({res['remembered_qualifying_children_count_label']}) to answer this."
+            )
+        if res.get("used_remembered_exemption_credit_dependent_count"):
+            st.caption(
+                f"Used your remembered dependent count "
+                f"({res['remembered_exemption_credit_dependent_count_label']}) to answer this."
             )
 
         amount_field = "tax" if res.get("tax") is not None else "amount"
