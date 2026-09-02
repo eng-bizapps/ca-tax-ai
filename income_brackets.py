@@ -5506,12 +5506,49 @@ AMT_ITEMIZED_PROPERTY_TAX_TERMS = {
     "real property tax", "real property taxes", "personal property tax",
     "personal property taxes",
 }
+# Vocabulary for the separate AMT mortgage-interest extension below
+# (compute_amt_mortgage_ca_tax) -- defined here, ahead of its own compute
+# function, only so it can be folded into this exclude set: a question
+# using the OLD, undifferentiated mortgage_interest_addback phrasing
+# should still make THIS (property-tax) extension decline, same as the 5
+# other adjustment types, rather than silently answering while ignoring
+# a stated mortgage fact it can't safely fold in.
+AMT_MORTGAGE_NONACQUISITION_TERMS = {
+    "not used to buy, build, or improve", "not used to buy, build or improve",
+    "wasn't used to buy, build, or improve", "wasn't used to buy, build or improve",
+    "was not used to buy, build, or improve", "was not used to buy, build or improve",
+    "loan proceeds were not used to buy", "loan proceeds weren't used to buy",
+    "non-acquisition mortgage interest", "nonacquisition mortgage interest",
+    "non-acquisition debt interest", "nonacquisition debt interest",
+    "not qualified housing interest",
+}
+# Separate, SHORTER anchor used only for AMOUNT EXTRACTION (engine.py),
+# not detection -- AMT_MORTGAGE_NONACQUISITION_TERMS's own qualifying
+# phrase ("...that was not used to buy, build, or improve...") sits too
+# far from its own dollar figure in natural phrasing ("$90,000 in
+# mortgage interest that was not used to buy, build, or improve the
+# home" -- the "in mortgage interest that was " connector alone is 30
+# chars, past _amount_near_anchor_edge's default 25-char window) --
+# found live via a 3-figure order-independence test where this anchor's
+# own qualifying phrase ended up numerically CLOSER to an unrelated
+# itemized-total figure in an earlier clause than to its own value,
+# causing the itemized-total extraction (which runs first) to wrongly
+# claim this feature's own dollar figure. "mortgage interest" alone is
+# short and sits immediately next to its value in natural phrasing, and
+# is safe to use standalone here because the signal gate already
+# excludes any question also mentioning the OLDER, undifferentiated
+# mortgage-interest vocabulary before extraction is ever reached.
+AMT_MORTGAGE_INTEREST_ANCHOR_TERMS = {
+    "mortgage interest", "home equity interest", "home-equity interest",
+}
 # the 6 optional itemized-deduction adjustments compute_itemized_ca_tax
-# already supports -- out of scope for THIS extension specifically, to
-# keep extraction to exactly 3 figures.
+# already supports, PLUS the new mortgage extension's own vocabulary --
+# out of scope for THIS extension specifically, to keep extraction to
+# exactly 3 figures.
 AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS = (
     SALT_TERMS | MORTGAGE_INTEREST_ADDBACK_TERMS | MISC_ITEMIZED_TERMS
     | CHARITABLE_TERMS | SALT_CAP_ADDBACK_TERMS | CASUALTY_LOSS_TERMS
+    | AMT_MORTGAGE_NONACQUISITION_TERMS
 )
 AMT_ITEMIZED_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"itemize", "itemized", "itemizing"}
 
@@ -5595,6 +5632,324 @@ def compute_amt_itemized_ca_tax(conn, income_amount: float, itemized_amount: flo
     return {**base, "amti": amti, "exemption": exemption, "tmt": tmt,
             "regular_tax": regular_tax, "amt_owed": amt_owed,
             "property_tax_addback": property_tax_addback}
+
+
+# --- AMT extension: home mortgage interest NOT used to buy, build, or
+# improve the home (Schedule P (540) Part I Line 4) -- narrows the AMT
+# "general case" further, alongside the ISO and property-tax extensions
+# above. Line 4 disallows, for AMT purposes only, interest on
+# "non-acquisition debt": home-equity-type borrowing not used to buy,
+# build, or substantially improve the home securing it. This is a
+# USE-OF-PROCEEDS test, not a loan-size test -- FTB's own examples: a
+# home-equity loan used to buy a ski boat goes on Line 4; the same loan
+# used to install a swimming pool does NOT (a home improvement IS
+# acquisition debt).
+#
+# Deliberately does NOT reuse compute_itemized_ca_tax's existing
+# mortgage_interest_addback TERM SET for this feature's own trigger --
+# verified against that parameter's own docstring/comment (~line 766-779)
+# that it bundles TWO different federal-nonconformity sub-rules into one
+# trusted number: (1) interest on genuine acquisition debt between the
+# federal $750k cap and CA's pre-TCJA $1M cap (still acquisition debt --
+# Line 4 does NOT disallow this), and (2) interest on debt not used to
+# buy/build/improve the home (Line 4 DOES disallow this). Reusing the
+# whole stated figure would overstate AMTI for anyone whose federal
+# disallowance was purely the cap-size difference. This extension asks
+# for the NARROWER, Line-4-specific figure via its own vocabulary
+# instead -- but the underlying MECHANIC (add the disallowed interest
+# back to the itemized total for regular tax, since CA doesn't conform
+# to federal's suspension either way) is the same, so the compute
+# function below still passes this narrower figure straight into
+# compute_itemized_ca_tax's existing mortgage_interest_addback parameter
+# unchanged for the regular-tax leg.
+AMT_MORTGAGE_CITATION = "2025 Schedule P (540), Part I Line 4; R&TC Section 17062.1"
+AMT_MORTGAGE_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {"itemize", "itemized", "itemizing"}
+
+
+def _amt_mortgage_base_signal_ok(q: str) -> bool:
+    """Same no-COMPUTE_TRIGGERS precedent as every other AMT extension --
+    AMT + itemizing + non-acquisition-mortgage-interest vocabulary
+    together is specific enough on its own."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not any(t in q for t in AMT_ITEMIZED_TERMS):
+        return False
+    if not any(t in q for t in AMT_MORTGAGE_NONACQUISITION_TERMS):
+        return False
+    if _amt_screen_has_preference_exclusion(q):
+        return False
+    if any(t in q for t in AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS - AMT_MORTGAGE_NONACQUISITION_TERMS):
+        return False
+    if any(t in q for t in AMT_ITEMIZED_PROPERTY_TAX_TERMS):
+        return False
+    if any(t in q for t in AMT_MORTGAGE_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_amt_mortgage_signal(question: str):
+    q = question.lower()
+    if not _amt_mortgage_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_mortgage_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_mortgage_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_mortgage_out_of_scope(question: str) -> bool:
+    """True iff AMT + itemizing vocabulary is present alongside the
+    property-tax addback or any of the OTHER itemized-deduction
+    adjustments (including the OLD, undifferentiated mortgage-interest-
+    addback phrasing) this extension doesn't attempt together with its
+    own narrower mortgage fact -- routes to a dedicated redirect rather
+    than silently dropping one."""
+    q = question.lower()
+    if not (any(t in q for t in AMT_SCREEN_TERMS) and any(t in q for t in AMT_ITEMIZED_TERMS)):
+        return False
+    if any(t in q for t in AMT_ITEMIZED_PROPERTY_TAX_TERMS):
+        return True
+    return any(t in q for t in AMT_ITEMIZED_OTHER_ADJUSTMENT_EXCLUDE_TERMS - AMT_MORTGAGE_NONACQUISITION_TERMS)
+
+
+def compute_amt_mortgage_ca_tax(conn, income_amount: float, itemized_amount: float,
+                                 nonacquisition_mortgage_interest: float, filing_status: str,
+                                 tax_year: int = DEFAULT_TAX_YEAR):
+    """Regular tax computed via the UNCHANGED compute_itemized_ca_tax,
+    reusing its existing mortgage_interest_addback parameter -- California
+    doesn't conform to federal's TCJA suspension of non-acquisition-debt
+    mortgage interest, so this amount is added BACK to the regular-tax
+    itemized total first. AMTI then adds it back a SECOND time, since AMT
+    disallows non-acquisition-debt interest regardless of what CA's
+    regular tax allows. Returns None (declines) if the stated itemized
+    amount doesn't actually exceed the standard deduction, same Schedule
+    P Line 1 routing as the property-tax extension."""
+    if nonacquisition_mortgage_interest is None or nonacquisition_mortgage_interest < 0:
+        return None
+    base = compute_itemized_ca_tax(conn, income_amount, itemized_amount, filing_status, tax_year,
+                                    mortgage_interest_addback=nonacquisition_mortgage_interest)
+    if not base:
+        return None
+    if not base["used_itemized"]:
+        return None
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = base["taxable_income"] + nonacquisition_mortgage_interest
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    regular_tax = base["total_tax"]
+    amt_owed = round(max(0.0, tmt - regular_tax), 2)
+    return {**base, "amti": amti, "exemption": exemption, "tmt": tmt,
+            "regular_tax": regular_tax, "amt_owed": amt_owed,
+            "nonacquisition_mortgage_interest": nonacquisition_mortgage_interest}
+
+
+# --- AMT extension: NOL (net operating loss) deduction added back for AMT
+# (Schedule P (540) Part I Line 16) -- narrows the AMT "general case"
+# further, alongside the ISO/property-tax/mortgage extensions above.
+# Line 16 is a straight add-back of whatever REGULAR-tax NOL deduction was
+# already claimed this year -- confirmed against FTB's own 2025
+# instruction text ("NOL deductions from Schedule CA (540)... enter as a
+# positive amount"). Genuinely simpler than, and NOT to be confused with,
+# Line 20 (the separate AMT NOL deduction, which needs its own multi-year
+# AMT-basis carryover recompute) -- Line 20 stays out of scope, same
+# reasoning as every other multi-year-basis item this session.
+#
+# This codebase already has 3 separate, shipped NOL features with an
+# IDENTICAL output shape (each returns **compute_ca_tax(...) plus
+# nol_deduction/taxable_income/mti): compute_nol_ca_tax (business-only),
+# compute_nol_wages_ca_tax (wage-only/closed-business), compute_nol_
+# mixed_ca_tax (wages + ongoing business). Line 16's mechanic
+# (amti = taxable_income + nol_deduction) is identical across all three
+# and is a no-op in the suspended branch (nol_deduction=0 there, so amti
+# just equals taxable_income/mti unchanged) -- wraps all 3 rather than
+# just one, avoiding an arbitrary gap ("AMT+NOL only works if your
+# business never closed") with no corresponding reduction in real risk,
+# since none of the 3 needs new FTB research.
+AMT_NOL_CITATION = "2025 Schedule P (540), Part I Line 16; R&TC Section 17062.1"
+# AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS already contains "net operating
+# loss", and _amt_screen_has_preference_exclusion also does an
+# unconditional \bnol\b regex check -- this feature's OWN vocabulary IS
+# "net operating loss"/NOL, so it cannot reuse that shared helper for its
+# own gate (same self-exclusion trap the ISO extension had to avoid for
+# bare "stock"). Every OTHER preference item still correctly excludes.
+AMT_NOL_OTHER_PREFERENCE_EXCLUDE_TERMS = AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS - {"net operating loss"}
+
+
+def _amt_nol_has_other_preference_exclusion(q: str) -> bool:
+    """Deliberately does NOT check bare \\bnol\\b (unlike the shared
+    _amt_screen_has_preference_exclusion) -- "nol"/"net operating loss"
+    IS this feature's own required vocabulary, not something to exclude
+    on."""
+    return any(t in q for t in AMT_NOL_OTHER_PREFERENCE_EXCLUDE_TERMS)
+
+
+def _amt_nol_base_signal_ok(q: str) -> bool:
+    """Business-income-only population: AMT vocabulary + the existing
+    (non-AMT) business-only NOL feature's own signal. No COMPUTE_TRIGGERS
+    requirement -- same precedent as every other AMT extension (AMT
+    vocabulary + NOL vocabulary together is specific enough on its own)."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_COMPLEXITY_EXCLUDE):
+        return False
+    if _amt_nol_has_other_preference_exclusion(q):
+        return False
+    return True
+
+
+def detect_amt_nol_signal(question: str):
+    q = question.lower()
+    if not _amt_nol_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_nol_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_nol_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def _amt_nol_wages_base_signal_ok(q: str) -> bool:
+    """Wage-only/closed-business population."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_ONGOING_BUSINESS_EXCLUDE_TERMS):
+        return False
+    if not any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False
+    if any(t in q for t in NOL_WAGES_COMPLEXITY_EXCLUDE):
+        return False
+    if _amt_nol_has_other_preference_exclusion(q):
+        return False
+    return True
+
+
+def detect_amt_nol_wages_signal(question: str):
+    q = question.lower()
+    if not _amt_nol_wages_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_nol_wages_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_nol_wages_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_nol_wages_ambiguous(question: str) -> bool:
+    """True iff AMT + NOL vocabulary is present but neither a closed-
+    business confirmation nor an ongoing-business signal is stated --
+    mirrors the existing (non-AMT) wages-only feature's own ambiguity
+    detector, gated additionally on AMT vocabulary being present."""
+    q = question.lower()
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_ONGOING_BUSINESS_EXCLUDE_TERMS):
+        return False
+    if any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False
+    return True
+
+
+def _amt_nol_mixed_base_signal_ok(q: str) -> bool:
+    """Mixed wages + ongoing-business population."""
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    if not _has_nol_term(q):
+        return False
+    if any(t in q for t in NOL_WAGES_CLOSED_BUSINESS_TERMS):
+        return False
+    if not (any(t in q for t in NOL_MIXED_ONGOING_BUSINESS_TERMS)
+            or any(t in q for t in NOL_MIXED_BUSINESS_INCOME_TERMS)):
+        return False
+    if not any(t in q for t in NOL_MIXED_WAGE_TERMS):
+        return False
+    if any(t in q for t in NOL_MIXED_COMPLEXITY_EXCLUDE):
+        return False
+    if _amt_nol_has_other_preference_exclusion(q):
+        return False
+    return True
+
+
+def detect_amt_nol_mixed_signal(question: str):
+    q = question.lower()
+    if not _amt_nol_mixed_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_nol_mixed_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_nol_mixed_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def _amt_nol_addback(base, filing_status: str):
+    """Shared AMTI/exemption/TMT arithmetic for all 3 NOL population
+    variants -- a deliberate DRY exception (3x repetition WITHIN one
+    slice, unlike every other AMT slice's 1x-each-across-different-
+    slices style). amti = taxable_income + nol_deduction, which always
+    equals base["mti"] exactly (never floored, since nol_deduction =
+    min(nol_carryover_amount, mti) by construction in all 3 underlying
+    functions) -- a no-op in the suspended branch, where nol_deduction=0
+    and amti collapses to taxable_income (=mti) unchanged.
+    compute_nol_wages_ca_tax's result has no "suspended" key at all
+    (structurally impossible for that population) -- untouched here,
+    passes through fine."""
+    if not base:
+        return None
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = base["taxable_income"] + base["nol_deduction"]
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    regular_tax = base["total_tax"]
+    amt_owed = round(max(0.0, tmt - regular_tax), 2)
+    return {**base, "amti": amti, "exemption": exemption, "tmt": tmt,
+            "regular_tax": regular_tax, "amt_owed": amt_owed}
+
+
+def compute_amt_nol_ca_tax(conn, business_income: float, nol_carryover_amount: float,
+                            filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    return _amt_nol_addback(
+        compute_nol_ca_tax(conn, business_income, nol_carryover_amount, filing_status, tax_year),
+        filing_status)
+
+
+def compute_amt_nol_wages_ca_tax(conn, wages: float, nol_carryover_amount: float,
+                                  filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    return _amt_nol_addback(
+        compute_nol_wages_ca_tax(conn, wages, nol_carryover_amount, filing_status, tax_year),
+        filing_status)
+
+
+def compute_amt_nol_mixed_ca_tax(conn, wages: float, business_income: float, nol_carryover_amount: float,
+                                  filing_status: str, tax_year: int = DEFAULT_TAX_YEAR):
+    return _amt_nol_addback(
+        compute_nol_mixed_ca_tax(conn, wages, business_income, nol_carryover_amount, filing_status, tax_year),
+        filing_status)
 
 
 # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540

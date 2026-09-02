@@ -2136,6 +2136,348 @@ def _income_amt_itemized_out_of_scope_answer(question: str, base: dict):
     return result
 
 
+def _income_amt_mortgage_answer(conn, question: str, base: dict):
+    """AMT non-acquisition mortgage-interest extension (Schedule P (540)
+    Part I Line 4) -- see income_brackets.compute_amt_mortgage_ca_tax's
+    docstring for why this deliberately does NOT reuse the older,
+    undifferentiated mortgage_interest_addback vocabulary (it bundles a
+    federal-cap-size sub-rule that Line 4 does NOT disallow together
+    with the non-acquisition-debt sub-rule Line 4 DOES disallow). Two
+    anchors (non-acquisition interest, itemized total) plus income as
+    the sole remainder.
+
+    Extraction order matters and is NOT the same as the detection
+    vocabulary: the mortgage-interest figure is extracted FIRST, using
+    the short income_brackets.AMT_MORTGAGE_INTEREST_ANCHOR_TERMS anchor
+    ("mortgage interest") rather than the longer detection-only
+    AMT_MORTGAGE_NONACQUISITION_TERMS qualifying phrase -- found live
+    that the qualifying phrase ("...that was not used to buy, build, or
+    improve...") sits too far from its own dollar figure in natural
+    phrasing ("$90,000 in mortgage interest that was not used to buy,
+    build, or improve the home") for _amount_near_anchor_edge's window,
+    while sitting numerically CLOSER to an unrelated itemized-total
+    figure in an earlier clause -- extracting itemized total first (as
+    the sibling property-tax extension does) let that wrong match win.
+    See income_brackets.AMT_MORTGAGE_INTEREST_ANCHOR_TERMS's own
+    docstring for the full explanation."""
+    fs = income_brackets.detect_amt_mortgage_signal(question)
+    if not fs:
+        return None
+    amounts = _amt_iso_strip_form_number_phantoms(_amounts(question))
+    mortgage_match = _amount_near_anchor_edge(question, income_brackets.AMT_MORTGAGE_INTEREST_ANCHOR_TERMS, amounts)
+    if mortgage_match is None:
+        return None
+    nonacquisition_mortgage_interest = mortgage_match[0]
+    remaining = _remove_amount_span(amounts, mortgage_match)
+    itemized_match = _amount_near_anchor_edge(question, income_brackets.AMT_ITEMIZED_TERMS, remaining)
+    if itemized_match is None:
+        return None
+    itemized_amount = itemized_match[0]
+    remaining = _remove_amount_span(remaining, itemized_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+    calc = income_brackets.compute_amt_mortgage_ca_tax(conn, income_amount, itemized_amount,
+                                                         nonacquisition_mortgage_interest, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": income_amount, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_MORTGAGE_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${income_amount:,.2f} in California income, ${itemized_amount:,.2f} in "
+            f"itemized deductions, a ${nonacquisition_mortgage_interest:,.2f} non-acquisition "
+            f"mortgage interest addback (home-equity-type interest NOT used to buy, build, or "
+            f"improve the home securing the loan -- fully disallowed for AMT, though still "
+            f"allowed for regular tax since California doesn't conform to the federal suspension), "
+            f"and filing status {label}: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% "
+            f"of ${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} exemption), which is "
+            f"below your regular California tax of ${calc['regular_tax']:,.2f} -- you do NOT owe "
+            f"California Alternative Minimum Tax ({income_brackets.AMT_MORTGAGE_CITATION}). This "
+            "assumes no OTHER AMT preference items and no other itemized-deduction adjustments "
+            "(property tax, SALT removal, misc. itemized, charitable cap, casualty loss) beyond "
+            "the stated mortgage interest."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, ${itemized_amount:,.2f} in "
+        f"itemized deductions, a ${nonacquisition_mortgage_interest:,.2f} non-acquisition mortgage "
+        f"interest addback, and filing status {label}: your Tentative Minimum Tax is "
+        f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI minus a ${calc['exemption']:,.2f} "
+        f"exemption), which EXCEEDS your regular California tax of ${calc['regular_tax']:,.2f} -- "
+        f"you owe an estimated ${calc['amt_owed']:,.2f} in California Alternative Minimum Tax "
+        f"({income_brackets.AMT_MORTGAGE_CITATION}). This assumes no OTHER AMT preference items "
+        "and no other itemized-deduction adjustments beyond the stated mortgage interest -- "
+        "consult Schedule P (540) or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_mortgage_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_mortgage_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure from non-acquisition mortgage interest, I need "
+        "your filing status: single, married filing jointly, married filing separately, head of "
+        "household, or qualifying surviving spouse. Please also state your California income, "
+        "your total itemized deductions, and the amount of mortgage interest included in that "
+        "total that was NOT used to buy, build, or improve the home securing the loan.")
+    return result
+
+
+def _income_amt_mortgage_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when AMT + itemizing vocabulary is
+    present alongside the property-tax addback or any of the other
+    itemized-deduction adjustments this extension doesn't attempt
+    together with its own narrower mortgage-interest fact."""
+    if not income_brackets.detect_amt_mortgage_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant's AMT-for-non-acquisition-mortgage-interest check only handles that one "
+        "addback on its own -- it doesn't yet combine AMT with a property-tax addback, SALT "
+        "removal, miscellaneous itemized deductions, the charitable contribution cap, or a "
+        "casualty loss adjustment in the same question. Please consult Schedule P (540)'s full "
+        "worksheet, or a tax professional, for an accurate figure."
+    )
+    return result
+
+
+def _income_amt_nol_answer(conn, question: str, base: dict):
+    """AMT NOL addback extension, business-income-only population
+    (Schedule P (540) Part I Line 16) -- see
+    income_brackets.compute_amt_nol_ca_tax's docstring for the
+    add-the-regular-tax-NOL-deduction-back-in mechanic. One anchor (NOL
+    carryover) plus business income as the sole remainder."""
+    fs = income_brackets.detect_amt_nol_signal(question)
+    if not fs:
+        return None
+    amounts = _amt_iso_strip_form_number_phantoms(_amounts(question))
+    nol_match = _amount_near_anchor_edge(question, income_brackets.NOL_TERMS, amounts)
+    if nol_match is None:
+        return None
+    nol_amount = nol_match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, nol_match)]
+    if len(others) != 1:
+        return None
+    business_income = others[0]
+    calc = income_brackets.compute_amt_nol_ca_tax(conn, business_income, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": business_income, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_NOL_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    suspended_note = ""
+    if calc["suspended"]:
+        suspended_note = (
+            f" Your NOL carryover deduction is SUSPENDED this year because your business income "
+            f"(${business_income:,.2f}) is at or above the {income_brackets.DEFAULT_TAX_YEAR} "
+            f"$1,000,000 suspension threshold, so this Line 16 addback is $0 (nothing was "
+            f"deducted for regular tax to add back)."
+        )
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${business_income:,.2f} in California business income, a ${nol_amount:,.2f} "
+            f"NOL carryover, and filing status {label}: your Tentative Minimum Tax is "
+            f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, which adds your "
+            f"${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, minus a "
+            f"${calc['exemption']:,.2f} exemption), which is below your regular California tax of "
+            f"${calc['regular_tax']:,.2f} -- you do NOT owe California Alternative Minimum Tax "
+            f"({income_brackets.AMT_NOL_CITATION}).{suspended_note} This assumes no OTHER AMT "
+            "preference items and an ordinary business NOL (not a disaster-loss carryover)."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${business_income:,.2f} in California business income, a ${nol_amount:,.2f} "
+        f"NOL carryover, and filing status {label}: your Tentative Minimum Tax is "
+        f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, which adds your "
+        f"${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, minus a "
+        f"${calc['exemption']:,.2f} exemption), which EXCEEDS your regular California tax of "
+        f"${calc['regular_tax']:,.2f} -- you owe an estimated ${calc['amt_owed']:,.2f} in "
+        f"California Alternative Minimum Tax ({income_brackets.AMT_NOL_CITATION})."
+        f"{suspended_note} This assumes no OTHER AMT preference items -- consult Schedule P (540) "
+        "or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_nol_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_nol_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure with an NOL carryover, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California business income and your "
+        "NOL carryover amount.")
+    return result
+
+
+def _income_amt_nol_wages_answer(conn, question: str, base: dict):
+    """AMT NOL addback extension, wage-only/closed-business population
+    (Schedule P (540) Part I Line 16) -- see
+    income_brackets.compute_amt_nol_wages_ca_tax's docstring. One anchor
+    (NOL carryover) plus wages as the sole remainder."""
+    fs = income_brackets.detect_amt_nol_wages_signal(question)
+    if not fs:
+        return None
+    amounts = _amt_iso_strip_form_number_phantoms(_amounts(question))
+    nol_match = _amount_near_anchor_edge(question, income_brackets.NOL_TERMS, amounts)
+    if nol_match is None:
+        return None
+    nol_amount = nol_match[0]
+    others = [a for a, _, _ in _remove_amount_span(amounts, nol_match)]
+    if len(others) != 1:
+        return None
+    wages = others[0]
+    calc = income_brackets.compute_amt_nol_wages_ca_tax(conn, wages, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": wages, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_NOL_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${wages:,.2f} in California wages, a ${nol_amount:,.2f} NOL carryover from "
+            f"a now-closed business, and filing status {label}: your Tentative Minimum Tax is "
+            f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, which adds your "
+            f"${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, minus a "
+            f"${calc['exemption']:,.2f} exemption), which is below your regular California tax of "
+            f"${calc['regular_tax']:,.2f} -- you do NOT owe California Alternative Minimum Tax "
+            f"({income_brackets.AMT_NOL_CITATION}). This assumes no OTHER AMT preference items "
+            "and an ordinary business NOL (not a disaster-loss carryover)."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${wages:,.2f} in California wages, a ${nol_amount:,.2f} NOL carryover from a "
+        f"now-closed business, and filing status {label}: your Tentative Minimum Tax is "
+        f"${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, which adds your "
+        f"${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, minus a "
+        f"${calc['exemption']:,.2f} exemption), which EXCEEDS your regular California tax of "
+        f"${calc['regular_tax']:,.2f} -- you owe an estimated ${calc['amt_owed']:,.2f} in "
+        f"California Alternative Minimum Tax ({income_brackets.AMT_NOL_CITATION}). This assumes "
+        "no OTHER AMT preference items -- consult Schedule P (540) or a tax professional to "
+        "confirm."
+    )
+    return result
+
+
+def _income_amt_nol_wages_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_nol_wages_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure with an NOL carryover from a closed business, I "
+        "need your filing status: single, married filing jointly, married filing separately, "
+        "head of household, or qualifying surviving spouse. Please also state your California "
+        "wages and your NOL carryover amount.")
+    return result
+
+
+def _income_amt_nol_wages_ambiguous_answer(question: str, base: dict):
+    """AMT + NOL vocabulary present but neither a closed-business
+    confirmation nor an ongoing-business signal is stated -- mirrors the
+    existing (non-AMT) wages-only feature's own ambiguity redirect."""
+    if not income_brackets.detect_amt_nol_wages_ambiguous(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure with an NOL carryover, I need to know whether you "
+        "still have current-year business income or self-employment income, or whether the "
+        "business that generated the carryover has closed and you now have wages/other income "
+        "only -- please ask again and say either \"my business closed\" (or similar) or state "
+        "your current business income."
+    )
+    return result
+
+
+def _income_amt_nol_mixed_answer(conn, question: str, base: dict):
+    """AMT NOL addback extension, mixed wages + ongoing-business
+    population (Schedule P (540) Part I Line 16) -- see
+    income_brackets.compute_amt_nol_mixed_ca_tax's docstring. Two anchors
+    (NOL carryover, business income) plus wages as the sole remainder,
+    same edge-aware pattern as the sibling (non-AMT) mixed-NOL feature."""
+    fs = income_brackets.detect_amt_nol_mixed_signal(question)
+    if not fs:
+        return None
+    amounts = _nol_mixed_strip_form_number_phantoms(_amt_iso_strip_form_number_phantoms(_amounts(question)))
+    nol_match = _amount_near_anchor_edge(question, income_brackets.NOL_TERMS, amounts)
+    if nol_match is None:
+        return None
+    nol_amount = nol_match[0]
+    remaining = _remove_amount_span(amounts, nol_match)
+    biz_match = _amount_near_anchor_edge(question, income_brackets.NOL_MIXED_BUSINESS_INCOME_TERMS, remaining)
+    if biz_match is None:
+        return None
+    business_income = biz_match[0]
+    remaining = _remove_amount_span(remaining, biz_match)
+    others = [a for a, _, _ in remaining]
+    if len(others) != 1:
+        return None
+    wages = others[0]
+    calc = income_brackets.compute_amt_nol_mixed_ca_tax(conn, wages, business_income, nol_amount, fs)
+    if not calc:
+        return None
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    result = {**base, "status": "answered", "category": "amt_screen",
+              "amount": wages, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_NOL_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    suspended_note = ""
+    if calc["suspended"]:
+        suspended_note = (
+            f" Your NOL carryover deduction is SUSPENDED this year because both your business "
+            f"income and your modified AGI are at or above the {income_brackets.DEFAULT_TAX_YEAR} "
+            f"$1,000,000 suspension threshold, so this Line 16 addback is $0 (nothing was "
+            f"deducted for regular tax to add back)."
+        )
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${wages:,.2f} in California wages, ${business_income:,.2f} in business "
+            f"income, a ${nol_amount:,.2f} NOL carryover, and filing status {label}: your "
+            f"Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, "
+            f"which adds your ${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, "
+            f"minus a ${calc['exemption']:,.2f} exemption), which is below your regular California "
+            f"tax of ${calc['regular_tax']:,.2f} -- you do NOT owe California Alternative Minimum "
+            f"Tax ({income_brackets.AMT_NOL_CITATION}).{suspended_note} This assumes no OTHER AMT "
+            "preference items and an ordinary business NOL (not a disaster-loss carryover)."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${wages:,.2f} in California wages, ${business_income:,.2f} in business income, "
+        f"a ${nol_amount:,.2f} NOL carryover, and filing status {label}: your Tentative Minimum "
+        f"Tax is ${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} AMTI, which adds your "
+        f"${calc['nol_deduction']:,.2f} regular-tax NOL deduction back in, minus a "
+        f"${calc['exemption']:,.2f} exemption), which EXCEEDS your regular California tax of "
+        f"${calc['regular_tax']:,.2f} -- you owe an estimated ${calc['amt_owed']:,.2f} in "
+        f"California Alternative Minimum Tax ({income_brackets.AMT_NOL_CITATION})."
+        f"{suspended_note} This assumes no OTHER AMT preference items -- consult Schedule P (540) "
+        "or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_nol_mixed_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_nol_mixed_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your California AMT exposure with an NOL carryover, I need your filing status: "
+        "single, married filing jointly, married filing separately, head of household, or "
+        "qualifying surviving spouse. Please also state your California wages, your current "
+        "business income, and your NOL carryover amount.")
+    return result
+
+
 def _income_kiddie_tax_answer(conn, question: str, base: dict):
     """FTB 3800 kiddie tax on a child's unearned income (Form 540 Line
     31) -- see income_brackets.compute_kiddie_tax_ca_tax's docstring for
@@ -7038,9 +7380,66 @@ def _answer_income(conn, question: str, compose: bool, qv, remembered_exemption_
     if missing_amt_itemized_fs_result:
         return missing_amt_itemized_fs_result
 
+    # AMT non-acquisition-mortgage-interest extension checked BEFORE the
+    # itemized/property-tax extension's own out-of-scope check below --
+    # same "more specific before generic" ordering: a mortgage-only
+    # question satisfies both this feature's own trigger AND the
+    # itemized extension's (now-expanded) exclude set.
+    amt_mortgage_result = _income_amt_mortgage_answer(conn, question, base)
+    if amt_mortgage_result:
+        return amt_mortgage_result
+
+    missing_amt_mortgage_fs_result = _income_amt_mortgage_missing_filing_status_answer(question, base)
+    if missing_amt_mortgage_fs_result:
+        return missing_amt_mortgage_fs_result
+
+    amt_mortgage_out_of_scope_result = _income_amt_mortgage_out_of_scope_answer(question, base)
+    if amt_mortgage_out_of_scope_result:
+        return amt_mortgage_out_of_scope_result
+
     amt_itemized_out_of_scope_result = _income_amt_itemized_out_of_scope_answer(question, base)
     if amt_itemized_out_of_scope_result:
         return amt_itemized_out_of_scope_result
+
+    # AMT NOL addback extensions (3 population variants) checked BEFORE
+    # the base AMT screen below -- NOL vocabulary alongside AMT
+    # vocabulary is already caught by the base screen's own out-of-scope
+    # check, so these must run first or they'd never fire.
+    amt_nol_result = _income_amt_nol_answer(conn, question, base)
+    if amt_nol_result:
+        return amt_nol_result
+
+    missing_amt_nol_fs_result = _income_amt_nol_missing_filing_status_answer(question, base)
+    if missing_amt_nol_fs_result:
+        return missing_amt_nol_fs_result
+
+    amt_nol_wages_result = _income_amt_nol_wages_answer(conn, question, base)
+    if amt_nol_wages_result:
+        return amt_nol_wages_result
+
+    missing_amt_nol_wages_fs_result = _income_amt_nol_wages_missing_filing_status_answer(question, base)
+    if missing_amt_nol_wages_fs_result:
+        return missing_amt_nol_wages_fs_result
+
+    # Mixed checked BEFORE the wages-only ambiguous fallback -- same
+    # ordering as the sibling (non-AMT) NOL family: a mixed-population
+    # question ("$X wages, $Y business income...") naturally satisfies
+    # the wages-only ambiguous detector too (it doesn't require ongoing-
+    # business EXCLUSION vocabulary, only the ABSENCE of closed-business
+    # language), so mixed's own specific compute path must get a chance
+    # to fire first or it would be silently shadowed by the generic
+    # ambiguous fallback.
+    amt_nol_mixed_result = _income_amt_nol_mixed_answer(conn, question, base)
+    if amt_nol_mixed_result:
+        return amt_nol_mixed_result
+
+    missing_amt_nol_mixed_fs_result = _income_amt_nol_mixed_missing_filing_status_answer(question, base)
+    if missing_amt_nol_mixed_fs_result:
+        return missing_amt_nol_mixed_fs_result
+
+    amt_nol_wages_ambiguous_result = _income_amt_nol_wages_ambiguous_answer(question, base)
+    if amt_nol_wages_ambiguous_result:
+        return amt_nol_wages_ambiguous_result
 
     amt_screen_result = _income_amt_screen_answer(conn, question, base)
     if amt_screen_result:
@@ -7619,6 +8018,16 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_amt_itemized_signal,
     income_brackets.detect_amt_itemized_missing_filing_status,
     income_brackets.detect_amt_itemized_out_of_scope,
+    income_brackets.detect_amt_mortgage_signal,
+    income_brackets.detect_amt_mortgage_missing_filing_status,
+    income_brackets.detect_amt_mortgage_out_of_scope,
+    income_brackets.detect_amt_nol_signal,
+    income_brackets.detect_amt_nol_missing_filing_status,
+    income_brackets.detect_amt_nol_wages_signal,
+    income_brackets.detect_amt_nol_wages_missing_filing_status,
+    income_brackets.detect_amt_nol_wages_ambiguous,
+    income_brackets.detect_amt_nol_mixed_signal,
+    income_brackets.detect_amt_nol_mixed_missing_filing_status,
     income_brackets.detect_kiddie_tax_signal,
     income_brackets.detect_kiddie_tax_missing_filing_status,
     income_brackets.detect_kiddie_tax_out_of_scope,

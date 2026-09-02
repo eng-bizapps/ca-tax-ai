@@ -2497,6 +2497,117 @@ ITEMS = [
     ("do i owe california amt if my income is $200,000 and i have itemized deductions of $150,000 including property tax of $150,000, single, and my state income tax was $10,000?",
      {"status": "needs_review", "domain": "income"}),
 
+    # --- AMT MORTGAGE extension (Schedule P (540) Part I Line 4) --
+    # 2026-09-01, continuing the "narrow the AMT general case further"
+    # thread after the ISO and property-tax extensions. Line 4 disallows,
+    # for AMT only, home mortgage interest NOT used to buy, build, or
+    # improve the home (a use-of-proceeds test, unrelated to loan size).
+    # Deliberately does NOT reuse compute_itemized_ca_tax's existing
+    # mortgage_interest_addback vocabulary -- that parameter bundles a
+    # federal-cap-size sub-rule Line 4 does NOT disallow together with
+    # the non-acquisition-debt sub-rule Line 4 DOES disallow; reusing it
+    # verbatim would overstate AMTI. Reuses the SAME parameter/mechanic
+    # for the regular-tax leg (CA doesn't conform to federal's
+    # suspension either), just narrowed to this feature's own stated
+    # figure.
+    #
+    # $250,000 income, $30,000 itemized, $90,000 non-acquisition mortgage
+    # interest, single -> itemized after addback $120,000, taxable_income
+    # $130,000, total_tax $8,528.64; AMTI=$220,000 (below phase-out),
+    # exemption=$92,749, TMT=7%*(220000-92749)=$8,907.57 -> exceeds
+    # regular tax -> owes $378.93. Independently re-verified live against
+    # compute_itemized_ca_tax before locking in, not just hand-computed.
+    ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 378.93}),
+    # $0-owed variant, smaller non-acquisition interest figure.
+    ("how much california amt do i owe with $200,000 in income, $30,000 in itemized deductions, $10,000 in mortgage interest that was not used to buy, build, or improve the home, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # order independence -- found live: extracting the itemized total
+    # BEFORE the mortgage-interest figure (mirroring the property-tax
+    # extension's own extraction order) picked the WRONG figure, because
+    # the qualifying phrase ("...that was not used to buy, build, or
+    # improve...") sits too far (30+ chars) from its own dollar amount
+    # for _amount_near_anchor_edge's window, while sitting numerically
+    # CLOSER to an unrelated itemized-total figure in an earlier clause.
+    # Fixed by extracting mortgage interest FIRST using a separate,
+    # SHORTER extraction-only anchor ("mortgage interest") that sits
+    # right next to its own value in natural phrasing -- see
+    # income_brackets.AMT_MORTGAGE_INTEREST_ANCHOR_TERMS's docstring.
+    ("single, $90,000 in mortgage interest that was not used to buy, build, or improve the home, $30,000 in itemized deductions, how much california amt do i owe with $250,000 in income?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 378.93}),
+    # missing filing status -> specific clarifying message.
+    ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home?",
+     {"status": "needs_review", "domain": "income"}),
+    # OUT OF SCOPE: property tax also mentioned -- this extension doesn't
+    # compose with the property-tax addback or the OTHER itemized
+    # adjustments in the same question.
+    ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home, and $20,000 in property tax, single?",
+     {"status": "needs_review", "domain": "income"}),
+
+    # --- AMT NOL extension (Schedule P (540) Part I Line 16) -- same
+    # date, same thread. A straight add-back of whatever REGULAR-tax NOL
+    # deduction was already claimed this year (verified against FTB's
+    # own 2025 instruction text) -- genuinely simpler than, and NOT to be
+    # confused with, Line 20's separate AMT-NOL-carryover recompute
+    # (needs multi-year AMT-basis tracking; stays out of scope). Wraps
+    # all 3 existing (non-AMT) NOL population variants -- business-only,
+    # wages-only/closed-business, mixed -- via one shared AMTI/exemption/
+    # TMT helper, since amti = taxable_income + nol_deduction is
+    # identical across all three and a no-op in the suspended branch.
+    #
+    # Business-only: $900,000 business income, $400,000 NOL carryover,
+    # single -> not suspended, nol_deduction=$400,000, taxable_income
+    # $494,294, total_tax $44,121.37; AMTI=$894,294, exemption=$0 (fully
+    # phased), TMT=$62,600.58 -> owes $18,479.21. Independently
+    # re-verified live against compute_nol_ca_tax before locking in.
+    ("how much california amt do i owe with $900,000 in business income and a $400,000 NOL carryover, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 18479.21}),
+    # Business-only, SUSPENDED ($900,000 crosses the same-year $1,000,000
+    # suspension threshold at $1,200,000) -- addback is a no-op
+    # (nol_deduction=$0), AMTI=taxable_income unchanged, and the surtax-
+    # inflated regular tax still exceeds TMT -> $0 owed either way.
+    ("how much california amt do i owe with $1,200,000 in business income and a $400,000 NOL carryover, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # missing filing status.
+    ("how much california amt do i owe with $900,000 in business income and a $400,000 NOL carryover?",
+     {"status": "needs_review", "domain": "income"}),
+    # Wages-only/closed-business: $150,000 wages, $60,000 NOL carryover,
+    # closed business, single -> nol_deduction=$60,000, taxable_income
+    # $84,294, total_tax $4,277.98; AMTI=$144,294, exemption=$92,749,
+    # TMT=$3,608.15 -> below regular tax -> $0 owed.
+    ("how much california amt do i owe with $150,000 in wages, a $60,000 NOL carryover, and my business closed, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # Wages-only, positive: $700,000 wages, $500,000 NOL carryover,
+    # closed business, single -> nol_deduction=$500,000, taxable_income
+    # $194,294, total_tax $14,507.98; AMTI=$694,294, exemption phased to
+    # $6,127.50, TMT=$48,171.66 -> owes $33,663.68.
+    ("how much california amt do i owe with $700,000 in wages, a $500,000 NOL carryover, and my business closed, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 33663.68}),
+    # AMBIGUOUS: neither closed-business nor ongoing-business language
+    # stated -- routes to a dedicated clarifying question, mirroring the
+    # existing (non-AMT) wages-only feature's own ambiguity redirect.
+    ("how much california amt do i owe with $700,000 in wages and a $500,000 NOL carryover, single?",
+     {"status": "needs_review", "domain": "income"}),
+    # Mixed (wages + ongoing business): $200,000 wages, $200,000 business
+    # income, $100,000 NOL carryover, single -> not suspended,
+    # nol_deduction=$100,000, taxable_income $294,294, total_tax
+    # $23,807.98; AMTI=$394,294, exemption=$81,127.50, TMT=$21,921.66 ->
+    # below regular tax -> $0 owed. Found live: the wages-only ambiguous
+    # detector doesn't require ongoing-business EXCLUSION vocabulary,
+    # only the ABSENCE of closed-business language -- so this exact
+    # phrasing also satisfies it, and the dispatcher must check the
+    # mixed path FIRST (same ordering already used by the sibling
+    # non-AMT NOL family) or the ambiguous fallback silently shadows it.
+    ("how much california amt do i owe with $200,000 in wages, $200,000 in business income, and a $100,000 NOL carryover, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 0.0}),
+    # Mixed, positive: $300,000 wages, $500,000 business income,
+    # $400,000 NOL carryover, single -> not suspended (modified AGI
+    # $800,000 < $1,000,000), nol_deduction=$400,000, taxable_income
+    # $394,294, total_tax $33,336.13; AMTI=$794,294, exemption=$0 (fully
+    # phased), TMT=$55,600.58 -> owes $22,264.45.
+    ("how much california amt do i owe with $300,000 in wages, $500,000 in business income, and a $400,000 NOL carryover, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 22264.45}),
+
     # --- FTB 3800 kiddie tax on a child's unearned income (Form 540
     # Line 31) -- form540_inventory.py's last remaining deferred_new_
     # engine item, re-examined 2026-08-28 at the user's request via a
