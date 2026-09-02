@@ -1852,6 +1852,158 @@ def _income_isr_penalty_ambiguous_coverage_answer(question: str, base: dict):
     return result
 
 
+def _income_amt_general_answer(conn, question: str, base: dict):
+    """AMT general-case aggregator (Phase 1) -- see income_brackets.
+    compute_amt_general_ca_tax's docstring for the full design and what
+    deliberately doesn't compose yet (NOL, Line 18). Extracts UP TO 7
+    possible anchors; extraction order runs shortest/closest-to-value
+    anchor first, longest/vaguest (itemized_amount) last -- the direct
+    generalization of the mortgage slice's own bug (a long qualifying
+    phrase 30+ chars from its value lost to an unrelated closer figure).
+    Each fact is independently optional: a fact whose VOCABULARY the
+    detect function saw but whose dollar VALUE can't be extracted is
+    simply left None, not an error -- compute_amt_general_ca_tax treats
+    every one of its optional params that way already."""
+    fs = income_brackets.detect_amt_general_signal(question)
+    if not fs:
+        return None
+    amounts = _amt_iso_strip_form_number_phantoms(_amounts(question))
+
+    iso_bargain_element = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_ISO_BARGAIN_ELEMENT_TERMS, amounts)
+    if match is not None:
+        iso_bargain_element = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    k1_541_beneficiary_amount = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_K1_541_TERMS, amounts)
+    if match is not None:
+        k1_541_beneficiary_amount = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    patronage_adjustment = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_PATRONAGE_TERMS, amounts)
+    if match is not None:
+        patronage_adjustment = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    nonacquisition_mortgage_interest = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_MORTGAGE_INTEREST_ANCHOR_TERMS, amounts)
+    if match is not None:
+        nonacquisition_mortgage_interest = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    property_tax_addback = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_ITEMIZED_PROPERTY_TAX_TERMS, amounts)
+    if match is not None:
+        property_tax_addback = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    misc_itemized_expenses = None
+    match = _amount_near_anchor_edge(question, income_brackets.MISC_ITEMIZED_TERMS, amounts)
+    if match is not None:
+        misc_itemized_expenses = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    itemized_amount = None
+    match = _amount_near_anchor_edge(question, income_brackets.AMT_ITEMIZED_TERMS, amounts)
+    if match is not None:
+        itemized_amount = match[0]
+        amounts = _remove_amount_span(amounts, match)
+
+    others = [a for a, _, _ in amounts]
+    if len(others) != 1:
+        return None
+    income_amount = others[0]
+
+    calc = income_brackets.compute_amt_general_ca_tax(
+        conn, income_amount, fs, itemized_amount=itemized_amount,
+        property_tax_addback=property_tax_addback,
+        nonacquisition_mortgage_interest=nonacquisition_mortgage_interest,
+        misc_itemized_expenses=misc_itemized_expenses,
+        iso_bargain_element=iso_bargain_element,
+        k1_541_beneficiary_amount=k1_541_beneficiary_amount,
+        patronage_adjustment=patronage_adjustment)
+    if not calc:
+        return None
+
+    label = income_brackets.FILING_STATUS_LABELS[fs]
+    facts_used = []
+    if itemized_amount is not None:
+        facts_used.append(f"${itemized_amount:,.2f} in itemized deductions")
+    if property_tax_addback is not None:
+        facts_used.append(f"a ${property_tax_addback:,.2f} property tax addback")
+    if nonacquisition_mortgage_interest is not None:
+        facts_used.append(f"a ${nonacquisition_mortgage_interest:,.2f} non-acquisition mortgage interest addback")
+    if misc_itemized_expenses is not None:
+        facts_used.append(f"${misc_itemized_expenses:,.2f} in miscellaneous itemized expenses")
+    if iso_bargain_element is not None:
+        facts_used.append(f"a ${iso_bargain_element:,.2f} ISO bargain element")
+    if k1_541_beneficiary_amount is not None:
+        facts_used.append(f"a ${k1_541_beneficiary_amount:,.2f} Schedule K-1 (541) beneficiary AMT adjustment")
+    if patronage_adjustment is not None:
+        facts_used.append(f"a ${patronage_adjustment:,.2f} cooperative patronage AMT adjustment")
+    facts_text = ", ".join(facts_used[:-1]) + (" and " + facts_used[-1] if len(facts_used) > 1 else facts_used[0])
+
+    result = {**base, "status": "answered", "category": "amt_general",
+              "amount": income_amount, "tax": calc["amt_owed"],
+              "citation": income_brackets.AMT_GENERAL_CITATION,
+              "source_url": income_brackets.AMT_SCREEN_SOURCE_URL}
+    if calc["amt_owed"] <= 0:
+        result["answer_text"] = (
+            f"Assuming ${income_amount:,.2f} in California income, {facts_text}, and filing status "
+            f"{label}: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} "
+            f"AMTI minus a ${calc['exemption']:,.2f} exemption), which is below your regular "
+            f"California tax of ${calc['regular_tax']:,.2f} -- you do NOT owe California "
+            f"Alternative Minimum Tax ({income_brackets.AMT_GENERAL_CITATION}). This composes the "
+            "facts you stated but assumes no OTHER AMT preference items (passive activity, "
+            "depreciation, private activity bonds, NOL, or similar) and no SALT/charitable/casualty-"
+            "loss itemized adjustments beyond what you stated."
+        )
+        return result
+    result["answer_text"] = (
+        f"Assuming ${income_amount:,.2f} in California income, {facts_text}, and filing status "
+        f"{label}: your Tentative Minimum Tax is ${calc['tmt']:,.2f} (7.0% of ${calc['amti']:,.2f} "
+        f"AMTI minus a ${calc['exemption']:,.2f} exemption), which EXCEEDS your regular California "
+        f"tax of ${calc['regular_tax']:,.2f} -- you owe an estimated ${calc['amt_owed']:,.2f} in "
+        f"California Alternative Minimum Tax ({income_brackets.AMT_GENERAL_CITATION}). This "
+        "composes the facts you stated but assumes no OTHER AMT preference items beyond them -- "
+        "consult Schedule P (540) or a tax professional to confirm."
+    )
+    return result
+
+
+def _income_amt_general_missing_filing_status_answer(question: str, base: dict):
+    if not income_brackets.detect_amt_general_missing_filing_status(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To check your combined California AMT exposure, I need your filing status: single, "
+        "married filing jointly, married filing separately, head of household, or qualifying "
+        "surviving spouse. Please also restate your California income and the AMT facts you "
+        "mentioned (ISO bargain element, itemized deductions plus property tax/mortgage-interest/"
+        "misc-itemized addbacks, a K-1 (541) beneficiary adjustment, and/or a cooperative "
+        "patronage adjustment).")
+    return result
+
+
+def _income_amt_general_out_of_scope_answer(question: str, base: dict):
+    """Specific clarifying message when 2+ (or a singleton-eligible)
+    general-case fact is present alongside SALT/charitable/SALT-cap/
+    casualty-loss/the old undifferentiated mortgage phrasing -- this
+    aggregator doesn't compose with those yet."""
+    if not income_brackets.detect_amt_general_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant's combined AMT check doesn't yet compose with a SALT removal, the "
+        "generic mortgage-interest-addback phrasing, a charitable contribution cap, a SALT-cap "
+        "addback, or a casualty loss adjustment in the same question. Please consult Schedule P "
+        "(540)'s full worksheet, or a tax professional, for an accurate figure."
+    )
+    return result
+
+
 def _income_amt_screen_answer(conn, question: str, base: dict):
     """California AMT "screen" (Schedule P (540), Form 540 Line 61) --
     see income_brackets.compute_amt_screen_ca_tax's docstring for why
@@ -1942,7 +2094,10 @@ def _amt_iso_strip_form_number_phantoms(amounts):
     # would otherwise misparse as dollar amounts if a user's question
     # happens to include that phrasing. Same collision class found 10+
     # times this session, fixed proactively before any live test.
-    return [(a, s, e) for a, s, e in amounts if a not in (540.0, 61.0)]
+    # 541.0 added for the general-case aggregator's "K-1 (541)" fact --
+    # same phantom-digit class, extended proactively rather than found
+    # live, matching this codebase's established discipline.
+    return [(a, s, e) for a, s, e in amounts if a not in (540.0, 61.0, 541.0)]
 
 
 def _income_amt_iso_answer(conn, question: str, base: dict):
@@ -6506,9 +6661,20 @@ def _income_k1_fallback_answer(question: str, base: dict):
     if that path also declines, the generic wage-only bracket path) and
     risk a confidently wrong answer about the wrong taxpayer -- the entity
     itself, not the individual -- the same bug class as nonresident tax
-    Phase 2's fallback fix."""
+    Phase 2's fallback fix.
+
+    AMT_SCREEN_TERMS excluded too, added alongside the AMT general-case
+    aggregator's K-1 (541) fact: unlike the two dispatchers above (which
+    check K1_COMPLEXITY_EXCLUDE), this catch-all previously had NO
+    exclusion logic at all -- it intercepted ANY K1_TRIGGERS match
+    unconditionally, so it swallowed AMT+K-1(541) questions even after
+    the K1_COMPLEXITY_EXCLUDE fix let the two dispatchers above correctly
+    decline. Verified live this second interception was real, not just
+    a theoretical gap, before fixing it."""
     q = question.lower()
     if not any(t in q for t in income_brackets.K1_TRIGGERS):
+        return None
+    if any(t in q for t in income_brackets.AMT_SCREEN_TERMS):
         return None
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
@@ -7351,6 +7517,26 @@ def _answer_income(conn, question: str, compose: bool, qv, remembered_exemption_
     if isr_penalty_ambiguous_result:
         return isr_penalty_ambiguous_result
 
+    # AMT general-case aggregator checked FIRST, before every narrow AMT
+    # slice -- load-bearing specifically because the 3 TERMINAL out-of-
+    # scope redirects further down (itemized/mortgage/screen) are what
+    # actually swallow a multi-fact question today; the general path
+    # must run before those three or a combined question never reaches
+    # it. Checking it before the 5 narrow slices themselves is a no-op
+    # for correctness (each narrow slice's own signal already declines
+    # on 2+-fact combinations), but is the simplest correct placement.
+    amt_general_result = _income_amt_general_answer(conn, question, base)
+    if amt_general_result:
+        return amt_general_result
+
+    missing_amt_general_fs_result = _income_amt_general_missing_filing_status_answer(question, base)
+    if missing_amt_general_fs_result:
+        return missing_amt_general_fs_result
+
+    amt_general_out_of_scope_result = _income_amt_general_out_of_scope_answer(question, base)
+    if amt_general_out_of_scope_result:
+        return amt_general_out_of_scope_result
+
     # AMT ISO extension checked BEFORE the base AMT screen below -- an ISO-
     # exercise question satisfies both this feature's own trigger AND the
     # base screen's own out-of-scope exclusion (which defers to this
@@ -8009,6 +8195,9 @@ _INCOME_SIGNAL_CHECKS = (
     income_brackets.detect_isr_penalty_missing_filing_status,
     income_brackets.detect_isr_penalty_out_of_scope,
     income_brackets.detect_isr_penalty_ambiguous_coverage,
+    income_brackets.detect_amt_general_signal,
+    income_brackets.detect_amt_general_missing_filing_status,
+    income_brackets.detect_amt_general_out_of_scope,
     income_brackets.detect_amt_screen_signal,
     income_brackets.detect_amt_screen_missing_filing_status,
     income_brackets.detect_amt_screen_out_of_scope,

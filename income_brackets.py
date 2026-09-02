@@ -566,6 +566,16 @@ K1_COMPLEXITY_EXCLUDE = {
     # 24j), same reasoning as the foreign earned income exclusion above.
     "foreign housing deduction", "housing deduction from form 2555",
     "form 2555 housing deduction", "housing deduction under form 2555",
+    # added alongside the AMT general-case aggregator's K-1 (541) fact:
+    # detect_k1_signal (this feature) requires a COMPUTE_TRIGGERS phrase,
+    # but the AMT slices deliberately don't -- so a natural combined
+    # question ("how much tax do I owe... K-1 (541)... ISO...") would
+    # otherwise be silently intercepted HERE (this dispatcher runs
+    # before the entire AMT block) and answered as an unrelated K-1-only
+    # computation, never reaching AMT logic at all. Verified live this
+    # collision is real, not hypothetical, before fixing it.
+    "alternative minimum tax", "schedule p (540)", "tentative minimum tax",
+    "california amt",
 }
 
 # Trust/estate K-1s use FTB's optional simplified reporting for GRANTOR
@@ -5950,6 +5960,219 @@ def compute_amt_nol_mixed_ca_tax(conn, wages: float, business_income: float, nol
     return _amt_nol_addback(
         compute_nol_mixed_ca_tax(conn, wages, business_income, nol_carryover_amount, filing_status, tax_year),
         filing_status)
+
+
+# --- AMT GENERAL CASE, PHASE 1: a composable aggregator -- Schedule P
+# (540)'s "general case" row has stayed deferred_new_engine through 4
+# narrowing passes (ISO, property tax, mortgage interest, NOL), each
+# firing ALONE -- the instant a question mentions a second slice's
+# vocabulary, both decline. This fixes that: a single new feature that
+# lets the already-derived facts (ISO bargain element, property tax,
+# non-acquisition mortgage interest) combine freely in one question,
+# PLUS accepts a directly-stated adjustment figure for 2 more Schedule P
+# lines the real form itself never derives either -- nearly every Part I
+# line is just a number the taxpayer transcribes from their own
+# worksheet/K-1/1099, not something Schedule P computes from scratch.
+# Same "trust an already-computed input" precedent already shipped for
+# the PTE Elective Tax Credit (K-1-sourced credit figure) and the Other
+# State Tax Credit (stated other-state-tax-paid figure).
+#
+# Composable in this pass: iso_bargain_element (orthogonal); itemized_
+# amount + property_tax_addback (already-derived); itemized_amount +
+# nonacquisition_mortgage_interest (already-derived); itemized_amount +
+# misc_itemized_expenses (NEW, Schedule P Line 5 -- compute_itemized_ca_
+# tax already computes the floored reinstatement whenever this param is
+# passed; Line 5 just adds that same value to AMTI, since misc. itemized
+# deductions are fully disallowed for AMT, same "add back a fully-
+# disallowed-for-AMT deduction" pattern already shipped for property
+# tax); k1_541_beneficiary_amount (NEW, Schedule P Line 12 -- FTB's own
+# text: "Enter the amount from Schedule K-1 (541), line 12a", a pure
+# pass-through figure, no worksheet); patronage_adjustment (NEW,
+# Schedule P Line 13h -- FTB's own text: "Enter... the total AMT
+# patronage dividend... adjustment reported to you by the cooperative",
+# also a pure pass-through figure).
+#
+# Deliberately NOT composed this pass: NOL (the 3 existing NOL functions
+# each compute regular tax from a DIFFERENT income shape -- business-
+# income-only / wages-only / wages+business -- than compute_itemized_ca_
+# tax's income+itemized shape; reconciling that is a separate, bigger
+# design problem, left for a future pass). Schedule P Line 18 (itemized-
+# deduction-limitation addback) was investigated and DELIBERATELY
+# EXCLUDED, not just deferred: this codebase's AMTI model is "regular-
+# tax taxable_income + AMT-disallowed addbacks" (confirmed against
+# compute_amt_itemized_ca_tax's own formula) -- since taxable_income
+# ALREADY has the phased-out (reduced) itemized deduction subtracted,
+# and Line 18 exists because "For AMT, this limitation does not apply"
+# (AMT should get the deduction WITHOUT the phase-out), the correct
+# correction would be to SUBTRACT the phase-out reduction from AMTI
+# (giving back what regular tax's phase-out took away), not ADD it --
+# the opposite of a naive reading of "Line 18 is an addback." This sign
+# question was not resolved confidently against FTB's primary text in
+# the time available, and shipping the wrong sign would be a
+# confidently WRONG AMT computation -- the exact failure mode this
+# project exists to prevent. Left out of this pass entirely; needs a
+# dedicated verification pass (not a naive "+reduction" guess) before
+# ever building it.
+AMT_GENERAL_CITATION = "2025 Schedule P (540), Part I Lines 5, 10, 12, 13h; R&TC Section 17062.1"
+AMT_K1_541_TERMS = {
+    "k-1 (541)", "k-1 541", "541 k-1", "schedule k-1 (541)",
+}
+AMT_PATRONAGE_TERMS = {
+    "patronage adjustment", "patronage dividend", "cooperative patronage",
+}
+# AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS (the base screen's own exclude set)
+# contains ISO's own vocabulary too (so the base screen defers to the
+# ISO extension) -- reusing it unchanged here would make the general
+# aggregator wrongly decline on ISO, one of ITS OWN composable facts.
+# Mirrors AMT_ISO_OTHER_PREFERENCE_EXCLUDE_TERMS's own construction
+# exactly, but defined as its own named constant (not literally reused)
+# to avoid coupling the two features' exclude sets together.
+AMT_GENERAL_PREFERENCE_EXCLUDE_TERMS = AMT_SCREEN_PREFERENCE_EXCLUDE_TERMS - {
+    "incentive stock option", "iso exercise", "exercised stock options",
+}
+# The itemized-family adjustments that STILL aren't composable this pass
+# (SALT removal, the OLD undifferentiated mortgage-addback phrasing,
+# charitable cap, SALT-cap addback, casualty loss) -- deliberately
+# excludes MISC_ITEMIZED_TERMS/AMT_ITEMIZED_PROPERTY_TAX_TERMS/AMT_
+# MORTGAGE_NONACQUISITION_TERMS since those 3 are now in-scope facts,
+# not exclusions, for this feature specifically.
+AMT_GENERAL_OTHER_ADJUSTMENT_EXCLUDE_TERMS = (
+    SALT_TERMS | MORTGAGE_INTEREST_ADDBACK_TERMS | CHARITABLE_TERMS
+    | SALT_CAP_ADDBACK_TERMS | CASUALTY_LOSS_TERMS
+)
+AMT_GENERAL_COMPLEXITY_EXCLUDE = COMPLEXITY_EXCLUDE - {
+    "itemize", "itemized", "itemizing", "k-1", "stock",
+}
+
+
+def _amt_general_has_other_exclusion(q: str) -> bool:
+    if any(t in q for t in AMT_GENERAL_PREFERENCE_EXCLUDE_TERMS):
+        return True
+    if re.search(r"\bnol\b", q) is not None:
+        return True
+    return any(t in q for t in AMT_GENERAL_OTHER_ADJUSTMENT_EXCLUDE_TERMS)
+
+
+def _amt_general_present_fact_types(q: str) -> set:
+    """Which of the 6 composable fact-type anchor vocabularies are
+    present as TEXT (not extracted values -- same convention as every
+    other AMT detect function)."""
+    present = set()
+    if any(t in q for t in AMT_ISO_BARGAIN_ELEMENT_TERMS) or any(t in q for t in AMT_ISO_TERMS):
+        present.add("iso")
+    if any(t in q for t in AMT_K1_541_TERMS):
+        present.add("k1_541")
+    if any(t in q for t in AMT_PATRONAGE_TERMS):
+        present.add("patronage")
+    if any(t in q for t in AMT_MORTGAGE_INTEREST_ANCHOR_TERMS):
+        present.add("mortgage")
+    if any(t in q for t in AMT_ITEMIZED_PROPERTY_TAX_TERMS):
+        present.add("property_tax")
+    if any(t in q for t in MISC_ITEMIZED_TERMS):
+        present.add("misc_itemized")
+    return present
+
+
+# The 3 new fact types aren't owned by any existing single-purpose AMT
+# slice -- misc_itemized_expenses stated alone (with an itemized total,
+# no property tax/mortgage) hits the itemized extension's OWN out-of-
+# scope redirect today (MISC_ITEMIZED_TERMS is in its exclude set), and
+# K-1(541)/patronage alone aren't recognized by anything at all. Both
+# need this general path even as a lone fact.
+AMT_GENERAL_SINGLETON_ELIGIBLE = {"misc_itemized", "k1_541", "patronage"}
+
+
+def _amt_general_base_signal_ok(q: str) -> bool:
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    present = _amt_general_present_fact_types(q)
+    if len(present) < 2 and not (len(present) == 1 and present <= AMT_GENERAL_SINGLETON_ELIGIBLE):
+        return False
+    if _amt_general_has_other_exclusion(q):
+        return False
+    if any(t in q for t in AMT_GENERAL_COMPLEXITY_EXCLUDE):
+        return False
+    return True
+
+
+def detect_amt_general_signal(question: str):
+    q = question.lower()
+    if not _amt_general_base_signal_ok(q):
+        return None
+    return detect_filing_status(question)
+
+
+def detect_amt_general_missing_filing_status(question: str) -> bool:
+    q = question.lower()
+    if not _amt_general_base_signal_ok(q):
+        return False
+    return detect_filing_status(question) is None
+
+
+def detect_amt_general_out_of_scope(question: str) -> bool:
+    """True iff AMT vocabulary + 2+ (or a singleton-eligible) general-
+    case fact is present alongside SALT/charitable/SALT-cap/casualty-
+    loss/the old undifferentiated mortgage phrasing -- routes to a
+    dedicated redirect rather than silently dropping one."""
+    q = question.lower()
+    if not any(t in q for t in AMT_SCREEN_TERMS):
+        return False
+    present = _amt_general_present_fact_types(q)
+    if len(present) < 2 and not (len(present) == 1 and present <= AMT_GENERAL_SINGLETON_ELIGIBLE):
+        return False
+    return any(t in q for t in AMT_GENERAL_OTHER_ADJUSTMENT_EXCLUDE_TERMS)
+
+
+def compute_amt_general_ca_tax(conn, income_amount: float, filing_status: str,
+                                tax_year: int = DEFAULT_TAX_YEAR, itemized_amount: float = None,
+                                property_tax_addback: float = None,
+                                nonacquisition_mortgage_interest: float = None,
+                                misc_itemized_expenses: float = None,
+                                iso_bargain_element: float = None,
+                                k1_541_beneficiary_amount: float = None,
+                                patronage_adjustment: float = None):
+    """Composable AMT general-case aggregator -- see the module note
+    above for exactly what composes and why NOL/Line 18 deliberately
+    don't (yet). Regular tax computed via the UNCHANGED compute_
+    itemized_ca_tax (itemizing) or compute_amt_screen_ca_tax (standard
+    deduction), same reuse discipline as every other AMT slice."""
+    if itemized_amount is not None:
+        base = compute_itemized_ca_tax(
+            conn, income_amount, itemized_amount, filing_status, tax_year,
+            mortgage_interest_addback=nonacquisition_mortgage_interest,
+            misc_itemized_expenses=misc_itemized_expenses)
+        if not base:
+            return None
+        if not base["used_itemized"]:
+            return None
+        amti_base = base["taxable_income"]
+        addbacks = ((property_tax_addback or 0.0) + (nonacquisition_mortgage_interest or 0.0)
+                    + (base.get("misc_reinstated") or 0.0))
+        regular_tax = base["total_tax"]
+    else:
+        base = compute_amt_screen_ca_tax(conn, income_amount, filing_status, tax_year)
+        if not base:
+            return None
+        amti_base = income_amount
+        addbacks = 0.0
+        regular_tax = base["regular_tax"]
+    exemption_base = AMT_EXEMPTION.get(filing_status)
+    phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
+    if exemption_base is None or phaseout_start is None:
+        return None
+    amti = (amti_base + addbacks + (iso_bargain_element or 0.0)
+            + (k1_541_beneficiary_amount or 0.0) + (patronage_adjustment or 0.0))
+    reduction = max(0.0, AMT_EXEMPTION_PHASEOUT_RATE * (amti - phaseout_start))
+    exemption = max(0.0, exemption_base - reduction)
+    tmt = round(AMT_RATE * max(0.0, amti - exemption), 2)
+    amt_owed = round(max(0.0, tmt - regular_tax), 2)
+    return {**base, "amti": amti, "exemption": exemption, "tmt": tmt,
+            "regular_tax": regular_tax, "amt_owed": amt_owed,
+            "property_tax_addback": property_tax_addback,
+            "nonacquisition_mortgage_interest": nonacquisition_mortgage_interest,
+            "iso_bargain_element": iso_bargain_element,
+            "k1_541_beneficiary_amount": k1_541_beneficiary_amount,
+            "patronage_adjustment": patronage_adjustment}
 
 
 # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540

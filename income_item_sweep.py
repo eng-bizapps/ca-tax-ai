@@ -2608,6 +2608,71 @@ ITEMS = [
     ("how much california amt do i owe with $300,000 in wages, $500,000 in business income, and a $400,000 NOL carryover, single?",
      {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 22264.45}),
 
+    # --- AMT GENERAL CASE, PHASE 1: composable aggregator -- 2026-09-01.
+    # Lets the already-derived facts (ISO, property tax, mortgage
+    # interest) combine freely instead of mutually excluding, plus 2 new
+    # trust-the-figure Schedule P lines (12: K-1 (541) beneficiary
+    # passthrough; 5: misc. itemized addback). NOL composition and
+    # Schedule P Line 18 deliberately NOT attempted this pass -- see
+    # income_brackets.py's module note above compute_amt_general_ca_tax.
+    #
+    # ISO + property tax composed (today mutually exclusive without this
+    # feature): $200,000 income, $150,000 itemized (all property tax),
+    # $150,000 ISO bargain element, single -> taxable_income $50,000,
+    # total_tax $1,534.89 (reused from the property-tax-only case);
+    # AMTI=50,000+150,000+150,000=$350,000 (exemption phases to
+    # $92,201), TMT=$18,045.93 -> owes $16,511.04. Independently
+    # re-verified live against compute_itemized_ca_tax before locking in.
+    ("how much california amt do i owe with $200,000 in income, $150,000 in itemized deductions, $150,000 in property tax, and a $150,000 iso bargain element, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 16511.04}),
+    # ISO + mortgage-interest + K-1(541) composed: $250,000 income,
+    # $30,000 itemized, $90,000 non-acq. mortgage interest, $50,000 ISO
+    # bargain element, $30,000 K-1(541) amount, single -> taxable_income
+    # $130,000, total_tax $8,528.64 (reused from the mortgage-only case);
+    # AMTI=130,000+90,000+50,000+30,000=$300,000 (below phase-out, full
+    # $92,749 exemption), TMT=$14,507.57 -> owes $5,978.93.
+    ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home, a $50,000 iso bargain element, and my K-1 (541) shows a $30,000 adjustment, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 5978.93}),
+    # ISO + K-1(541) composed, no itemizing at all (standard-deduction
+    # base, proving composition works without an itemized_amount too):
+    # $200,000 income, $150,000 ISO bargain element, $30,000 K-1(541)
+    # amount, single -> AMTI=200,000+150,000+30,000=$380,000 (exemption
+    # phases to $84,701), TMT=$20,670.93, regular_tax=$14,507.98 (the
+    # already-verified $200k-single standard-deduction figure) -> owes
+    # $6,162.95. Also the live proof that AMT+K-1(541) vocabulary no
+    # longer gets silently intercepted by the unrelated K-1-only-income
+    # feature (a real collision found live: BOTH _income_k1_answer's own
+    # signal gate AND a separate, unconditional _income_k1_fallback_
+    # answer catch-all needed an AMT-vocabulary carve-out -- the fallback
+    # had NO complexity-exclude logic at all before this fix).
+    ("how much california amt do i owe with $200,000 in income, a $150,000 iso bargain element, and my K-1 (541) shows a $30,000 adjustment, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 6162.95}),
+    # Misc-itemized-alone singleton (proves the refined 1-fact gating
+    # rule -- today, misc-itemized stated alone with an itemized total
+    # hits the property-tax extension's own out-of-scope redirect):
+    # $100,000 income, $20,000 itemized, $5,000 misc itemized expenses,
+    # single -> misc floor=$2,000, misc_reinstated=$3,000, taxable_income
+    # $77,000, total_tax $3,599.64; AMTI=77,000+3,000=$80,000 (well below
+    # phase-out) -> TMT=$0.00 -> owes $0.00.
+    ("how much california amt do i owe with $100,000 in income, $20,000 in itemized deductions, and $5,000 in miscellaneous itemized deductions, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 0.0}),
+    # Single-fact regression proof: the EXISTING ISO-only case, verbatim
+    # phrasing and expected tax unchanged -- the general dispatcher must
+    # return None here (only 1 fact, not one of the 3 singleton-eligible
+    # new types) and fall through to the unaffected, pre-existing ISO
+    # dispatcher.
+    ("do i owe california amt with $200,000 income and a $150,000 iso bargain element, single?",
+     {"status": "answered", "domain": "income", "category": "amt_screen", "tax": 3537.95}),
+    # Missing filing status, 2+ facts -> the new dedicated general-case
+    # missing-fs message, not a fall-through to a generic redirect.
+    ("how much california amt do i owe with $200,000 in income, a $150,000 iso bargain element, and my K-1 (541) shows a $30,000 adjustment?",
+     {"status": "needs_review", "domain": "income"}),
+    # Out of scope: 2+ general-case facts alongside a SALT mention -- this
+    # aggregator doesn't compose with SALT/charitable/SALT-cap/casualty-
+    # loss/the old undifferentiated mortgage phrasing yet.
+    ("how much california amt do i owe with $200,000 in income, a $150,000 iso bargain element, my K-1 (541) shows a $30,000 adjustment, and my state income tax was $10,000, single?",
+     {"status": "needs_review", "domain": "income"}),
+
     # --- FTB 3800 kiddie tax on a child's unearned income (Form 540
     # Line 31) -- form540_inventory.py's last remaining deferred_new_
     # engine item, re-examined 2026-08-28 at the user's request via a
