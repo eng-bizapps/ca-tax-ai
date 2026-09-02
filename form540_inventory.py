@@ -299,8 +299,19 @@ ITEMS = [
      "income_item_sweep's full reset+run hit the documented per-day Gemini embed-quota limit at "
      "344/461 graded (zero failures on everything graded) -- the 7 new general-case cases weren't "
      "reached before quota exhaustion, but were independently verified live via direct engine."
-     "answer() calls with exact matches to hand-computed values; re-running income_item_sweep.py "
-     "run (not reset) once quota recovers will pick up exactly where it left off."),
+     "answer() calls with exact matches to hand-computed values. Quota recovered later the same "
+     "session; re-running income_item_sweep.py run (not reset) picked up exactly where it left "
+     "off and surfaced ONE real, useful finding: a PRE-EXISTING mortgage-slice regression case "
+     "('mortgage + property tax together' -> needs_review) was now correctly flagged WRONG, "
+     "because that expectation predates this build -- property tax + mortgage interest composing "
+     "together is exactly what Phase 1 was built to allow. Independently re-verified the new "
+     "answer live (amt_owed=$1,778.93) before updating the test's expected value (not just "
+     "flipping status blindly) -- report() replays STALE cached verdicts from whenever run() last "
+     "executed, so a changed expectation on an already-cached question needs its ONE cache entry "
+     "cleared before a re-run will actually re-grade it fresh, a real quirk of this harness worth "
+     "remembering. Final: all 5 sweeps green -- income_item_sweep 461/461, item_sweep 130/130, "
+     "cross_domain_sweep 16/16, sales_edge_case_sweep 16/16, district_rate_sweep 8/8, zero "
+     "failures anywhere."),
     ("540", "lines", "62", "Behavioral Health Services Tax (formerly Mental Health Services Tax)",
      "addition", "moderate", "FTB 2025 Form 540 Instructions, Line 62",
      "built", "ca_income_tax_bracket",

@@ -2538,11 +2538,23 @@ ITEMS = [
     # missing filing status -> specific clarifying message.
     ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home?",
      {"status": "needs_review", "domain": "income"}),
-    # OUT OF SCOPE: property tax also mentioned -- this extension doesn't
-    # compose with the property-tax addback or the OTHER itemized
-    # adjustments in the same question.
+    # SUPERSEDED 2026-09-01 by the AMT general-case aggregator (Phase 1,
+    # below): this case originally asserted "needs_review" (out of
+    # scope) because the mortgage extension alone doesn't compose with
+    # property tax -- that was correct THEN, but the whole point of the
+    # general-case aggregator is that property tax + mortgage interest
+    # (and others) now DO compose in one question. Found via a full
+    # income_item_sweep re-grade after the aggregator shipped: the old
+    # expectation was flagged WRONG, independently re-verified live
+    # against compute_amt_general_ca_tax before updating (not assumed) --
+    # taxable_income=$130,000, total_tax=$8,528.64 (unchanged regular-tax
+    # leg); AMTI=130,000+20,000(property tax)+90,000(mortgage)=$240,000
+    # (below phase-out, full $92,749 exemption), TMT=$10,307.57 -> owes
+    # $1,778.93. Category is now amt_general, not amt_screen, since the
+    # general aggregator (not the narrow mortgage-only slice) answers
+    # this composed question.
     ("how much california amt do i owe with $250,000 in income, $30,000 in itemized deductions, $90,000 in mortgage interest that was not used to buy, build, or improve the home, and $20,000 in property tax, single?",
-     {"status": "needs_review", "domain": "income"}),
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 1778.93}),
 
     # --- AMT NOL extension (Schedule P (540) Part I Line 16) -- same
     # date, same thread. A straight add-back of whatever REGULAR-tax NOL
