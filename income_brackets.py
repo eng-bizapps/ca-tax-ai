@@ -5996,24 +5996,29 @@ def compute_amt_nol_mixed_ca_tax(conn, wages: float, business_income: float, nol
 # each compute regular tax from a DIFFERENT income shape -- business-
 # income-only / wages-only / wages+business -- than compute_itemized_ca_
 # tax's income+itemized shape; reconciling that is a separate, bigger
-# design problem, left for a future pass). Schedule P Line 18 (itemized-
-# deduction-limitation addback) was investigated and DELIBERATELY
-# EXCLUDED, not just deferred: this codebase's AMTI model is "regular-
-# tax taxable_income + AMT-disallowed addbacks" (confirmed against
-# compute_amt_itemized_ca_tax's own formula) -- since taxable_income
-# ALREADY has the phased-out (reduced) itemized deduction subtracted,
-# and Line 18 exists because "For AMT, this limitation does not apply"
-# (AMT should get the deduction WITHOUT the phase-out), the correct
-# correction would be to SUBTRACT the phase-out reduction from AMTI
-# (giving back what regular tax's phase-out took away), not ADD it --
-# the opposite of a naive reading of "Line 18 is an addback." This sign
-# question was not resolved confidently against FTB's primary text in
-# the time available, and shipping the wrong sign would be a
-# confidently WRONG AMT computation -- the exact failure mode this
-# project exists to prevent. Left out of this pass entirely; needs a
-# dedicated verification pass (not a naive "+reduction" guess) before
-# ever building it.
-AMT_GENERAL_CITATION = "2025 Schedule P (540), Part I Lines 5, 10, 12, 13h; R&TC Section 17062.1"
+# design problem, left for a future pass).
+#
+# Schedule P Line 18 (itemized-deduction-limitation addback) -- INITIALLY
+# excluded from Phase 1 over an unresolved sign question, then RESOLVED
+# and added the same session: this codebase's AMTI model is "regular-tax
+# taxable_income + AMT-disallowed addbacks" (confirmed against compute_
+# amt_itemized_ca_tax's own formula) -- since taxable_income ALREADY has
+# the phased-out (reduced) itemized deduction subtracted, and Line 18
+# exists because "For AMT, this limitation does not apply" (AMT should
+# get the deduction WITHOUT the phase-out), the correct correction is to
+# SUBTRACT the phase-out reduction from AMTI (giving back what regular
+# tax's phase-out took away), not ADD it -- the opposite of a naive
+# reading of "Line 18 is an addback." CONFIRMED, not just re-derived, by
+# viewing the ACTUAL FORM IMAGE (plain-text PDF extraction loses this
+# entirely): Line 18's entry box is parenthesized "(  )" on the form,
+# the same negative-entry convention as Line 6 (property tax refund) and
+# Line 17 (AMTI exclusion), both also parenthesized -- Line 19's
+# "Combine line 14 through line 18" arithmetic then subtracts it via
+# that negative sign. Auto-derived from compute_itemized_ca_tax's
+# existing phaseout["reduction"] output whenever a phase-out applies --
+# no new user-facing question needed, same "pull from data already
+# computed" pattern as Line 5's misc_reinstated.
+AMT_GENERAL_CITATION = "2025 Schedule P (540), Part I Lines 5, 10, 12, 13h, 18; R&TC Section 17062.1"
 AMT_K1_541_TERMS = {
     "k-1 (541)", "k-1 541", "541 k-1", "schedule k-1 (541)",
 }
@@ -6056,7 +6061,15 @@ def _amt_general_has_other_exclusion(q: str) -> bool:
 def _amt_general_present_fact_types(q: str) -> set:
     """Which of the 6 composable fact-type anchor vocabularies are
     present as TEXT (not extracted values -- same convention as every
-    other AMT detect function)."""
+    other AMT detect function). Deliberately does NOT count bare
+    "itemized deductions" mention as its own fact type here -- doing so
+    would make every EXISTING single-fact narrow-slice case (which
+    necessarily also mentions "itemized deductions" as the prerequisite
+    for stating property tax/mortgage interest) count as 2+ facts and
+    get rerouted to this aggregator, changing their category and
+    breaking their own regression expectations for no reason. See
+    _amt_general_base_signal_ok's own separate "itemizing alone" check
+    for how the Line 18-only singleton case is handled instead."""
     present = set()
     if any(t in q for t in AMT_ISO_BARGAIN_ELEMENT_TERMS) or any(t in q for t in AMT_ISO_TERMS):
         present.add("iso")
@@ -6082,11 +6095,31 @@ def _amt_general_present_fact_types(q: str) -> set:
 AMT_GENERAL_SINGLETON_ELIGIBLE = {"misc_itemized", "k1_541", "patronage"}
 
 
+def _amt_general_qualifies(present: set, q: str) -> bool:
+    """True iff the set of present fact types (from _amt_general_
+    present_fact_types, which deliberately does NOT count bare
+    "itemized deductions" mention as its own type) is enough to route
+    to the general aggregator: 2+ distinct facts, a lone singleton-
+    eligible fact, OR itemizing mentioned with NONE of the 6 other
+    facts present -- the Line-18-only case (auto-derived itemized-
+    deduction-limitation addback applies whenever itemizing crosses the
+    AGI phase-out threshold, even with no other stated preference
+    item -- without this branch, Line 18 could never actually fire on
+    its own, only ever as a side effect of some other stated fact)."""
+    if len(present) >= 2:
+        return True
+    if len(present) == 1 and present <= AMT_GENERAL_SINGLETON_ELIGIBLE:
+        return True
+    if len(present) == 0 and any(t in q for t in AMT_ITEMIZED_TERMS):
+        return True
+    return False
+
+
 def _amt_general_base_signal_ok(q: str) -> bool:
     if not any(t in q for t in AMT_SCREEN_TERMS):
         return False
     present = _amt_general_present_fact_types(q)
-    if len(present) < 2 and not (len(present) == 1 and present <= AMT_GENERAL_SINGLETON_ELIGIBLE):
+    if not _amt_general_qualifies(present, q):
         return False
     if _amt_general_has_other_exclusion(q):
         return False
@@ -6110,15 +6143,16 @@ def detect_amt_general_missing_filing_status(question: str) -> bool:
 
 
 def detect_amt_general_out_of_scope(question: str) -> bool:
-    """True iff AMT vocabulary + 2+ (or a singleton-eligible) general-
-    case fact is present alongside SALT/charitable/SALT-cap/casualty-
-    loss/the old undifferentiated mortgage phrasing -- routes to a
-    dedicated redirect rather than silently dropping one."""
+    """True iff AMT vocabulary + a qualifying general-case fact
+    combination (see _amt_general_qualifies) is present alongside SALT/
+    charitable/SALT-cap/casualty-loss/the old undifferentiated mortgage
+    phrasing -- routes to a dedicated redirect rather than silently
+    dropping one."""
     q = question.lower()
     if not any(t in q for t in AMT_SCREEN_TERMS):
         return False
     present = _amt_general_present_fact_types(q)
-    if len(present) < 2 and not (len(present) == 1 and present <= AMT_GENERAL_SINGLETON_ELIGIBLE):
+    if not _amt_general_qualifies(present, q):
         return False
     return any(t in q for t in AMT_GENERAL_OTHER_ADJUSTMENT_EXCLUDE_TERMS)
 
@@ -6132,10 +6166,25 @@ def compute_amt_general_ca_tax(conn, income_amount: float, filing_status: str,
                                 k1_541_beneficiary_amount: float = None,
                                 patronage_adjustment: float = None):
     """Composable AMT general-case aggregator -- see the module note
-    above for exactly what composes and why NOL/Line 18 deliberately
-    don't (yet). Regular tax computed via the UNCHANGED compute_
-    itemized_ca_tax (itemizing) or compute_amt_screen_ca_tax (standard
-    deduction), same reuse discipline as every other AMT slice."""
+    above for exactly what composes and why NOL deliberately doesn't
+    (yet). Regular tax computed via the UNCHANGED compute_itemized_ca_
+    tax (itemizing) or compute_amt_screen_ca_tax (standard deduction),
+    same reuse discipline as every other AMT slice.
+
+    Schedule P (540) Line 18 (itemized-deduction-limitation addback) is
+    auto-derived here, no new user-facing question needed -- same "pull
+    from data already computed" pattern as Line 5's misc_reinstated.
+    Confirmed via the ACTUAL FORM IMAGE (plain-text PDF extraction loses
+    this: it's a visual "(  )" parenthesized-entry convention, not
+    stated in the prose instructions) that Line 18 is entered as a
+    NEGATIVE amount within Line 19's "Combine line 14 through line 18"
+    arithmetic -- same convention as Line 6 (property tax refund) and
+    Line 17 (AMTI exclusion), both also parenthesized on the form. This
+    SUBTRACTS the phase-out reduction from AMTI (giving back the
+    itemized deduction regular tax's AGI-based phase-out took away,
+    since "For AMT, this limitation does not apply" per FTB's own Line
+    18 text) -- the opposite of a naive "Schedule P lines are additions"
+    reading, which would have overstated AMTI."""
     if itemized_amount is not None:
         base = compute_itemized_ca_tax(
             conn, income_amount, itemized_amount, filing_status, tax_year,
@@ -6146,8 +6195,9 @@ def compute_amt_general_ca_tax(conn, income_amount: float, filing_status: str,
         if not base["used_itemized"]:
             return None
         amti_base = base["taxable_income"]
+        itemized_limitation_addback = -base["phaseout"]["reduction"] if base.get("phaseout") else None
         addbacks = ((property_tax_addback or 0.0) + (nonacquisition_mortgage_interest or 0.0)
-                    + (base.get("misc_reinstated") or 0.0))
+                    + (base.get("misc_reinstated") or 0.0) + (itemized_limitation_addback or 0.0))
         regular_tax = base["total_tax"]
     else:
         base = compute_amt_screen_ca_tax(conn, income_amount, filing_status, tax_year)
@@ -6156,6 +6206,7 @@ def compute_amt_general_ca_tax(conn, income_amount: float, filing_status: str,
         amti_base = income_amount
         addbacks = 0.0
         regular_tax = base["regular_tax"]
+        itemized_limitation_addback = None
     exemption_base = AMT_EXEMPTION.get(filing_status)
     phaseout_start = AMT_EXEMPTION_PHASEOUT_START.get(filing_status)
     if exemption_base is None or phaseout_start is None:
@@ -6172,7 +6223,8 @@ def compute_amt_general_ca_tax(conn, income_amount: float, filing_status: str,
             "nonacquisition_mortgage_interest": nonacquisition_mortgage_interest,
             "iso_bargain_element": iso_bargain_element,
             "k1_541_beneficiary_amount": k1_541_beneficiary_amount,
-            "patronage_adjustment": patronage_adjustment}
+            "patronage_adjustment": patronage_adjustment,
+            "itemized_limitation_addback": itemized_limitation_addback}
 
 
 # --- Underpayment of Estimated Tax Penalty, SHORT METHOD ONLY (Form 540

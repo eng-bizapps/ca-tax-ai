@@ -2685,6 +2685,57 @@ ITEMS = [
     ("how much california amt do i owe with $200,000 in income, a $150,000 iso bargain element, my K-1 (541) shows a $30,000 adjustment, and my state income tax was $10,000, single?",
      {"status": "needs_review", "domain": "income"}),
 
+    # --- Schedule P Line 18 (itemized-deduction-limitation addback) --
+    # 2026-09-01, same day, added AFTER the sign question (naive "+
+    # reduction" vs. correct "-reduction") was DEFINITIVELY resolved by
+    # viewing the actual FTB PDF form image (plain-text extraction loses
+    # the parenthesized "(  )" negative-entry convention entirely): Line
+    # 18 subtracts the itemized-deduction phase-out reduction from AMTI,
+    # confirmed via compute_itemized_deduction_phaseout's own already-
+    # verified reduction figure. Auto-derived, no new question needed --
+    # same "pull from data already computed" pattern as Line 5.
+    #
+    # Line 18 ALONE, crossing the phase-out threshold, no other stated
+    # preference item: $300,000 income, $100,000 itemized, single ->
+    # reduction=min(80,000, (300,000-252,203)*.06=$2,867.82)=$2,867.82,
+    # reduced_itemized=$97,132.18, taxable_income=$202,867.82,
+    # total_tax=$15,305.35; AMTI=taxable_income-2,867.82=$200,000.00
+    # exactly (income-itemized_amount, confirming the subtraction fully
+    # cancels the phase-out's effect, matching FTB's own "this
+    # limitation does not apply" text) -- exemption=$92,749 (below
+    # phase-out start), TMT=$7,507.57 -> below the phase-out-inflated
+    # regular tax -> owes $0.00. A REAL gating gap found live and fixed
+    # in the same pass: without a dedicated "itemizing alone" trigger,
+    # this case (no property tax/mortgage/ISO/K-1/patronage stated)
+    # never reached the general aggregator at all -- Line 18 would have
+    # been unreachable except as a side effect of some OTHER stated
+    # fact. Fixed by adding a 3rd qualifying condition (itemizing
+    # mentioned + zero of the other 6 facts) alongside the existing
+    # 2+-facts and singleton-eligible-fact rules.
+    ("how much california amt do i owe with $300,000 in income and $100,000 in itemized deductions, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 0.0}),
+    # Line 18 + property tax + ISO all composed together, still crossing
+    # the phase-out: $300,000 income, $100,000 itemized, $80,000
+    # property tax, $100,000 ISO bargain element, single ->
+    # taxable_income=$202,867.82 (same phase-out math as above),
+    # total_tax=$15,305.35; AMTI=202,867.82-2,867.82+80,000+100,000=
+    # $380,000.00, exemption phases to $84,701, TMT=$20,670.93 ->
+    # exceeds regular tax -> owes $5,365.58. Proves Line 18 composes
+    # correctly alongside other facts, not just standalone.
+    ("how much california amt do i owe with $300,000 in income, $100,000 in itemized deductions, $80,000 in property tax, and a $100,000 iso bargain element, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 5365.58}),
+    # Itemizing alone, BELOW the phase-out threshold -- no addback
+    # applies (phaseout=None), proving the "itemizing alone" trigger
+    # doesn't misfire or error when there's nothing for Line 18 to do.
+    ("how much california amt do i owe with $100,000 in income and $20,000 in itemized deductions, single?",
+     {"status": "answered", "domain": "income", "category": "amt_general", "tax": 0.0}),
+    # Missing filing status, itemizing alone.
+    ("how much california amt do i owe with $300,000 in income and $100,000 in itemized deductions?",
+     {"status": "needs_review", "domain": "income"}),
+    # Out of scope: itemizing alone alongside a SALT mention.
+    ("how much california amt do i owe with $300,000 in income, $100,000 in itemized deductions, and my state income tax was $10,000, single?",
+     {"status": "needs_review", "domain": "income"}),
+
     # --- FTB 3800 kiddie tax on a child's unearned income (Form 540
     # Line 31) -- form540_inventory.py's last remaining deferred_new_
     # engine item, re-examined 2026-08-28 at the user's request via a
