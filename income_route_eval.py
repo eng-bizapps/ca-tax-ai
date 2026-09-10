@@ -28,7 +28,7 @@ import income_db as db
 CACHE = os.path.join(os.path.dirname(__file__), "income_route_eval_results.json")
 
 # (question, expected taxable True/False/None, topic_key or None). None
-# expected == out-of-scope, must defer (income OR sales OR unrelated).
+# expected == out-of-scope, must defer (income OR sales OR property OR unrelated).
 PROBES = [
     # --- in-scope: paraphrases of all 9 loaded topics ---
     ("is unemployment compensation taxable in california", False, "unemployment_compensation"),
@@ -65,6 +65,15 @@ PROBES = [
     # --- out-of-scope: must defer (sales-tax-flavored, unrelated, or generic) ---
     ("is furniture taxable in california", None, None),
     ("is cannabis taxable in california", None, None),
+    # NOTE 2026-09-07: this exact phrase ("property tax rate") is now real,
+    # answerable content for the property-tax domain (Ring 4) -- it hits
+    # engine._property_local_rate_out_of_scope_answer's own dedicated
+    # disclosure (local rates vary by tax-rate-area, not centrally
+    # ingested). Still correctly None/out-of-scope HERE specifically
+    # because this file only exercises _income_route_candidates/_income_
+    # lookup in isolation, never the full engine._answer() routing chain
+    # property tax hooks into -- the income-only router this file tests
+    # correctly keeps deferring, unaffected by the new domain's existence.
     ("what is the property tax rate in los angeles", None, None),
     ("how do I register my car with the dmv", None, None),
     ("what is the weather like in sacramento", None, None),

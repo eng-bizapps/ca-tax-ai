@@ -95,6 +95,14 @@ PROBES = [
     # --- damaged goods ---
     ("If goods are destroyed in transit before delivery, is the sale taxable?", False, "damaged"),
     # --- likely out-of-scope (should be Needs review) ---
+    # NOTE 2026-09-07: property tax liability IS now a built domain (Ring
+    # 4, property_tax.py) -- this specific question stays correctly
+    # out-of-scope because it states no purchase price/year at all
+    # (detect_property_estimate_signal requires purchase-context
+    # vocabulary like "bought"/"purchased"), so it's unaffected. See
+    # income_item_sweep.py / a dedicated property regression sweep for
+    # cases that DO exercise the new coverage, e.g. "How much California
+    # property tax will I owe on a house I bought for $500,000 in 2015?"
     ("How much is California property tax on my house?", None, "out-of-scope"),
     ("What is the California income tax rate?", None, "out-of-scope"),
 ]

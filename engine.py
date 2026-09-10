@@ -24,6 +24,8 @@ import income_credits
 import income_eligibility
 import income_nonresident
 import income_db
+import property_db
+import property_tax
 import district_rates
 import local_rates
 
@@ -8117,6 +8119,569 @@ def _effective_rate(conn, taxable, base_rate, question, location):
     return base_rate, "statewide base 7.25% (give a city/county for the local rate)", None
 
 
+# --- Ring 4: California property tax (county assessor/BOE) -- a genuinely
+# new tax DOMAIN, not a feature within income or sales tax. See
+# property_tax.py's module docstring for the full scope (3 tractable
+# slices: core Prop 13 estimate, Disabled Veterans' Exemption, Prop 19
+# base-year-value transfer) and property_tax_inventory.py for what's
+# deliberately excluded and why.
+#
+# Vocabulary-collision design, verified directly against the actual code:
+# AMT_ITEMIZED_PROPERTY_TAX_TERMS/SALT_CAP_ADDBACK_TERMS already use the
+# bare bigram "property tax" -- but BOTH only fire when the question ALSO
+# contains AMT_SCREEN_TERMS/ITEMIZED_TERMS (an itemizing/AMT context). No
+# existing income detector fires on bare property-tax-LIABILITY vocabulary
+# alone, so the property detectors below just need to defer (not compute)
+# when the question ALSO looks like an itemized-deduction addback question
+# -- treating that co-occurrence as "this is about a stated property-tax
+# FIGURE on an income return," not a liability question, and letting the
+# already-correct income path handle it instead of guessing.
+PROPERTY_ESTIMATE_TERMS = {"property tax", "property taxes", "real estate tax", "real estate taxes"}
+PROPERTY_PURCHASE_CONTEXT_TERMS = {
+    "bought", "purchased", "purchase price", "buy a house", "bought a house",
+    "bought a home", "assessed value",
+}
+PROPERTY_ITEMIZED_COLLISION_EXCLUDE = (
+    income_brackets.AMT_SCREEN_TERMS | income_brackets.ITEMIZED_TERMS
+    | income_brackets.SALT_TERMS | income_brackets.SALT_CAP_ADDBACK_TERMS
+)
+DV_EXEMPTION_TERMS = {
+    "disabled veteran", "disabled veterans", "disabled veteran's",
+    "veteran's exemption", "veterans exemption", "veteran property tax exemption",
+}
+PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS = {
+    "bought", "purchased", "purchase price", "bought my house for", "bought my home for",
+    "purchased my house for", "purchased my home for", "bought a house for", "bought a home for",
+}
+PROPERTY_INCOME_ANCHOR_TERMS = {"household income", "my income is", "income of", "income is"}
+PROP19_TERMS = {
+    "prop 19", "proposition 19", "base year value transfer",
+    "transfer my base year value", "transfer my property tax base",
+    "transfer my assessment",
+}
+LOCAL_RATE_OUT_OF_SCOPE_TERMS = {"property tax rate", "tax rate area", "tax rate areas"}
+MELLO_ROOS_OUT_OF_SCOPE_TERMS = {"mello-roos", "mello roos", "cfd", "community facilities district",
+                                 "special assessment", "special tax district"}
+PROP8_DECLINE_OUT_OF_SCOPE_TERMS = {"prop 8", "proposition 8", "decline in value", "declined in value"}
+PARENT_CHILD_EXCLUSION_OUT_OF_SCOPE_TERMS = {
+    "parent-child exclusion", "parent child exclusion", "inherited my parents",
+    "inherited from my parents", "transferred from my parents", "grandparent-grandchild",
+}
+
+
+def detect_property_estimate_signal(question: str) -> bool:
+    q = question.lower()
+    if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
+        return False
+    if not any(t in q for t in PROPERTY_ESTIMATE_TERMS):
+        return False
+    return any(t in q for t in PROPERTY_PURCHASE_CONTEXT_TERMS)
+
+
+def detect_property_estimate_missing_fact(question: str) -> bool:
+    """A recognizable property-liability question (property-tax vocabulary
+    + purchase context), but missing purchase price and/or purchase year --
+    mirrors income_brackets.detect_compute_missing_filing_status's role."""
+    q = question.lower()
+    if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
+        return False
+    if not any(t in q for t in PROPERTY_ESTIMATE_TERMS):
+        return False
+    if not any(t in q for t in PROPERTY_PURCHASE_CONTEXT_TERMS):
+        return False
+    amounts = _amounts(question)
+    years = _property_purchase_year(question)
+    return len(amounts) < 1 or years is None
+
+
+def _property_purchase_year_match(question: str):
+    """A bare 4-digit year (1900-2099) -- returns the re.Match (not just
+    the int) so its exact span can be masked out of _amounts()'s own
+    amounts list. REAL BUG found live, not hypothetical: _amounts()'s
+    regex matches ANY bare digit sequence, dollar sign or not (the same
+    class already found for "Schedule P (540)"'s "540"/"61" this session)
+    -- a bare purchase year like "2015" is picked up as a phantom $2,015.00
+    amount every single time, since EVERY core-estimate question
+    necessarily states both a price and a year. Unlike the AMT phantom-
+    digit fixes (which exclude a small, fixed set of form-number
+    constants), a year's VALUE varies per question, so this needs
+    POSITION-based removal (_remove_amount_span) of the year's own match
+    span, not a value-based exclude list."""
+    return re.search(r"\b(19|20)\d{2}\b", question)
+
+
+def _property_purchase_year(question: str):
+    m = _property_purchase_year_match(question)
+    return int(m.group(0)) if m else None
+
+
+def detect_dv_exemption_signal(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in DV_EXEMPTION_TERMS)
+
+
+def detect_prop19_transfer_signal(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in PROP19_TERMS)
+
+
+def detect_local_rate_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
+        return False
+    return any(t in q for t in LOCAL_RATE_OUT_OF_SCOPE_TERMS)
+
+
+def detect_mello_roos_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in MELLO_ROOS_OUT_OF_SCOPE_TERMS)
+
+
+def detect_prop8_decline_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in PROP8_DECLINE_OUT_OF_SCOPE_TERMS)
+
+
+def detect_parent_child_exclusion_out_of_scope(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in PARENT_CHILD_EXCLUSION_OUT_OF_SCOPE_TERMS)
+
+
+def _property_has_any_signal(question: str) -> bool:
+    """Mirrors _income_has_any_signal's defensive-per-check shape -- a bad
+    or erroring detector for one property sub-feature must never take down
+    the intercept for every other one."""
+    for check in (detect_property_estimate_signal, detect_property_estimate_missing_fact,
+                  detect_dv_exemption_signal, detect_prop19_transfer_signal,
+                  detect_local_rate_out_of_scope, detect_mello_roos_out_of_scope,
+                  detect_prop8_decline_out_of_scope, detect_parent_child_exclusion_out_of_scope):
+        try:
+            if check(question):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _property_estimate_answer(question: str, base: dict):
+    """Core Prop 13 estimate -- see property_tax.compute_property_tax_
+    estimate's docstring for the 2%-cap-vs-actual-CPI overestimate
+    disclosure this answer text MUST carry every time."""
+    if not detect_property_estimate_signal(question):
+        return None
+    year_match = _property_purchase_year_match(question)
+    if year_match is None:
+        return None
+    purchase_year = int(year_match.group(0))
+    y_start, y_end = year_match.span()
+    # OVERLAP-based removal, not _remove_amount_span's exact-tuple-equality
+    # match -- found live that _amounts()'s own regex (\$?\s*digits) can
+    # greedily consume a leading space before the year, making its match
+    # span start 1 char earlier than the year regex's own span (e.g.
+    # "in 2015" -> _amounts() spans the space+digits, the year regex spans
+    # only the digits) -- an exact-tuple removal silently misses this,
+    # leaving the phantom year amount in the list.
+    amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question)
+               if a_e <= y_start or a_s >= y_end]
+    if len(amounts) != 1:
+        return None
+    purchase_price = amounts[0][0]
+    q = question.lower()
+    homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+    calc = property_tax.compute_property_tax_estimate(purchase_price, purchase_year,
+                                                       homeowners_exemption=homeowners_exemption)
+    if not calc:
+        return None
+    exemption_note = ""
+    if homeowners_exemption:
+        exemption_note = (f" after subtracting the ${property_tax.HOMEOWNERS_EXEMPTION_AMOUNT:,.0f} "
+                           f"Homeowners' Exemption ({property_tax.HOMEOWNERS_EXEMPTION_CITATION})")
+    result = {**base, "status": "answered", "category": "property_tax_estimate",
+              "amount": purchase_price, "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    result["answer_text"] = (
+        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year}, your estimated "
+        f"{calc['current_tax_year']} California property tax is about ${calc['tax']:,.2f} "
+        f"({property_tax.PROP13_BASE_RATE*100:g}% of a ${calc['factored_base_year_value']:,.2f} "
+        f"factored base year value{exemption_note}) ({calc['citation']}). This compounds your "
+        f"purchase price at the FULL 2%/year cap Proposition 13 allows -- a deliberate "
+        "overestimate, since the actual annual adjustment (tied to the California CPI) is "
+        "usually LESS than 2%. This also does NOT include any voter-approved local bonds "
+        "(commonly adding roughly 0.1% statewide on average), Mello-Roos or other special "
+        "assessments, or a Proposition 8 decline-in-value adjustment -- your actual bill may "
+        "differ, sometimes substantially, if any of these apply to your specific parcel."
+    )
+    return result
+
+
+def _property_estimate_missing_fact_answer(question: str, base: dict):
+    if not detect_property_estimate_missing_fact(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate your California property tax, I need your purchase price and the year "
+        "you purchased (or were last reassessed for) the property. Please ask again and "
+        "include both, for example \"...bought for $500,000 in 2018\" -- and mention if the "
+        "Homeowners' Exemption applies (your principal residence).")
+    return result
+
+
+def _property_dv_composed_answer(question: str, base: dict):
+    """Composed purchase-price + DV-exemption question -- calls
+    property_tax.compute_property_tax_with_dv_exemption, which existed
+    but was never wired up to any dispatcher before this fix. REAL GAP
+    found live, not hypothetical: "I am a disabled veteran, I bought my
+    house for $500,000 in 2020, my household income is $50,000, what is
+    my 2025 California property tax" fell all the way through every
+    dispatcher (the standalone _property_estimate_answer bailed out on
+    len(amounts)!=1, and the standalone _property_dv_exemption_answer's
+    same 1-amount check also failed, then its tax_year lookup for the
+    stray purchase year 2020 -- no DV-exemption row seeded for 2020 --
+    returned None too) to an unrelated sales/informational non-answer.
+    Must run BEFORE both of those narrower dispatchers so a genuinely
+    composed question doesn't get mis-split between them."""
+    if not detect_dv_exemption_signal(question):
+        return None
+    year_matches = list(re.finditer(r"\b(19|20)\d{2}\b", question))
+    if not year_matches:
+        return None
+    year_spans = [m.span() for m in year_matches]
+    amounts = [(a, s, e) for a, s, e in _amounts(question)
+               if all(e <= ys or s >= ye for ys, ye in year_spans)]
+    purchase_match = _amount_near_anchor_edge(question, PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS, amounts)
+    if purchase_match is None:
+        return None
+    purchase_price = purchase_match[0]
+    remaining = _remove_amount_span(amounts, purchase_match)
+    income_match = _amount_near_anchor_edge(question, PROPERTY_INCOME_ANCHOR_TERMS, remaining)
+    household_income = income_match[0] if income_match else None
+    years = sorted(int(m.group(0)) for m in year_matches)
+    purchase_year = years[0]
+    current_tax_year = years[-1] if len(years) > 1 else property_tax.DEFAULT_LIEN_YEAR
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_property_tax_with_dv_exemption(
+            conn, purchase_price, purchase_year, household_income, current_tax_year)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_dv_composed",
+              "amount": calc["assessed_value"], "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    income_note = (
+        f"a household income of ${household_income:,.2f}" if household_income is not None
+        else "your household income not stated (so the safe, no-income-limit basic tier is used)"
+    )
+    tier_label = "low-income" if calc["dv_tier"] == "low_income" else "basic"
+    result["answer_text"] = (
+        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} and {income_note}: "
+        f"your {current_tax_year} factored base year value is ${calc['factored_base_year_value']:,.2f}, "
+        f"less the {tier_label} Disabled Veterans' Exemption of ${calc['dv_exemption']:,.2f}, for an "
+        f"assessed value of ${calc['assessed_value']:,.2f} and an estimated property tax of about "
+        f"${calc['tax']:,.2f} ({calc['citation']}). This compounds your purchase price at the FULL "
+        "2%/year cap Proposition 13 allows -- a deliberate overestimate -- and is mutually exclusive "
+        "with the Homeowners' Exemption."
+    )
+    return result
+
+
+def _property_dv_exemption_answer(question: str, base: dict):
+    """Disabled Veterans' Exemption -- see property_tax.compute_disabled_
+    veterans_exemption_ca's docstring for why the basic tier (no income
+    limit) is the safe default when household income isn't stated.
+
+    Opens its OWN property_db connection, LAZILY, only once the cheap
+    text-only detect_dv_exemption_signal check has already confirmed this
+    feature is relevant -- deliberately NOT threaded through from
+    _answer_property/_answer() unconditionally, unlike income's domain-wide
+    conn (every income feature needs bracket data, so income's connection
+    is opened once for the whole domain). Property tax is different: 6 of
+    its 7 sub-features are pure math with no DB dependency at all, so
+    requiring a property_db connection for EVERY property-flavored
+    question -- including ones this specific feature would decline anyway
+    -- would make an unconfigured/not-yet-provisioned PROPERTY_DATABASE_URL
+    break questions that don't even need it."""
+    if not detect_dv_exemption_signal(question):
+        return None
+    # A stated tax_year (e.g. "for 2025") is itself a phantom-digit risk --
+    # same class as the core estimate's purchase year -- so it must be
+    # extracted AND excluded from the amounts pool before household_income
+    # extraction, or the year itself gets silently misread as a stated
+    # income figure. Found live, not hypothetical: "...exemption for 2026?"
+    # (no income stated at all) was answered as if $2,026 household income
+    # had been stated, silently picking the WRONG (low-income) tier -- a
+    # confidently wrong answer, exactly what this project exists to
+    # prevent. Defaults to property_tax.DEFAULT_LIEN_YEAR if no year is
+    # stated, same "assume the common case" precedent as everywhere else.
+    year_match = _property_purchase_year_match(question)
+    tax_year = int(year_match.group(0)) if year_match else property_tax.DEFAULT_LIEN_YEAR
+    if year_match is not None:
+        y_start, y_end = year_match.span()
+        amounts = [(a, s, e) for a, s, e in _amounts(question) if e <= y_start or s >= y_end]
+    else:
+        amounts = _amounts(question)
+    household_income = amounts[0][0] if len(amounts) == 1 else None
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_disabled_veterans_exemption_ca(conn, household_income, tax_year)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_dv_exemption",
+              "amount": calc["exemption"], "citation": calc["citation"], "source_url": calc["source_url"]}
+    if calc["income_unconfirmed"]:
+        result["answer_text"] = (
+            f"For {calc['tax_year']}, the California Disabled Veterans' Property Tax Exemption "
+            f"is ${calc['basic_exemption']:,.2f} with no income limit -- but a HIGHER exemption "
+            f"of ${calc['low_income_exemption']:,.2f} applies if your household income is under "
+            f"${calc['income_limit']:,.2f} ({calc['citation']}). Please state your household "
+            "income if you'd like me to confirm which tier applies."
+        )
+    else:
+        tier_label = "low-income" if calc["tier"] == "low_income" else "basic"
+        result["answer_text"] = (
+            f"For {calc['tax_year']}, with a household income of ${household_income:,.2f}, "
+            f"your California Disabled Veterans' Property Tax Exemption is "
+            f"${calc['exemption']:,.2f} (the {tier_label} tier) ({calc['citation']}). This "
+            "exemption is mutually exclusive with the Homeowners' Exemption -- you cannot "
+            "claim both on the same property."
+        )
+    return result
+
+
+_PROP19_AGE_PATTERNS = [
+    re.compile(r"\bi'?m\s+(\d{1,3})\b", re.IGNORECASE),
+    re.compile(r"\bi\s+am\s+(\d{1,3})\b", re.IGNORECASE),
+    re.compile(r"\b(\d{1,3})[\s-]years?[\s-]old\b", re.IGNORECASE),
+    re.compile(r"\bage\s+(?:of\s+)?(\d{1,3})\b", re.IGNORECASE),
+]
+
+
+def _property_prop19_strip_age_phantoms(question, amounts):
+    """A stated age ("I am 62 years old") is a bare 1-3 digit number that
+    _amounts()'s regex also parses as a phantom amount -- found live: age
+    55 is EXACTLY this feature's own eligibility threshold, so age
+    mentions are a near-certainty in real Prop 19 questions, not an edge
+    case ("I am 62 years old and selling my home..." produced a phantom
+    4th amount, failing the len(amounts)==3 check below and silently
+    falling through to an unrelated sales-tax answer). POSITION-based
+    removal (matches the purchase-year precedent in
+    _property_purchase_year_match's docstring), since an age's value
+    varies per question -- a fixed value-exclude list won't work here."""
+    spans = []
+    for pat in _PROP19_AGE_PATTERNS:
+        for m in pat.finditer(question):
+            spans.append(m.span(1))
+    if not spans:
+        return amounts
+
+    def _overlaps(a_s, a_e):
+        return any(not (a_e <= s or a_s >= e) for s, e in spans)
+
+    return [(a, s, e) for a, s, e in amounts if not _overlaps(s, e)]
+
+
+_PROP19_ORDINAL_WORDS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+}
+
+
+def _property_prop19_transfer_number(question: str) -> int:
+    """Which transfer this is (1st/2nd/3rd/4th...) -- defaults to 1 if
+    unstated, matching compute_prop19_base_year_transfer's own default.
+    Never extracted before this fix, meaning the 3-transfer age-55/
+    disabled cap could never actually be exercised by a live question."""
+    q = question.lower()
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\s+(?:time|transfer)\b", q)
+    if m:
+        return int(m.group(1))
+    for word, n in _PROP19_ORDINAL_WORDS.items():
+        if re.search(rf"\b{word}\s+(?:time|transfer)\b", q):
+            return n
+    return 1
+
+
+_PROP19_TIMING_PATTERNS = [
+    (r"\bbefore\s+the\s+sale\b", "before_sale"),
+    (r"\bwithin\s+(?:the\s+)?(?:1st|first|one|1)\s+year\b", "within_1_year"),
+    (r"\bwithin\s+(?:the\s+)?(?:2nd|second|two|2)\s+years?\b", "within_2_years"),
+]
+
+
+def _property_prop19_replacement_timing(question: str) -> str:
+    """Parses "before the sale" / "within 1 year" / "within 2 years" --
+    defaults to "within_1_year" if unstated, matching compute_prop19_
+    base_year_transfer's own default. Never extracted before this fix,
+    meaning the 100%/105%/110% timing-comparison bucket could never
+    actually vary based on a live question's own stated timing."""
+    q = question.lower()
+    for pattern, timing in _PROP19_TIMING_PATTERNS:
+        if re.search(pattern, q):
+            return timing
+    return "within_1_year"
+
+
+def _property_prop19_transfer_answer(question: str, base: dict):
+    """Prop 19 base-year-value transfer -- see property_tax.compute_prop19_
+    base_year_transfer's docstring for the 100%/105%/110% timing-comparison
+    mechanic (confirmed against BOE's own worked example) and the separate
+    3-transfer cap (age-55/disabled only, not disaster victims)."""
+    if not detect_prop19_transfer_signal(question):
+        return None
+    q = question.lower()
+    claimant_type = "age_55"
+    if "disaster" in q or "wildfire" in q:
+        claimant_type = "disaster"
+    elif "disabled" in q:
+        claimant_type = "disabled"
+    transfer_number = _property_prop19_transfer_number(question)
+    replacement_timing = _property_prop19_replacement_timing(question)
+    # "Prop 19"/"Proposition 19" is a phantom-digit collision -- _amounts()'s
+    # regex matches the bare "19" as a phantom $19.00 amount, the same
+    # class already found 10+ times this session for other fixed form/
+    # section numbers (e.g. "Schedule P (540)"'s "540"/"61"). Found live,
+    # not hypothetical: without this strip, a genuine 3-figure question
+    # produces a phantom 4th amount and silently fails the len(amounts)
+    # check below.
+    amounts = [(a, s, e) for a, s, e in _amounts(question) if a != 19.0]
+    amounts = _property_prop19_strip_age_phantoms(question, amounts)
+    if len(amounts) != 3:
+        return None
+    original_byv, original_fcv, replacement_fcv = (a for a, _, _ in amounts)
+    calc = property_tax.compute_prop19_base_year_transfer(
+        original_byv, original_fcv, replacement_fcv, claimant_type=claimant_type,
+        transfer_number=transfer_number, replacement_timing=replacement_timing)
+    if not calc:
+        return None
+    if not calc["eligible"]:
+        result = {**base, "status": "needs_review", "citation": calc["citation"]}
+        if calc.get("reason") == "transfer_count_exceeded":
+            result["answer_text"] = (
+                f"This transfer is not eligible: age-55/disabled claimants may transfer their "
+                f"base year value up to {property_tax.PROP19_MAX_TRANSFERS_AGE_DISABLED} times "
+                f"({calc['citation']}) -- disaster victims are not subject to this cap. If this "
+                "is a disaster-related transfer, please say so explicitly."
+            )
+        else:
+            result["answer_text"] = (
+                "This transfer is not eligible under the stated timing: the replacement home "
+                f"must be purchased within {property_tax.PROP19_REPLACEMENT_WINDOW_YEARS} years "
+                f"of the original home's sale ({calc['citation']})."
+            )
+        return result
+    timing_label = {
+        "before_sale": "before the original home's sale",
+        "within_1_year": "within 1 year of the original home's sale",
+        "within_2_years": "within 2 years of the original home's sale",
+    }[replacement_timing]
+    comparison_pct_label = f"{calc['comparison_pct'] * 100:.0f}%"
+    transfer_note = (
+        f" (transfer #{transfer_number})" if transfer_number != 1 and claimant_type != "disaster" else ""
+    )
+    result = {**base, "status": "answered", "category": "property_tax_prop19_transfer",
+              "amount": replacement_fcv, "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    result["answer_text"] = (
+        f"Assuming an original adjusted base year value of ${original_byv:,.2f}, an original "
+        f"full cash value of ${original_fcv:,.2f}, and a replacement home purchased {timing_label} "
+        f"at a full cash value of ${replacement_fcv:,.2f}{transfer_note}: your new taxable value is "
+        f"${calc['new_taxable_value']:,.2f} (${original_fcv:,.2f} x {comparison_pct_label} = "
+        f"${calc['comparison_fcv']:,.2f} adjusted comparison value; "
+        f"${replacement_fcv:,.2f} - ${calc['comparison_fcv']:,.2f} = ${calc['value_add']:,.2f} "
+        f"added to your original base year value) ({calc['citation']}), for an estimated "
+        f"property tax of about ${calc['tax']:,.2f}. This assumes the replacement was purchased "
+        f"{timing_label} -- a different timing bucket (before the sale = 100% comparison, within "
+        "1 year = 105%, within 2 years = 110%) changes this figure; state the exact timing if "
+        "different."
+    )
+    return result
+
+
+def _property_local_rate_out_of_scope_answer(question: str, base: dict):
+    if not detect_local_rate_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "This assistant doesn't have your specific local property tax rate -- California's 1% "
+        "constitutional cap (Cal. Const. Art. XIII A Sec. 1(a)) is only part of a real bill; "
+        "voter-approved local bonds add roughly 0.1% on average statewide, but the exact amount "
+        "depends on which of thousands of tax rate areas your specific parcel sits in (58 "
+        "counties x city/school/community-college/special-district overlaps). Your county "
+        "assessor or auditor-controller can give you the exact rate for your parcel."
+    )
+    return result
+
+
+def _property_mello_roos_out_of_scope_answer(question: str, base: dict):
+    if not detect_mello_roos_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Mello-Roos Community Facilities District special taxes are separate from, and not "
+        "capped by, California's 1% constitutional property tax rate -- they're set by each "
+        "district's own Rate and Method of Apportionment (a flat per-parcel amount, a per-"
+        "square-foot charge, or another district-specific formula), and there's no statewide "
+        "registry or formula this assistant can compute from. Check your actual property tax "
+        "bill, or your county assessor, to find out if your parcel is in a CFD and what it owes."
+    )
+    return result
+
+
+def _property_prop8_decline_out_of_scope_answer(question: str, base: dict):
+    if not detect_prop8_decline_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Proposition 8 decline-in-value reassessment (where the county assessor enrolls the "
+        "LOWER of your factored base year value or current market value) depends on your "
+        "property's specific multi-year assessment history, which this assistant can't "
+        "reconstruct from a single stated purchase price and year. Your county assessor's "
+        "current-year enrolled value is the only accurate source for this."
+    )
+    return result
+
+
+def _property_parent_child_exclusion_out_of_scope_answer(question: str, base: dict):
+    if not detect_parent_child_exclusion_out_of_scope(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Proposition 19's parent-child (and grandparent-grandchild) exclusion from "
+        "reassessment was significantly narrowed starting February 2021 -- it now applies "
+        "ONLY to a family home or family farm, requires the transferee to move in and file for "
+        "the homeowners' or disabled veterans' exemption within a year, and carries a value cap "
+        "(currently $1,044,586, adjusted every two years) above which the excess IS reassessed. "
+        "Whether this exclusion applies to your specific situation is an eligibility "
+        "determination this assistant can't make from a single question -- consult your county "
+        "assessor or a property tax professional to confirm."
+    )
+    return result
+
+
+def _answer_property(question: str):
+    """Property-tax domain dispatcher, same shape as _answer_income: tries
+    each sub-feature's answer function in order, first non-None wins. No
+    `conn`/`compose`/`qv` params at this level -- every property sub-
+    feature is deterministic keyword-based (no embedding lookup, no LLM
+    composition, same "a number that changes the answer is never composed
+    by a model" precedent as property_tax.py itself), and the ONE sub-
+    feature that needs a DB connection (_property_dv_exemption_answer)
+    opens its own, lazily, only once it's confirmed relevant -- see that
+    function's own docstring for why."""
+    base = {
+        "category": None, "taxable": None, "rate": None, "amount": None,
+        "tax": None, "citation": None, "source_url": None, "location": None,
+        "rate_basis": None, "branches": [], "fees": [], "info": None,
+        "city_cannabis_tax": None, "route_dist": None, "rerank_v2_key": None,
+        "domain": "property",
+    }
+    for fn in (_property_dv_composed_answer, _property_estimate_answer, _property_dv_exemption_answer,
+               _property_prop19_transfer_answer, _property_local_rate_out_of_scope_answer,
+               _property_mello_roos_out_of_scope_answer, _property_prop8_decline_out_of_scope_answer,
+               _property_parent_child_exclusion_out_of_scope_answer,
+               _property_estimate_missing_fact_answer):
+        result = fn(question, base)
+        if result:
+            return result
+    return None
+
+
 # --- Income Coverage Blueprint, Phase 2b: generalized domain-routing
 # intercept -- replaces the growing list of hand-written per-feature
 # early-intercept guards (military retirement, cannabis 280E, foreign-
@@ -8387,10 +8952,23 @@ def _answer(question: str, compose: bool = True, location: str = None,
             if income_signal_result:
                 return income_signal_result
 
+        # Ring 4 property-tax intercept -- checked after income's own
+        # signal check (income's ~40-detector set is more mature/battle-
+        # tested; property's is newer and narrower, so it defensively runs
+        # second, protecting against any not-yet-found collision) but
+        # before the tax_type hint block and the sales embed-router's
+        # default path, so a real property question gets a deterministic
+        # answer before falling into sales-embedding-distance guessing.
+        if _property_has_any_signal(question):
+            property_signal_result = _answer_property(question)
+            if property_signal_result:
+                return property_signal_result
+
         branches, qv = [], None
         route_dist = None
         rerank_v2_key = None      # shadow mode -- see _rerank_v2
         income_tried = False
+        property_tried = False
 
         if tax_type == "income":
             # user-hinted: try income FIRST, still fall back to sales below
@@ -8405,6 +8983,16 @@ def _answer(question: str, compose: bool = True, location: str = None,
             income_tried = True
             if income_first:
                 return income_first
+
+        if tax_type == "property":
+            # user-hinted: try property FIRST, still fall back to sales
+            # below if property can't answer -- no conn/qv needed at this
+            # level, property is fully deterministic keyword-based (see
+            # _answer_property).
+            property_first = _answer_property(question)
+            property_tried = True
+            if property_first:
+                return property_first
 
         if router == "embed":
             hit = _disambiguate(question)
@@ -8490,6 +9078,14 @@ def _answer(question: str, compose: bool = True, location: str = None,
                         remembered_exemption_credit_dependent_count=remembered_exemption_credit_dependent_count)
             if income_result:
                 return income_result
+            # property domain (county assessor/BOE): tried only after both
+            # sales AND income have fully failed -- same "skip if already
+            # tried with identical inputs" guard as income above.
+            property_result = None
+            if not property_tried:
+                property_result = _answer_property(question)
+            if property_result:
+                return property_result
             return {**base, "status": "needs_review",
                     "answer_text": "Needs review - not covered by current rules."}
 

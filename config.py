@@ -11,6 +11,7 @@ load_dotenv()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")            # sales/use tax (CDTFA) DB
 INCOME_DATABASE_URL = os.environ.get("INCOME_DATABASE_URL", "")  # income tax (FTB) DB -- Ring 2 database split
+PROPERTY_DATABASE_URL = os.environ.get("PROPERTY_DATABASE_URL", "")  # property tax (county assessor/BOE) DB -- Ring 4 database split
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "models/gemini-embedding-001")
 

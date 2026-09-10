@@ -3256,7 +3256,13 @@ ITEMS = [
     ("I received a K-1 from my trust showing $50,000 in income, how much tax do I owe filing single?",
      {"status": "answered", "domain": "income", "category": "k1_pass_through_income_tax", "tax": 1192.53}),
 
-    # --- genuinely out of scope (neither domain covers it) ---
+    # --- genuinely out of scope (no domain covers it) ---
+    # NOTE 2026-09-07: property tax liability IS now a built domain (Ring
+    # 4). This exact phrase ("property tax rate") now hits engine._property_
+    # local_rate_out_of_scope_answer's own dedicated disclosure -- still
+    # correctly needs_review (just domain="property" now, not "sales" --
+    # unchecked here since expected only asserts status, per _check's
+    # subset-matching, so this mechanically still passes unchanged).
     ("what is the property tax rate in los angeles", {"status": "needs_review"}),
     ("how do I register my car with the dmv", {"status": "needs_review"}),
 
