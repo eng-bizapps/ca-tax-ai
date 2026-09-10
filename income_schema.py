@@ -275,6 +275,129 @@ CREATE TABLE IF NOT EXISTS fiduciary_exemption_credit (
     as_of        DATE,
     UNIQUE (tax_year, entity_type)
 );
+
+-- PER-PAYCHECK withholding (payroll_withholding.py) -- a genuinely
+-- different fact shape from every table above, which all compute ANNUAL
+-- tax LIABILITY. This is what an employer actually withholds from ONE
+-- paycheck, per IRS Publication 15-T's Worksheet 1A. Reuses THIS database
+-- (INCOME_DATABASE_URL) rather than a new physically-separate Ring, since
+-- it is still fundamentally FTB/payroll-adjacent income-tax content, not a
+-- new agency source the way property tax (BOE/county assessor, Ring 4)
+-- was. `schedule` folds the TWO parallel bracket tables Pub 15-T
+-- publishes (used depending on whether the employee's W-4 Step 2 checkbox
+-- is checked) into one table, same discriminator idiom as
+-- ca_income_tax_brackets.bracket_type ('standard' vs 'mhs_surtax').
+-- base_amount stores Pub 15-T's own published cumulative annual tax at
+-- each bracket floor directly (same "store the primary source's own
+-- number, never re-derive via segment summation" precedent as
+-- ca_income_tax_brackets.base_amount).
+CREATE TABLE IF NOT EXISTS federal_withholding_brackets (
+    id               SERIAL PRIMARY KEY,
+    tax_year         INTEGER NOT NULL,
+    filing_status    TEXT NOT NULL,      -- 'single_mfs' | 'mfj' | 'hoh'
+    schedule         TEXT NOT NULL DEFAULT 'standard',  -- 'standard' | 'step2_checkbox'
+    bracket_floor    NUMERIC NOT NULL,
+    bracket_ceiling  NUMERIC,            -- NULL = no upper bound
+    base_amount      NUMERIC NOT NULL DEFAULT 0,
+    rate             NUMERIC NOT NULL,
+    citation         TEXT,
+    source_url       TEXT,
+    as_of            DATE,
+    UNIQUE (tax_year, filing_status, schedule, bracket_floor)
+);
+
+-- Federal withholding's non-bracket dollar constants (Worksheet 1A Step 1).
+-- Two genuinely different W-4-vintage branches of the SAME step share one
+-- table via `constant_type`, same discriminator idiom as above:
+--   'step2_unchecked_deduction' -- subtracted from annualized wages for a
+--     2020+ W-4 with the Step 2 box NOT checked (varies by filing_status:
+--     MFJ gets a larger amount than Single/MFS/HoH). When the box IS
+--     checked, Worksheet 1A uses $0 -- a STRUCTURAL rule of the formula
+--     itself, not annually-republished data, so it's a literal in
+--     payroll_withholding.py, not a table row.
+--   'pre2020_allowance' -- the per-allowance dollar value for a PRE-2020
+--     W-4 still on file. Does not vary by filing_status -- filing_status
+--     NULL, same "applies regardless" sentinel as bracket_type='mhs_surtax'
+--     above. NOTE: Postgres does not treat NULL=NULL for UNIQUE purposes,
+--     so this constraint alone would not block two 'pre2020_allowance'
+--     rows in the same tax_year -- loader discipline (one INSERT per
+--     constant_type per year in load_payroll_withholding_data.py), not the
+--     constraint, is what actually prevents that, same caveat
+--     ca_income_tax_brackets' own filing_status=NULL rows already carry.
+CREATE TABLE IF NOT EXISTS federal_withholding_constants (
+    id             SERIAL PRIMARY KEY,
+    tax_year       INTEGER NOT NULL,
+    constant_type  TEXT NOT NULL,     -- 'step2_unchecked_deduction' | 'pre2020_allowance'
+    filing_status  TEXT,              -- NULL = applies regardless of filing status
+    amount         NUMERIC NOT NULL,
+    citation       TEXT,
+    source_url     TEXT,
+    as_of          DATE,
+    UNIQUE (tax_year, constant_type, filing_status)
+);
+
+-- California income tax withholding (EDD's "California Withholding
+-- Schedules," Method B -- Exact Calculation Method) annual bracket
+-- tables, keyed by RATE CATEGORY (only 3 buckets -- deliberately NOT the
+-- same 4-bucket scheme as ca_withholding_constants' exemption_category
+-- below; EDD uses two INDEPENDENT category schemes simultaneously, never
+-- conflated -- see payroll_withholding.map_ca_categories).
+CREATE TABLE IF NOT EXISTS ca_withholding_brackets (
+    id               SERIAL PRIMARY KEY,
+    tax_year         INTEGER NOT NULL,
+    rate_category    TEXT NOT NULL,   -- 'single_dual_multiple' | 'married' | 'unmarried_hoh'
+    bracket_floor    NUMERIC NOT NULL,
+    bracket_ceiling  NUMERIC,
+    base_amount      NUMERIC NOT NULL DEFAULT 0,
+    rate             NUMERIC NOT NULL,
+    citation         TEXT,
+    source_url       TEXT,
+    as_of            DATE,
+    UNIQUE (tax_year, rate_category, bracket_floor)
+);
+
+-- California withholding's EXEMPTION-CATEGORY-keyed amounts (EDD Table 1
+-- low-income exemption + Table 3 standard deduction, 4 categories) AND the
+-- 2 per-allowance dollar values that do NOT vary by category (Table 2
+-- estimated deduction, Table 4 exemption credit) -- folded into ONE table
+-- via `constant_type` + exemption_category=NULL for the category-
+-- independent rows, same idiom as federal_withholding_constants above
+-- (chosen over a 5th tiny table since these are all "a dollar figure EDD's
+-- Method B looks up by exemption category, or by no category at all," the
+-- same conceptual family). Same NULL-uniqueness caveat as
+-- federal_withholding_constants applies -- loader discipline, not the
+-- constraint, prevents duplicate category-independent rows.
+CREATE TABLE IF NOT EXISTS ca_withholding_constants (
+    id                  SERIAL PRIMARY KEY,
+    tax_year            INTEGER NOT NULL,
+    constant_type       TEXT NOT NULL,  -- 'low_income_exemption' | 'standard_deduction' |
+                                         -- 'exemption_credit_per_allowance' |
+                                         -- 'estimated_deduction_per_allowance'
+    exemption_category  TEXT,           -- 'single_dual_multiple' | 'married_0_1' |
+                                         -- 'married_2_plus' | 'unmarried_hoh';
+                                         -- NULL = applies regardless of category (the
+                                         -- two per-allowance constant_types)
+    amount              NUMERIC NOT NULL,
+    citation            TEXT,
+    source_url          TEXT,
+    as_of               DATE,
+    UNIQUE (tax_year, constant_type, exemption_category)
+);
+
+-- California SDI -- a single flat employee rate per year, NO wage cap
+-- since SB 951 (2024+) eliminated the taxable wage ceiling. Simplest
+-- possible shape: one row per year, no filing_status dimension at all
+-- (SDI doesn't vary by filing status), same "annually-set single number"
+-- class as ca_standard_deduction but with one fewer key column.
+CREATE TABLE IF NOT EXISTS ca_sdi_rate (
+    id          SERIAL PRIMARY KEY,
+    tax_year    INTEGER NOT NULL,
+    rate        NUMERIC NOT NULL,
+    citation    TEXT,
+    source_url  TEXT,
+    as_of       DATE,
+    UNIQUE (tax_year)
+);
 """
 
 
@@ -283,7 +406,9 @@ def create():
         conn.execute(SCHEMA)
     print("income domain schema created (income_tax_topics, ca_income_tax_brackets, "
           "ca_standard_deduction, ca_income_credits, ca_eitc_table, income_rule_embeddings, "
-          "entity_annual_tax_rules, llc_fee_brackets, fiduciary_exemption_credit)")
+          "entity_annual_tax_rules, llc_fee_brackets, fiduciary_exemption_credit, "
+          "federal_withholding_brackets, federal_withholding_constants, ca_withholding_brackets, "
+          "ca_withholding_constants, ca_sdi_rate)")
     status()
 
 
@@ -292,7 +417,9 @@ def status():
     for tbl in ("income_tax_topics", "ca_income_tax_brackets", "ca_standard_deduction",
                 "ca_income_credits", "ca_eitc_table", "income_rule_embeddings",
                 "schedule_ca_inventory", "entity_annual_tax_rules", "llc_fee_brackets",
-                "fiduciary_exemption_credit"):
+                "fiduciary_exemption_credit", "federal_withholding_brackets",
+                "federal_withholding_constants", "ca_withholding_brackets",
+                "ca_withholding_constants", "ca_sdi_rate"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:26} {n} rows")
     conn.close()
