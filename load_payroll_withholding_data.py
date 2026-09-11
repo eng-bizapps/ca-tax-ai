@@ -38,10 +38,18 @@ TAX_YEAR = 2026
 
 IRS_15T_URL = "https://www.irs.gov/pub/irs-pdf/p15t.pdf"
 IRS_15T_CITATION = "IRS Publication 15-T (2026), Worksheet 1A"
+IRS_15T_NRA_CITATION = "IRS Publication 15-T (2026), Withholding Adjustment for Nonresident Alien Employees"
 EDD_METHOD_B_URL = "https://edd.ca.gov/siteassets/files/pdf_pub_ctr/26methb.pdf"
 EDD_METHOD_B_CITATION = "EDD California Withholding Schedules for 2026, Method B"
 EDD_SDI_URL = "https://edd.ca.gov/en/disability/Contribution_Rates_and_Benefit_Amounts/"
 EDD_SDI_CITATION = "EDD Contribution Rates and Benefit Amounts, 2026"
+
+IRS_401K_URL = "https://www.irs.gov/newsroom/401k-limit-increases-to-24500-for-2026-ira-limit-increases-to-7500"
+IRS_401K_CITATION = "IRS Notice 2025-67 (2026 401(k) elective deferral / catch-up limits)"
+IRS_HSA_URL = "https://www.irs.gov/publications/p969"
+IRS_HSA_CITATION = "IRS Publication 969 (2026), consistent with Rev. Proc. 2025-19 HSA limits"
+IRS_15B_URL = "https://www.irs.gov/publications/p15b"
+IRS_15B_CITATION = "IRS Publication 15-B (2026), Health FSA / Dependent Care FSA limits"
 
 # (filing_status, schedule, bracket_floor, bracket_ceiling, base_amount, rate)
 # filing_status: 'single_mfs' | 'mfj' | 'hoh'; schedule: 'standard' | 'step2_checkbox'
@@ -111,6 +119,18 @@ FEDERAL_WITHHOLDING_CONSTANTS = [
     ("pre2020_allowance", None, 4300.00),
 ]
 
+# Pub 15-T (2026) p.6-7, "Withholding Adjustment for Nonresident Alien
+# Employees," Table 1 (pre-2020 W-4) and Table 2 (2020+ W-4).
+# (w4_vintage, pay_periods_per_year, amount)
+FEDERAL_NRA_WAGE_ADDITIONS = [
+    ("pre2020", 52, 226.90), ("pre2020", 26, 453.80), ("pre2020", 24, 491.70),
+    ("pre2020", 12, 983.30), ("pre2020", 4, 2950.00), ("pre2020", 2, 5900.00),
+    ("pre2020", 1, 11800.00), ("pre2020", 260, 45.40),
+    ("2020plus", 52, 309.60), ("2020plus", 26, 619.20), ("2020plus", 24, 670.80),
+    ("2020plus", 12, 1341.70), ("2020plus", 4, 4025.00), ("2020plus", 2, 8050.00),
+    ("2020plus", 1, 16100.00), ("2020plus", 260, 61.90),
+]
+
 # (rate_category, bracket_floor, bracket_ceiling, base_amount, rate)
 # rate_category: 'single_dual_multiple' | 'married' | 'unmarried_hoh'
 CA_WITHHOLDING_BRACKETS = [
@@ -168,6 +188,19 @@ CA_WITHHOLDING_CONSTANTS = [
 
 CA_SDI_RATE = 0.013  # 2026, up from 0.012 (2025); no wage cap (SB 951)
 
+# 2026 pre-tax benefit annual contribution/election limits.
+# (benefit_type, amount, citation, source_url)
+PRETAX_BENEFIT_LIMITS = [
+    ("401k_elective_deferral", 24500.00, IRS_401K_CITATION, IRS_401K_URL),
+    ("401k_catchup_50", 8000.00, IRS_401K_CITATION, IRS_401K_URL),
+    ("hsa_self_only", 4400.00, IRS_HSA_CITATION, IRS_HSA_URL),
+    ("hsa_family", 8750.00, IRS_HSA_CITATION, IRS_HSA_URL),
+    ("hsa_catchup_55", 1000.00, IRS_HSA_CITATION, IRS_HSA_URL),
+    ("health_fsa", 3400.00, IRS_15B_CITATION, IRS_15B_URL),
+    ("dependent_care_fsa", 7500.00, IRS_15B_CITATION, IRS_15B_URL),
+    ("dependent_care_fsa_mfs", 3750.00, IRS_15B_CITATION, IRS_15B_URL),
+]
+
 
 def load():
     conn = db.get_conn()
@@ -187,6 +220,19 @@ def load():
 
     n_fed_constants = 0
     for constant_type, filing_status, amount in FEDERAL_WITHHOLDING_CONSTANTS:
+        if filing_status is None:
+            # Postgres does NOT treat NULL=NULL for UNIQUE-constraint conflict
+            # detection, so ON CONFLICT below silently INSERTS a fresh
+            # duplicate every re-run for a NULL-keyed row instead of updating
+            # the existing one -- confirmed live (3 duplicate 'pre2020_
+            # allowance' rows accumulated across 3 earlier `load` runs this
+            # session before this fix). Delete any existing NULL-keyed row
+            # for this constant_type first, so the INSERT below always
+            # starts from zero matching rows.
+            conn.execute(
+                "DELETE FROM federal_withholding_constants "
+                "WHERE tax_year=%s AND constant_type=%s AND filing_status IS NULL",
+                (TAX_YEAR, constant_type))
         conn.execute(
             "INSERT INTO federal_withholding_constants "
             "(tax_year, constant_type, filing_status, amount, citation, source_url) "
@@ -195,6 +241,17 @@ def load():
             "amount=EXCLUDED.amount, citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
             (TAX_YEAR, constant_type, filing_status, amount, IRS_15T_CITATION, IRS_15T_URL))
         n_fed_constants += 1
+
+    n_nra = 0
+    for w4_vintage, periods, amount in FEDERAL_NRA_WAGE_ADDITIONS:
+        conn.execute(
+            "INSERT INTO federal_nra_wage_additions "
+            "(tax_year, w4_vintage, pay_periods_per_year, amount, citation, source_url) "
+            "VALUES (%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (tax_year, w4_vintage, pay_periods_per_year) DO UPDATE SET "
+            "amount=EXCLUDED.amount, citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
+            (TAX_YEAR, w4_vintage, periods, amount, IRS_15T_NRA_CITATION, IRS_15T_URL))
+        n_nra += 1
 
     n_ca_brackets = 0
     for rate_category, floor, ceiling, base, rate in CA_WITHHOLDING_BRACKETS:
@@ -211,6 +268,12 @@ def load():
 
     n_ca_constants = 0
     for constant_type, exemption_category, amount in CA_WITHHOLDING_CONSTANTS:
+        if exemption_category is None:
+            # Same NULL-uniqueness fix as federal_withholding_constants above.
+            conn.execute(
+                "DELETE FROM ca_withholding_constants "
+                "WHERE tax_year=%s AND constant_type=%s AND exemption_category IS NULL",
+                (TAX_YEAR, constant_type))
         conn.execute(
             "INSERT INTO ca_withholding_constants "
             "(tax_year, constant_type, exemption_category, amount, citation, source_url) "
@@ -228,18 +291,32 @@ def load():
         "citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
         (TAX_YEAR, CA_SDI_RATE, EDD_SDI_CITATION, EDD_SDI_URL))
 
+    n_benefit_limits = 0
+    for benefit_type, amount, citation, url in PRETAX_BENEFIT_LIMITS:
+        conn.execute(
+            "INSERT INTO pretax_benefit_limits (tax_year, benefit_type, amount, citation, source_url) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (tax_year, benefit_type) DO UPDATE SET "
+            "amount=EXCLUDED.amount, citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
+            (TAX_YEAR, benefit_type, amount, citation, url))
+        n_benefit_limits += 1
+
     conn.close()
     print(f"loaded {n_fed_brackets} federal_withholding_brackets rows, "
           f"{n_fed_constants} federal_withholding_constants rows, "
+          f"{n_nra} federal_nra_wage_additions rows, "
           f"{n_ca_brackets} ca_withholding_brackets rows, "
           f"{n_ca_constants} ca_withholding_constants rows, "
-          f"1 ca_sdi_rate row for tax_year={TAX_YEAR}")
+          f"1 ca_sdi_rate row, {n_benefit_limits} pretax_benefit_limits rows "
+          f"for tax_year={TAX_YEAR}")
 
 
 def status():
     conn = db.get_conn()
     for tbl in ("federal_withholding_brackets", "federal_withholding_constants",
-                "ca_withholding_brackets", "ca_withholding_constants", "ca_sdi_rate"):
+                "federal_nra_wage_additions",
+                "ca_withholding_brackets", "ca_withholding_constants", "ca_sdi_rate",
+                "pretax_benefit_limits"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:30} {n} rows")
     conn.close()

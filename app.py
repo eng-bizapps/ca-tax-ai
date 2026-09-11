@@ -293,18 +293,73 @@ with tab_paycheck:
 
     with st.form("paycheck_form"):
         st.markdown("#### Earnings")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            regular_pay = st.number_input(
+                "Regular pay this period ($)", min_value=0.0, step=100.0, format="%.2f")
+        with c2:
+            overtime_pay = st.number_input(
+                "Overtime pay this period ($)", min_value=0.0, step=50.0, format="%.2f")
+        with c3:
+            other_pay = st.number_input(
+                "Other earnings this period ($)", min_value=0.0, step=50.0, format="%.2f",
+                help="Bonuses, commissions, or any other earning line for this same paycheck. "
+                     "Federal/state withholding tables don't distinguish WHY wages were paid -- "
+                     "only the total matters, so these are simply added together.")
+        gross_pay = regular_pay + overtime_pay + other_pay
+        freq_label = st.selectbox("Pay frequency", list(pw.PAY_FREQUENCY_LABELS.values()))
+
+        state_ytd = st.checkbox(
+            "State exact year-to-date wages so far this year (optional)",
+            help="Improves the accuracy of the Social Security wage-base cap and Additional "
+                 "Medicare threshold for THIS paycheck by using your real cumulative total "
+                 "instead of an estimate.")
+        ytd_input = st.number_input(
+            "YTD Social Security/Medicare wages before this paycheck ($)",
+            min_value=0.0, step=500.0, disabled=not state_ytd,
+            help="Use the YTD Social Security/Medicare wages figure from your last pay stub "
+                 "(a W-2 Box 3/5-style figure), NOT gross YTD pay -- these can differ once "
+                 "pre-tax benefits are involved.")
+
+        st.markdown("#### Pre-Tax Benefits")
         c1, c2 = st.columns(2)
         with c1:
-            gross_pay = st.number_input(
-                "Gross pay this period ($)", min_value=0.0, step=100.0, format="%.2f")
+            pretax_401k = st.number_input(
+                "401(k) traditional (pre-tax) per period ($)", min_value=0.0, step=25.0,
+                help="Roth 401(k) contributions are already after-tax and don't reduce any "
+                     "withholding -- only enter Traditional 401(k) contributions here.")
+            age_50 = st.checkbox("Age 50 or older (401(k) catch-up eligible)")
         with c2:
-            freq_label = st.selectbox("Pay frequency", list(pw.PAY_FREQUENCY_LABELS.values()))
+            pretax_hsa = st.number_input(
+                "HSA contribution per period ($)", min_value=0.0, step=25.0,
+                help="California does not conform to the federal HSA tax exclusion -- this "
+                     "reduces federal and FICA wages but NOT California wages.")
+            hsa_family = st.checkbox("Family HDHP coverage (vs. self-only)")
+            age_55 = st.checkbox("Age 55 or older (HSA catch-up eligible)")
+        pretax_health_fsa = st.number_input(
+            "Health FSA per period ($)", min_value=0.0, step=10.0)
+        pretax_dep_fsa = st.number_input(
+            "Dependent Care FSA per period ($)", min_value=0.0, step=10.0,
+            help="The IRS annual limit is lower for Married Filing Separately -- applied "
+                 "automatically from your Federal filing status below.")
+        pretax_medical = st.number_input(
+            "Medical premium (pre-tax) per period ($)", min_value=0.0, step=10.0)
+        pretax_dental = st.number_input(
+            "Dental premium (pre-tax) per period ($)", min_value=0.0, step=10.0)
+        pretax_vision = st.number_input(
+            "Vision premium (pre-tax) per period ($)", min_value=0.0, step=10.0)
 
         st.markdown("#### Federal (Form W-4)")
         status_options = (
             list(pw.FILING_STATUS_LABELS.values()) if w4_is_2020_or_later
             else [v for k, v in pw.FILING_STATUS_LABELS.items() if k != "hoh"])
         filing_label = st.selectbox("Filing status", status_options)
+        is_nra = st.checkbox(
+            "Are you a nonresident alien?",
+            help="Adds a Pub 15-T-specified amount to your wages before computing FEDERAL "
+                 "withholding only (Social Security, Medicare, and CA withholding are "
+                 "unaffected) -- does not account for the India student/business-apprentice "
+                 "treaty exception.")
 
         if w4_is_2020_or_later:
             step2 = st.checkbox("Step 2: multiple jobs / spouse works box is checked")
@@ -322,10 +377,22 @@ with tab_paycheck:
                 "Withholding allowances claimed", min_value=0, step=1)
             step2, step3, step4a, step4b, step4c = False, 0.0, 0.0, 0.0, 0.0
 
+        exempt_federal = st.checkbox("Exempt from Federal Income Tax Withholding?")
+        exempt_ss = st.checkbox("Exempt from Social Security Tax?")
+        exempt_medicare = st.checkbox("Exempt from Medicare Tax?")
+
         st.markdown("#### California (Form DE-4)")
+        ca_filing_label = st.selectbox(
+            "CA filing status", list(pw.FILING_STATUS_LABELS.values()),
+            help="California's own DE-4 filing status -- defaults to matching your federal "
+                 "selection above, but change it here if they genuinely differ.")
         ca_reg = st.number_input("Regular allowances (DE-4 Line 1)", min_value=0, step=1)
         ca_est = st.number_input(
             "Estimated deduction allowances (DE-4 Line 2 / Worksheet B)", min_value=0, step=1)
+        ca_extra = st.number_input(
+            "Additional withholding amount (per period $)", min_value=0.0, step=10.0)
+        exempt_ca_income = st.checkbox("Exempt from State Income Tax Withholding?")
+        exempt_sdi = st.checkbox("Exempt from State Disability Insurance (SDI)?")
 
         submitted = st.form_submit_button("Calculate paycheck")
 
@@ -337,10 +404,22 @@ with tab_paycheck:
                 conn, gross_pay=gross_pay, pay_frequency=label_to_freq[freq_label],
                 filing_status=label_to_status[filing_label],
                 w4_is_2020_or_later=w4_is_2020_or_later,
+                is_nonresident_alien=is_nra,
+                ca_filing_status=label_to_status[ca_filing_label],
                 step2_checkbox=step2, step3_dependent_credits=step3,
                 step4a_other_income=step4a, step4b_deductions=step4b,
                 step4c_extra_withholding=step4c, pre2020_allowances=pre2020_allowances,
                 ca_regular_allowances=ca_reg, ca_estimated_deduction_allowances=ca_est,
+                ca_extra_withholding=ca_extra,
+                exempt_federal_income_tax=exempt_federal, exempt_social_security=exempt_ss,
+                exempt_medicare=exempt_medicare, exempt_state_income_tax=exempt_ca_income,
+                exempt_sdi=exempt_sdi,
+                pretax_401k_traditional=pretax_401k, pretax_401k_age_50_or_older=age_50,
+                pretax_hsa=pretax_hsa, pretax_hsa_family_coverage=hsa_family,
+                pretax_hsa_age_55_or_older=age_55, pretax_health_fsa=pretax_health_fsa,
+                pretax_dependent_care_fsa=pretax_dep_fsa, pretax_medical=pretax_medical,
+                pretax_dental=pretax_dental, pretax_vision=pretax_vision,
+                ytd_wages_before_this_period=(ytd_input if state_ytd else None),
             )
 
     result = st.session_state.get("paycheck_result")
@@ -355,6 +434,7 @@ with tab_paycheck:
 
         rows = [
             ("Take-home pay", result["take_home_pay"]),
+            ("Pre-tax benefits", result["pretax_benefits_this_period"]),
             ("Federal withholding", result["federal_withholding"]),
             ("Social Security", result["social_security"]),
             ("Medicare", result["medicare"]),

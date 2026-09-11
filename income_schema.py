@@ -336,6 +336,28 @@ CREATE TABLE IF NOT EXISTS federal_withholding_constants (
     UNIQUE (tax_year, constant_type, filing_status)
 );
 
+-- Pub 15-T's "Withholding Adjustment for Nonresident Alien Employees"
+-- (2026 ed., p.6-7): before figuring federal withholding for a
+-- nonresident alien employee, add a per-pay-period dollar amount to
+-- their wages -- Table 1 if a pre-2020 W-4 is on file (or first paid
+-- before 2020 with no newer W-4 submitted), Table 2 if a 2020+ W-4 is on
+-- file. Explicitly does NOT affect Social Security, Medicare, or FUTA
+-- liability (confirmed in the same source text) -- this is a FEDERAL
+-- INCOME TAX WITHHOLDING-ONLY adjustment, applied nowhere else. A
+-- separate table from federal_withholding_constants since this varies by
+-- PAY PERIOD, a dimension none of that table's other constant_types has.
+CREATE TABLE IF NOT EXISTS federal_nra_wage_additions (
+    id                    SERIAL PRIMARY KEY,
+    tax_year              INTEGER NOT NULL,
+    w4_vintage            TEXT NOT NULL,     -- 'pre2020' | '2020plus'
+    pay_periods_per_year  INTEGER NOT NULL,  -- 52, 26, 24, 12, 4, 2, 1, 260
+    amount                NUMERIC NOT NULL,
+    citation              TEXT,
+    source_url            TEXT,
+    as_of                 DATE,
+    UNIQUE (tax_year, w4_vintage, pay_periods_per_year)
+);
+
 -- California income tax withholding (EDD's "California Withholding
 -- Schedules," Method B -- Exact Calculation Method) annual bracket
 -- tables, keyed by RATE CATEGORY (only 3 buckets -- deliberately NOT the
@@ -398,6 +420,31 @@ CREATE TABLE IF NOT EXISTS ca_sdi_rate (
     as_of       DATE,
     UNIQUE (tax_year)
 );
+
+-- Pre-tax benefit ANNUAL contribution/election limits (401(k), HSA, FSA)
+-- -- IRS-set via Notice/Rev. Proc., republished yearly, same "annually-
+-- republished data" class as the withholding tables above, NOT a
+-- FICA-style structural constant (unlike FICA_SS_WAGE_BASE, these come
+-- from a DIFFERENT IRS publication cadence per benefit type, not SSA.gov).
+-- Each benefit_type is an independently-published dollar figure with its
+-- own citation, not a constant_type x category cross-product -- a flat
+-- list keyed by benefit_type alone is the right shape (see
+-- payroll_withholding.py's _resolve_limit_keys for how e.g. the 401(k)
+-- base limit and its age-50+ catch-up, two separate rows here, get
+-- SUMMED for one employee's applicable limit).
+CREATE TABLE IF NOT EXISTS pretax_benefit_limits (
+    id            SERIAL PRIMARY KEY,
+    tax_year      INTEGER NOT NULL,
+    benefit_type  TEXT NOT NULL,  -- '401k_elective_deferral' | '401k_catchup_50' |
+                                   -- 'hsa_self_only' | 'hsa_family' | 'hsa_catchup_55' |
+                                   -- 'health_fsa' | 'dependent_care_fsa' |
+                                   -- 'dependent_care_fsa_mfs'
+    amount        NUMERIC NOT NULL,
+    citation      TEXT,
+    source_url    TEXT,
+    as_of         DATE,
+    UNIQUE (tax_year, benefit_type)
+);
 """
 
 
@@ -407,8 +454,9 @@ def create():
     print("income domain schema created (income_tax_topics, ca_income_tax_brackets, "
           "ca_standard_deduction, ca_income_credits, ca_eitc_table, income_rule_embeddings, "
           "entity_annual_tax_rules, llc_fee_brackets, fiduciary_exemption_credit, "
-          "federal_withholding_brackets, federal_withholding_constants, ca_withholding_brackets, "
-          "ca_withholding_constants, ca_sdi_rate)")
+          "federal_withholding_brackets, federal_withholding_constants, "
+          "federal_nra_wage_additions, ca_withholding_brackets, "
+          "ca_withholding_constants, ca_sdi_rate, pretax_benefit_limits)")
     status()
 
 
@@ -418,8 +466,9 @@ def status():
                 "ca_income_credits", "ca_eitc_table", "income_rule_embeddings",
                 "schedule_ca_inventory", "entity_annual_tax_rules", "llc_fee_brackets",
                 "fiduciary_exemption_credit", "federal_withholding_brackets",
-                "federal_withholding_constants", "ca_withholding_brackets",
-                "ca_withholding_constants", "ca_sdi_rate"):
+                "federal_withholding_constants", "federal_nra_wage_additions",
+                "ca_withholding_brackets", "ca_withholding_constants", "ca_sdi_rate",
+                "pretax_benefit_limits"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:26} {n} rows")
     conn.close()
