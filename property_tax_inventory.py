@@ -138,15 +138,40 @@ ITEMS = [
      "specific formula), and a taxpayer may not even know if their own parcel is inside a CFD. "
      "Structurally outside the 1% constitutional cap entirely, not a rate this assistant could "
      "approximate."),
-    ("excluded", None, "prop8-decline", "Proposition 8 decline-in-value / lower-of-factored-or-market enrollment",
-     "both", "moderate", "Cal. Const. Art. XIII A; BOE Pub. 800-10 p.1, p.3",
+    ("prop8_decline", None, "prop8-decline-market-value",
+     "Proposition 8 decline-in-value, ordinary market decline (lower-of-factored-or-market enrollment)",
+     "both", "moderate", "Rev. & Tax. Code Sec. 51(a)(2), (e); Cal. Const. Art. XIII A",
+     "built", None,
+     "REVERSAL of this session's own prior conclusion, reached 3 separate times, that this needed "
+     "the property's full multi-year assessment history -- that assumption was WRONG, caught only "
+     "by reading R&TC Sec. 51 directly in full (not a secondary source). Sec. 51(a)(1)'s factored "
+     "base year value (FBYV) ceiling compounds PURELY from the original base year value at up to "
+     "2%/year, NEVER reset or path-dependent on any intervening year's actual enrolled value; Sec. "
+     "51(e) confirms the assessor just re-compares current full cash value against that SAME "
+     "independently-compounding ceiling every year until it's exceeded again. So a current-year "
+     "determination needs only the original purchase price/year (already used by the core estimate) "
+     "plus one more trusted stated fact: current market value -- assessed_value = min(FBYV, "
+     "current_market_value). Built via property_tax.compute_property_tax_prop8_decline / "
+     "engine._property_prop8_decline_composed_answer. Does NOT compose with the county-average "
+     "override rate (a disclosed v1 gap, same 'not every pairwise combination' precedent as DV+county "
+     "and DV+Prop19). See 'prop8-decline-damage-destruction' below for the genuinely different, "
+     "still-deferred disaster/destruction case."),
+    ("prop8_decline", None, "prop8-decline-damage-destruction",
+     "Proposition 8 decline-in-value for property damaged/destroyed by disaster",
+     "both", "moderate", "Rev. & Tax. Code Sec. 51(b), (c)",
      "deferred_new_engine", None,
-     "Multi-year, path-dependent state a single stated-facts question can't reconstruct -- same "
-     "complexity class as AMT's multi-year-basis limitation. Correctly answering 'what is my "
-     "assessed value today' for a property that has ever been under Prop 8 status requires "
-     "either trusting a stated current assessed value (defeats the purpose of computing it) or "
-     "tracking every intervening year's actual market-value enrollment, which almost no taxpayer "
-     "reports accurately from memory."),
+     "GENUINELY DIFFERENT from the ordinary market-decline case above -- itself a real multi-year, "
+     "path-dependent mechanic, verified directly from the statute text, not conflated with the "
+     "ordinary case: if the county has NOT adopted a Sec. 170 disaster-relief ordinance, land and "
+     "improvements are valued SEPARATELY, and the result 'shall then become the base year value of "
+     "the real property until that property is restored, repaired, or reconstructed' (Sec. 51(b)) -- "
+     "a new, persistent base year value this codebase has no inputs to track. If the county HAS "
+     "adopted a Sec. 170 ordinance, the value is computed under that entirely separate provision "
+     "(Sec. 51(c)), which this codebase doesn't model at all. Real path exists (county assessor "
+     "records, Sec. 170 ordinances), just not centrally ingested -- same tractability class as "
+     "local-tra-rate, not not_applicable. engine.py actively walls this case off (detect_prop8_"
+     "damage_destruction_exclusion) before it could ever be silently miscomputed via the ordinary-"
+     "decline formula."),
     ("parent_child_exclusion", None, "parent-child-exclusion", "Prop 19 parent-child/grandparent-grandchild exclusion eligibility",
      "both", "moderate", "Rev. & Tax. Code Sec. 63.2; Cal. Const. Art. XIII A Sec. 2.1(c); "
      "BOE Letter To Assessors 2026/026",

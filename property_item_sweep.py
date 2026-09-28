@@ -3,17 +3,27 @@ income_item_sweep.py's proven pattern (cached, resumable, mandatory
 regression gate after any change to property_tax.py/engine.py's property
 path).
 
-Covers all 6 built slices (core Prop 13 estimate, Disabled Veterans'
+Covers all 7 built slices (core Prop 13 estimate, Disabled Veterans'
 Exemption, Prop 19 base-year-value transfer, Prop 19 parent-child/
 grandparent-grandchild exclusion, supplemental assessment, county-average
-local override rate) plus the composed purchase+DV path, the remaining 2
+local override rate, Prop 8 decline-in-value for the ordinary market-
+decline case) plus the composed purchase+DV path, the remaining 2
 out-of-scope redirects (local-tra-rate -- the remaining EXACT-per-parcel
-gap, distinct from the county-average slice above -- and prop8-decline;
-Mello-Roos is a 3rd, not_applicable rather than deferred, see property_
-tax_inventory.py), and the missing-fact clarification -- using CORRECTED
-hand-verified values (the Prop 19 100%/105%/110% timing mechanic was wrong
-in an early design and fixed before any of these cases were locked in; see
-property_tax.py's own docstring for the correction).
+gap, distinct from the county-average slice above -- and prop8-decline-
+damage-destruction, the genuinely different disaster/destruction case,
+distinct from the ordinary-decline slice above; Mello-Roos is a 3rd,
+not_applicable rather than deferred, see property_tax_inventory.py), and
+the missing-fact clarification -- using CORRECTED hand-verified values
+(the Prop 19 100%/105%/110% timing mechanic was wrong in an early design
+and fixed before any of these cases were locked in; see property_tax.py's
+own docstring for the correction).
+
+The Prop 8 decline-in-value cases are the SECOND such reversal this
+session: this item was assessed "genuinely out of reach" 3 separate times
+before being verified tractable by reading Rev. & Tax. Code Sec. 51
+directly in full -- see property_tax.py's own SECOND correction-found note
+for the exact statutory reasoning (the factored base year value ceiling
+never resets or depends on intervening-year history).
 
 The county-override-rate dollar cases use REAL data, independently
 verified this session (not just BOE-worked-example-adjacent like the
@@ -212,8 +222,35 @@ ITEMS = [
      {"status": "needs_review", "domain": "property"}),
     ("do I live in a mello-roos CFD district",
      {"status": "needs_review", "domain": "property"}),
+    # zero-personal-fact Prop 8 question -> now reached via the missing-
+    # fact path (detect_prop8_decline_signal True, all 3 facts missing),
+    # NOT the retired out-of-scope stub -- same expected dict, different
+    # underlying path; regression-guards the retirement didn't break this
     ("my home's value declined under prop 8, what happens to my assessment",
      {"status": "needs_review", "domain": "property"}),
+
+    # --- G: Prop 8 decline-in-value (ordinary market decline) ---
+    # below FBYV -> Prop 8 active: $500,000/2015 -> FBYV $621,687.15 (11
+    # yrs @ 2%, same formula as case A); market value $450,000 < FBYV ->
+    # assessed_value = $450,000.00, tax = 1% x 450,000 = $4,500.00
+    ("I bought my house for $500,000 in 2015 and it's currently only worth $450,000 due to a decline in value. What is my assessed value under Prop 8?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop8_decline",
+      "taxable": True, "tax": 4500.00}),
+    # above FBYV -> Prop 8 NOT active (regression guard against an "always
+    # take market value" bug): market value $700,000 > FBYV $621,687.15 ->
+    # assessed_value = FBYV = $621,687.15, tax = 1% x 621,687.15 = $6,216.87
+    ("I bought my house for $500,000 in 2015 and its current market value is $700,000. What is my assessed value under Prop 8?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop8_decline",
+      "taxable": False, "tax": 6216.87}),
+    # damage/destruction exclusion -> genuinely different mechanic, walled
+    # off before the ordinary-decline formula ever runs
+    ("My house was destroyed in a wildfire. I bought it for $500,000 in 2010. What's my assessed value now under Prop 8?",
+     {"status": "needs_review", "domain": "property"}),
+    # missing market value -> Prop8 vocab + price/year stated, no market
+    # value -> must ask, not guess
+    ("I bought my house for $500,000 in 2015. Has it declined in value?",
+     {"status": "needs_review", "domain": "property"}),
+
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)
     ("can I use the parent-child exclusion to avoid reassessment",

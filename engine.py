@@ -8163,7 +8163,45 @@ PROP19_TERMS = {
 LOCAL_RATE_OUT_OF_SCOPE_TERMS = {"property tax rate", "tax rate area", "tax rate areas"}
 MELLO_ROOS_OUT_OF_SCOPE_TERMS = {"mello-roos", "mello roos", "cfd", "community facilities district",
                                  "special assessment", "special tax district"}
-PROP8_DECLINE_OUT_OF_SCOPE_TERMS = {"prop 8", "proposition 8", "decline in value", "declined in value"}
+
+# Prop 8 decline-in-value (R&TC 51(a)/(e), ORDINARY market-decline case
+# only -- see property_tax.compute_property_tax_prop8_decline's own
+# docstring for the "no intervening-year history needed" correction this
+# session verified directly against the statute). Two-tier trigger vocab:
+# PROP8_EXPLICIT_TERMS is safe alone (the original out-of-scope term set,
+# unambiguous); PROP8_IMPLICIT_TERMS is generic decline phrasing that MUST
+# be gated on PROP8_PROPERTY_CONTEXT_TERMS co-occurrence -- ungated, it
+# could intercept an unrelated question (e.g. a stock/investment "value
+# dropped") before _answer()'s own sales/income router ever sees it, since
+# _property_has_any_signal runs first. A false positive here only ever
+# produces a safe needs_review deferral or clarifying question -- never a
+# wrong dollar figure -- by construction of how the detectors below gate
+# the compute path.
+PROP8_EXPLICIT_TERMS = {"prop 8", "proposition 8", "decline in value", "declined in value"}
+PROP8_IMPLICIT_TERMS = {
+    "worth less than i paid", "worth less than what i paid",
+    "market value dropped", "market value has dropped",
+    "value dropped", "value has dropped", "market value declined",
+}
+PROP8_PROPERTY_CONTEXT_TERMS = {"home", "house", "property", "real estate", "assessed value", "assessment"}
+# R&TC 51(b)/(c) -- property damaged/destroyed by disaster/misfortune/
+# calamity is a GENUINELY DIFFERENT, itself multi-year/path-dependent
+# mechanic (separate land/improvement computation, or deferred to a
+# county's own Sec. 170 ordinance) -- see property_tax.py's own SECOND
+# correction-found note. Deliberately biased toward OVER-triggering: a
+# false positive here just produces a safe deferral; a false negative
+# would silently run the ordinary-decline formula on a damage/destruction
+# fact pattern, producing a confidently WRONG number.
+PROP8_DAMAGE_DESTRUCTION_TERMS = {
+    "damaged", "destroyed", "disaster", "wildfire", "calamity", "misfortune",
+    "burned down", "burnt down", "fire damage", "flood damage", "earthquake damage",
+    "flood", "earthquake",
+}
+PROP8_MARKET_VALUE_ANCHOR_TERMS = {
+    "current market value", "now worth", "worth now", "currently worth",
+    "worth today", "market value is", "market value of", "now only worth",
+    "full cash value", "fair market value", "fmv",
+}
 
 # Parent-child/grandparent-grandchild exclusion eligibility now lives in
 # property_eligibility.py (a real determination, not an out-of-scope
@@ -8318,9 +8356,71 @@ def detect_mello_roos_out_of_scope(question: str) -> bool:
     return any(t in q for t in MELLO_ROOS_OUT_OF_SCOPE_TERMS)
 
 
-def detect_prop8_decline_out_of_scope(question: str) -> bool:
+def detect_prop8_decline_signal(question: str) -> bool:
+    """Mirrors detect_property_estimate_signal's own AND-of-two-term-sets
+    shape -- PROP8_EXPLICIT_TERMS alone is enough (already unambiguous,
+    same set this feature originally shipped with as an out-of-scope
+    stub); PROP8_IMPLICIT_TERMS (generic decline phrasing) additionally
+    requires PROP8_PROPERTY_CONTEXT_TERMS co-occurrence, or it could
+    intercept an unrelated non-property question before _answer()'s own
+    sales/income router runs."""
     q = question.lower()
-    return any(t in q for t in PROP8_DECLINE_OUT_OF_SCOPE_TERMS)
+    if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
+        return False
+    if any(t in q for t in PROP8_EXPLICIT_TERMS):
+        return True
+    if not any(t in q for t in PROP8_IMPLICIT_TERMS):
+        return False
+    return any(t in q for t in PROP8_PROPERTY_CONTEXT_TERMS)
+
+
+def detect_prop8_damage_destruction_exclusion(question: str) -> bool:
+    """R&TC 51(b)/(c) -- a genuinely different, itself multi-year/path-
+    dependent mechanic (see PROP8_DAMAGE_DESTRUCTION_TERMS's own comment)
+    that must be walled off BEFORE the ordinary-decline compute path ever
+    runs. Gated on property/assessment context so a bare "damaged"/
+    "destroyed" doesn't hijack an unrelated question."""
+    q = question.lower()
+    if not any(t in q for t in PROP8_DAMAGE_DESTRUCTION_TERMS):
+        return False
+    return (detect_prop8_decline_signal(question) or detect_property_estimate_signal(question)
+            or "assessed value" in q or "assessment" in q)
+
+
+def _property_prop8_extract(question: str):
+    """Shared extraction for the Prop 8 composed answer and its missing-
+    fact counterpart: purchase_price, purchase_year, current_market_value,
+    current_tax_year. Mirrors _property_dv_composed_answer's year/amount
+    handling (earliest year = purchase year, a later distinct year = the
+    current tax year, else DEFAULT_LIEN_YEAR) and its anchor-based
+    disambiguation between two dollar figures (purchase price vs. current
+    market value) via _amount_near_anchor_edge/_remove_amount_span."""
+    year_matches = list(re.finditer(r"\b(19|20)\d{2}\b", question))
+    if not year_matches:
+        return None, None, None, None
+    year_spans = [m.span() for m in year_matches]
+    amounts = [(a, s, e) for a, s, e in _amounts(question)
+               if all(e <= ys or s >= ye for ys, ye in year_spans)]
+    purchase_match = _amount_near_anchor_edge(question, PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS, amounts)
+    if purchase_match is None:
+        return None, None, None, None
+    purchase_price = purchase_match[0]
+    remaining = _remove_amount_span(amounts, purchase_match)
+    market_match = _amount_near_anchor_edge(question, PROP8_MARKET_VALUE_ANCHOR_TERMS, remaining)
+    # Fallback: no anchor phrase matched (natural phrasing varies too much
+    # to enumerate exhaustively -- e.g. "currently only worth $450,000"
+    # doesn't literally contain any anchor phrase above, found live via
+    # testing), but if exactly ONE dollar figure remains after removing
+    # the purchase price, it's overwhelmingly the market value -- same
+    # "trust the single remaining amount" precedent as the plain core
+    # estimate's own len(amounts) != 1 check.
+    if market_match is None and len(remaining) == 1:
+        market_match = remaining[0]
+    current_market_value = market_match[0] if market_match else None
+    years = sorted(int(m.group(0)) for m in year_matches)
+    purchase_year = years[0]
+    current_tax_year = years[-1] if len(years) > 1 else property_tax.DEFAULT_LIEN_YEAR
+    return purchase_price, purchase_year, current_market_value, current_tax_year
 
 
 def detect_parent_child_exclusion_signal(question: str) -> bool:
@@ -8405,7 +8505,8 @@ def _property_has_any_signal(question: str) -> bool:
     for check in (detect_property_estimate_signal, detect_property_estimate_missing_fact,
                   detect_dv_exemption_signal, detect_prop19_transfer_signal,
                   detect_local_rate_out_of_scope, detect_mello_roos_out_of_scope,
-                  detect_prop8_decline_out_of_scope, detect_parent_child_exclusion_signal,
+                  detect_prop8_decline_signal, detect_prop8_damage_destruction_exclusion,
+                  detect_parent_child_exclusion_signal,
                   detect_supplemental_assessment_signal, detect_supplemental_assessment_missing_fact):
         try:
             if check(question):
@@ -8872,16 +8973,95 @@ def _property_mello_roos_out_of_scope_answer(question: str, base: dict):
     return result
 
 
-def _property_prop8_decline_out_of_scope_answer(question: str, base: dict):
-    if not detect_prop8_decline_out_of_scope(question):
+def _property_prop8_damage_destruction_answer(question: str, base: dict):
+    """R&TC 51(b)/(c) -- property damaged/destroyed by disaster, a
+    genuinely different, itself multi-year/path-dependent mechanic (see
+    property_tax.py's own SECOND correction-found note). Must run FIRST in
+    the Prop 8 group, before the ordinary-decline compute path, so this
+    case is never silently (and wrongly) run through that formula."""
+    if not detect_prop8_damage_destruction_exclusion(question):
         return None
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
-        "Proposition 8 decline-in-value reassessment (where the county assessor enrolls the "
-        "LOWER of your factored base year value or current market value) depends on your "
-        "property's specific multi-year assessment history, which this assistant can't "
-        "reconstruct from a single stated purchase price and year. Your county assessor's "
-        "current-year enrolled value is the only accurate source for this."
+        "Property damaged or destroyed by disaster, misfortune, or calamity follows a genuinely "
+        "DIFFERENT rule than an ordinary market-value decline (Rev. & Tax. Code Sec. 51(b)/(c)): if "
+        "your county has NOT adopted a Sec. 170 disaster-relief ordinance, land and improvements are "
+        "valued separately, and the result becomes a NEW base year value that persists until the "
+        "property is restored, repaired, or reconstructed -- if your county HAS adopted a Sec. 170 "
+        "ordinance, the value is computed under that separate provision entirely. Either way, this "
+        "needs your county assessor's own determination, not a computation from a single stated "
+        "purchase price and market value."
+    )
+    return result
+
+
+def _property_prop8_decline_composed_answer(question: str, base: dict):
+    """Prop 8 decline-in-value, ORDINARY market-decline case -- see
+    property_tax.compute_property_tax_prop8_decline's docstring for the
+    'no intervening-year history needed' mechanic this verifies directly
+    against R&TC 51(a)/(e). Must run BEFORE _property_estimate_with_
+    county_answer/_property_estimate_answer: a Prop-8-flavored question
+    stating ONLY the purchase price (missing the market-value fact) would
+    otherwise be silently answered by the plain estimate as if no Prop 8
+    claim had been made at all -- a confidently-incomplete answer."""
+    if not detect_prop8_decline_signal(question):
+        return None
+    if detect_prop8_damage_destruction_exclusion(question):
+        return None
+    purchase_price, purchase_year, current_market_value, current_tax_year = _property_prop8_extract(question)
+    if purchase_price is None or purchase_year is None or current_market_value is None:
+        return None
+    q = question.lower()
+    homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+    calc = property_tax.compute_property_tax_prop8_decline(
+        purchase_price, purchase_year, current_market_value, current_tax_year,
+        homeowners_exemption=homeowners_exemption)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_prop8_decline",
+              "taxable": calc["prop8_active"], "amount": calc["assessed_value"], "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    if calc["prop8_active"]:
+        result["answer_text"] = (
+            f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} and a current market "
+            f"value of ${current_market_value:,.2f}: your factored base year value would normally be "
+            f"${calc['factored_base_year_value']:,.2f}, but since your stated current market value is "
+            f"LOWER, R&TC Sec. 51(a)(2) requires the county to enroll the lower figure instead -- your "
+            f"estimated {calc['current_tax_year']} assessed value is ${calc['assessed_value']:,.2f} and "
+            f"estimated property tax is about ${calc['tax']:,.2f} ({calc['citation']}). This Prop 8 "
+            "reduction is NOT a permanent new floor -- your assessor re-compares your market value "
+            "against your (still-compounding) factored base year value every year, and normal Prop 13 "
+            "taxation automatically resumes once market value recovers past it. This does not apply to "
+            "property damaged or destroyed by disaster, which follows a different rule."
+        )
+    else:
+        result["answer_text"] = (
+            f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} and a current market "
+            f"value of ${current_market_value:,.2f}: your stated current market value does NOT fall "
+            f"below your factored base year value of ${calc['factored_base_year_value']:,.2f}, so normal "
+            f"Proposition 13 taxation applies (no Prop 8 reduction) -- your estimated "
+            f"{calc['current_tax_year']} assessed value is ${calc['assessed_value']:,.2f} and estimated "
+            f"property tax is about ${calc['tax']:,.2f} ({calc['citation']})."
+        )
+    return result
+
+
+def _property_prop8_decline_missing_fact_answer(question: str, base: dict):
+    if not detect_prop8_decline_signal(question):
+        return None
+    if detect_prop8_damage_destruction_exclusion(question):
+        return None
+    purchase_price, purchase_year, current_market_value, _current_tax_year = _property_prop8_extract(question)
+    if purchase_price is not None and purchase_year is not None and current_market_value is not None:
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate a Proposition 8 decline-in-value determination, I need your original purchase "
+        "price, the year you purchased, AND your property's current market value. Please ask again and "
+        "include all three, for example \"I bought my house for $500,000 in 2015, and it's currently "
+        "only worth $450,000 -- what's my assessed value?\" (If your property was damaged or destroyed "
+        "by a disaster rather than an ordinary market decline, that's a different question -- say so "
+        "explicitly.)"
     )
     return result
 
@@ -9158,6 +9338,8 @@ def _answer_property(question: str):
         "domain": "property",
     }
     for fn in (_property_dv_composed_answer,
+               _property_prop8_damage_destruction_answer,
+               _property_prop8_decline_composed_answer, _property_prop8_decline_missing_fact_answer,
                _property_estimate_with_county_answer, _property_estimate_answer,
                _property_dv_exemption_answer,
                _property_prop19_transfer_answer,
@@ -9165,7 +9347,7 @@ def _answer_property(question: str):
                _property_parent_child_composed_answer, _property_parent_child_exclusion_answer,
                _property_parent_child_checklist_incomplete_answer, _property_parent_child_informational_answer,
                _property_local_rate_with_county_answer, _property_local_rate_out_of_scope_answer,
-               _property_mello_roos_out_of_scope_answer, _property_prop8_decline_out_of_scope_answer,
+               _property_mello_roos_out_of_scope_answer,
                _property_estimate_missing_fact_answer):
         result = fn(question, base)
         if result:

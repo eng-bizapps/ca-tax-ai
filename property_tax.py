@@ -6,30 +6,57 @@ LLM-free, same principle as income_brackets.py/entity_tax.py: a number that
 changes a taxpayer's answer is computed by code, never composed by a model.
 
 Scope, verified against BOE Publication 29/800-10, BOE's official Prop 19
-page, BOE Letters To Assessors, Cal. Const. Art. XIII A, Rev. & Tax. Code,
+page, BOE Letters To Assessors, Cal. Const. Art. XIII A, Rev. & Tax. Code
+(read directly from leginfo.legislature.ca.gov, not a secondary source),
 and the CA State Controller's Office "CA Property Tax Data" portal
-directly (not secondary tax-prep sources) -- see property_tax_inventory.py
-for the full ledger of what's built vs. deliberately excluded and why. Six
-tractable slices: (1) the core Prop 13 base-year-value estimate, (2) the
-Disabled Veterans' Exemption, (3) the Prop 19 base-year-value transfer
-formula, (4) the Prop 19 parent-child/grandparent-grandchild exclusion's
-value-cap formula (eligibility itself is a checklist, see property_
-eligibility.py -- this module only computes the dollar consequence once
-eligibility is already confirmed True), (5) supplemental assessments (a
-bimodal fiscal-year proration rule), (6) county-average local ad-valorem
-OVERRIDE rates (compute_county_override_rate/compute_property_tax_
-estimate_with_county_rate -- a COUNTY-WIDE AVERAGE for 56 of 58 counties,
-sourced from the SCO portal's Allocations+Levies data, NOT an exact
-per-parcel Tax-Rate-Area figure; San Benito and Plumas are deliberately
-excluded, confirmed SCO data errors -- see load_county_override_rates.py's
-own docstring for the cross-check evidence). Still deliberately NOT
-modeled: exact per-parcel local ad-valorem rates by Tax Rate Area (real
-data exists across 58 counties' own differently-formatted rate books,
-just not centrally ingested -- the county-AVERAGE in (6) is a real but
-coarser substitute), Mello-Roos CFD special taxes (no statewide registry
-exists at all), Prop 8 decline-in-value / multi-year assessed-value
-history (path-dependent state a single question can't reconstruct, same
-complexity class as AMT's multi-year-basis limitation).
+directly -- see property_tax_inventory.py for the full ledger of what's
+built vs. deliberately excluded and why. Seven tractable slices: (1) the
+core Prop 13 base-year-value estimate, (2) the Disabled Veterans'
+Exemption, (3) the Prop 19 base-year-value transfer formula, (4) the Prop
+19 parent-child/grandparent-grandchild exclusion's value-cap formula
+(eligibility itself is a checklist, see property_eligibility.py -- this
+module only computes the dollar consequence once eligibility is already
+confirmed True), (5) supplemental assessments (a bimodal fiscal-year
+proration rule), (6) county-average local ad-valorem OVERRIDE rates
+(compute_county_override_rate/compute_property_tax_estimate_with_county_
+rate -- a COUNTY-WIDE AVERAGE for 56 of 58 counties, sourced from the SCO
+portal's Allocations+Levies data, NOT an exact per-parcel Tax-Rate-Area
+figure; San Benito and Plumas are deliberately excluded, confirmed SCO
+data errors -- see load_county_override_rates.py's own docstring for the
+cross-check evidence), (7) Prop 8 decline-in-value for the ORDINARY market-
+decline case (compute_property_tax_prop8_decline -- see the SECOND
+correction note below; damage/destruction stays deferred, a genuinely
+different mechanic). Still deliberately NOT modeled: exact per-parcel
+local ad-valorem rates by Tax Rate Area (real data exists across 58
+counties' own differently-formatted rate books, just not centrally
+ingested -- the county-AVERAGE in (6) is a real but coarser substitute),
+Mello-Roos CFD special taxes (no statewide registry exists at all), and
+Prop 8 decline-in-value for property damaged/destroyed by disaster (Rev. &
+Tax. Code Sec. 51(b)/(c) -- a genuinely separate, itself multi-year/path-
+dependent mechanic, see (7) above).
+
+SECOND CORRECTION FOUND AND FIXED THIS SESSION, worth remembering just as
+much as the Prop 19 one below: Prop 8 decline-in-value was assessed THREE
+SEPARATE TIMES as "genuinely out of reach" on the theory that a current-
+year determination needs the property's full multi-year assessment
+history. That assumption was WRONG, caught only by reading Rev. & Tax.
+Code Sec. 51 directly in full (not a secondary source, not recalled tax
+knowledge) -- Sec. 51(a)(1)'s factored base year value ceiling compounds
+PURELY from the original base year value at up to 2%/year, NEVER reset or
+path-dependent on any intervening year's actual enrolled value; Sec. 51(e)
+confirms the assessor just re-compares current full cash value against
+that same independently-compounding ceiling every year "until that value
+exceeds" it. No intervening-year history is needed for the ORDINARY case
+-- only original purchase price/year (already used by the core estimate)
+plus a stated CURRENT market value. Sec. 51(b) (damage/destruction, no
+county Sec. 170 ordinance) IS a genuine, separate multi-year mechanic
+(land/improvements computed separately, becoming a new base year value
+"until restored, repaired, or reconstructed") -- correctly still deferred,
+not conflated with the ordinary case. Lesson: don't accept "genuinely out
+of reach" as settled without a direct primary-source read, even after
+multiple prior passes reached the same conclusion -- the SAME lesson AMT's
+own build history (see income-coverage-blueprint-progress memory) learned
+repeatedly this session for a different domain.
 """
 # Property tax runs on a FISCAL year (Jul 1-Jun 30) driven by the PRIOR
 # Jan 1 lien date -- NOT the same year-boundary convention income_brackets.
@@ -162,6 +189,77 @@ def compute_property_tax_with_dv_exemption(conn, purchase_price: float, purchase
             "income_limit": dv["income_limit"], "low_income_exemption": dv["low_income_exemption"],
             "assessed_value": round(assessed_value, 2), "tax": tax,
             "citation": DV_EXEMPTION_CITATION, "source_url": DV_EXEMPTION_SOURCE_URL}
+
+
+PROP8_DECLINE_CITATION = "Rev. & Tax. Code Sec. 51(a)(2), (e); Cal. Const. Art. XIII A"
+PROP8_DECLINE_SOURCE_URL = "https://www.boe.ca.gov/pdf/pub800-10.pdf"
+
+
+def compute_property_tax_prop8_decline(purchase_price: float, purchase_year: int,
+                                        current_market_value: float,
+                                        current_tax_year: int = DEFAULT_LIEN_YEAR,
+                                        homeowners_exemption: bool = False):
+    """R&TC 51(a) decline-in-value ('Prop 8') for the ORDINARY market-
+    decline case -- see this module's own SECOND correction-found note for
+    the full reasoning. Confirmed directly from the statute text (not a
+    secondary source): the factored base year value (FBYV) ceiling under
+    51(a)(1) compounds PURELY from the original base year value at up to
+    2%/year, never reset or path-dependent on any intervening year's
+    actual enrolled value -- 51(e) confirms the assessor just re-compares
+    current full cash value against that SAME independently-compounding
+    ceiling every year "until that value exceeds" it, at which point
+    normal Prop 13 taxation resumes automatically. So a current-year
+    determination needs NO intervening-year history -- only the same
+    purchase_price/purchase_year compute_property_tax_estimate already
+    uses, plus one more stated fact: current_market_value (trusted the
+    same "trust the stated figures" way every other compute function in
+    this codebase already works).
+
+    assessed_value = min(factored_base_year_value, current_market_value),
+    THEN the Homeowners' Exemption (if any) is subtracted -- compare
+    first, exempt second, mirroring compute_property_tax_estimate's own
+    internal order exactly. Never subtract the exemption from each side
+    independently before the comparison.
+
+    Does NOT detect or guard against Rev. & Tax. Code 51(b)/(c) (property
+    damaged/destroyed by disaster/misfortune/calamity) -- that is a
+    GENUINELY DIFFERENT, itself multi-year/path-dependent mechanic (land
+    and improvements computed separately, becoming a new base year value
+    "until restored, repaired, or reconstructed" under 51(b), or deferred
+    entirely to a county's own Sec. 170 ordinance under 51(c)). The CALLER
+    (engine.py) must wall that off BEFORE calling this function -- same
+    "trust the stated figures, gate at the caller" precedent compute_
+    prop19_base_year_transfer's own docstring documents for its own
+    out-of-scope inputs.
+
+    KNOWN v1 GAP, not fixed here: does not compose with the county-
+    average local override rate (compute_county_override_rate) -- the
+    rate applied to whatever assessed_value results is orthogonal to
+    whether that value came from Prop 8 or not, but this codebase's own
+    established precedent this session is to not compose every pairwise
+    combination in v1 (DV+county isn't composed, DV+Prop19 isn't composed
+    either) -- a future compute_property_tax_prop8_decline_with_county_
+    rate remains a clean, low-risk addition later.
+
+    Returns None if the core estimate fails, or current_market_value is
+    None/<= 0."""
+    base = compute_property_tax_estimate(purchase_price, purchase_year, current_tax_year,
+                                          homeowners_exemption=False)
+    if not base:
+        return None
+    if current_market_value is None or current_market_value <= 0:
+        return None
+    factored_base_year_value = base["factored_base_year_value"]
+    prop8_active = current_market_value < factored_base_year_value
+    pre_exemption_assessed = min(factored_base_year_value, current_market_value)
+    exemption_applied = HOMEOWNERS_EXEMPTION_AMOUNT if homeowners_exemption else 0.0
+    assessed_value = max(0.0, pre_exemption_assessed - exemption_applied)
+    tax = round(PROP13_BASE_RATE * assessed_value, 2)
+    return {**base, "current_market_value": current_market_value, "prop8_active": prop8_active,
+            "pre_exemption_assessed_value": round(pre_exemption_assessed, 2),
+            "homeowners_exemption": homeowners_exemption, "exemption_applied": exemption_applied,
+            "assessed_value": round(assessed_value, 2), "tax": tax,
+            "citation": PROP8_DECLINE_CITATION, "source_url": PROP8_DECLINE_SOURCE_URL}
 
 
 # Timing bucket -> the percentage of the ORIGINAL home's full cash value
