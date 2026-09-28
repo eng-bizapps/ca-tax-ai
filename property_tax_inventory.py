@@ -129,6 +129,33 @@ ITEMS = [
      "DEFAULT_LIEN_YEAR by about a fiscal year; an exact-match lookup would silently break every "
      "year the moment DEFAULT_LIEN_YEAR is bumped. Still a county-WIDE AVERAGE, not exact-per-"
      "parcel -- see 'local-tra-rate' above for that remaining gap."),
+    ("tra_rate_pilot", None, "tra-rate-kern-pilot",
+     "Exact per-TRA local ad-valorem rate, Kern County pilot (2,455 TRAs)",
+     "addition", "narrow", "Kern County Auditor-Controller-County Clerk, Annual Property Tax Rate "
+     "Book, FY2025-26",
+     "built", None,
+     "A NARROW, EXPLICITLY-SCOPED PILOT for exactly ONE county (Kern) -- NOT a general solution to "
+     "'local-tra-rate' above, which stays deferred for the other 57 counties. Built after a live "
+     "survey confirmed exact TRA data is a genuine 58-county data-engineering problem with no shared "
+     "format (LA County's own tool is bot-gated; Orange and San Diego each use a different PDF layout "
+     "than Kern's; Riverside appears to require a paid physical copy; San Bernardino has no public "
+     "machine-readable source found at all) -- rather than attempt all 58, this proves the pattern is "
+     "real and usable for one. extract_kern_tra_rates.py (own docstring has full methodology) "
+     "extracts Kern's own published rate book PDF via pdfplumber: words clustered into rows, split at "
+     "an empirically-derived column gutter (a naive 50%-width crop was tested and rejected -- it "
+     "misattributes words across the true column boundary), then a block-parsing state machine "
+     "(AREA CODE header -> district line-items -> TOTAL) that correctly handles a real layout quirk "
+     "found live -- a block too long for one column continues into the next with its header REPEATED "
+     "as a continuation marker, which an earlier naive version mistook for a new block, orphaning the "
+     "real one. Validated against the full document: 2,455 ordinary TRAs, 0 unclosed blocks, 0 "
+     "duplicate codes, rate range 1.03%-1.27% (all plausible). `000-`-prefixed codes (state-assessed "
+     "utility/railroad/pipeline categories) excluded -- not ordinary real property. Built via "
+     "property_tax.compute_tra_rate / compute_property_tax_estimate_with_tra_rate, engine._property_"
+     "estimate_with_tra_answer / _property_tra_rate_answer -- both run BEFORE their county-average "
+     "counterparts (more specific wins) and both require Kern County AND an explicit TRA-number "
+     "anchor phrase ('TRA', 'tax rate area', 'area code') to fire, falling through cleanly to the "
+     "county-average otherwise. Same 'most recent tax_year <= requested' lookup design as 'local-"
+     "override-rate', same reason."),
     ("excluded", None, "mello-roos", "Mello-Roos Community Facilities District special taxes",
      "addition", "moderate", "Mello-Roos Community Facilities Act of 1982, Gov. Code Sec. 53311 et seq.",
      "not_applicable", None,

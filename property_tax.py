@@ -1,16 +1,18 @@
 """Ring 4 -- deterministic California property tax math (Prop 13 base year
 value, Disabled Veterans' Exemption, Prop 19 base-year-value transfers,
 Prop 19 parent-child exclusion value cap, supplemental assessments,
-county-average local override rates).
+county-average local override rates, an exact-per-TRA rate pilot for Kern
+County).
 LLM-free, same principle as income_brackets.py/entity_tax.py: a number that
 changes a taxpayer's answer is computed by code, never composed by a model.
 
 Scope, verified against BOE Publication 29/800-10, BOE's official Prop 19
 page, BOE Letters To Assessors, Cal. Const. Art. XIII A, Rev. & Tax. Code
 (read directly from leginfo.legislature.ca.gov, not a secondary source),
-and the CA State Controller's Office "CA Property Tax Data" portal
-directly -- see property_tax_inventory.py for the full ledger of what's
-built vs. deliberately excluded and why. Seven tractable slices: (1) the
+the CA State Controller's Office "CA Property Tax Data" portal, and Kern
+County's own published rate book directly -- see property_tax_inventory.py
+for the full ledger of what's built vs. deliberately excluded and why.
+Eight tractable slices: (1) the
 core Prop 13 base-year-value estimate, (2) the Disabled Veterans'
 Exemption, (3) the Prop 19 base-year-value transfer formula, (4) the Prop
 19 parent-child/grandparent-grandchild exclusion's value-cap formula
@@ -26,14 +28,23 @@ data errors -- see load_county_override_rates.py's own docstring for the
 cross-check evidence), (7) Prop 8 decline-in-value for the ORDINARY market-
 decline case (compute_property_tax_prop8_decline -- see the SECOND
 correction note below; damage/destruction stays deferred, a genuinely
-different mechanic). Still deliberately NOT modeled: exact per-parcel
-local ad-valorem rates by Tax Rate Area (real data exists across 58
-counties' own differently-formatted rate books, just not centrally
-ingested -- the county-AVERAGE in (6) is a real but coarser substitute),
-Mello-Roos CFD special taxes (no statewide registry exists at all), and
-Prop 8 decline-in-value for property damaged/destroyed by disaster (Rev. &
-Tax. Code Sec. 51(b)/(c) -- a genuinely separate, itself multi-year/path-
-dependent mechanic, see (7) above).
+different mechanic), (8) exact per-TRA combined rates for Kern County ONLY
+(compute_tra_rate/compute_property_tax_estimate_with_tra_rate -- a
+narrowly-scoped PILOT proving exact rate data is real and usable, NOT a
+general 58-county solution; every other county still uses the (6)
+county-average -- see extract_kern_tra_rates.py's own docstring for the
+extraction methodology and property_tax_inventory.py's separate
+'tra-rate-kern-pilot' vs. 'local-tra-rate' items). Still deliberately NOT
+modeled: exact per-parcel local ad-valorem rates by Tax Rate Area for the
+OTHER 57 counties (real data exists, each in its own differently-formatted
+source -- confirmed via live survey this session that even the largest
+counties share no common format, and at least one -- LA -- gates its own
+tool behind bot-protection -- the county-AVERAGE in (6) is the real but
+coarser substitute for those 57), Mello-Roos CFD special taxes (no
+statewide registry exists at all), and Prop 8 decline-in-value for
+property damaged/destroyed by disaster (Rev. & Tax. Code Sec. 51(b)/(c) --
+a genuinely separate, itself multi-year/path-dependent mechanic, see (7)
+above).
 
 SECOND CORRECTION FOUND AND FIXED THIS SESSION, worth remembering just as
 much as the Prop 19 one below: Prop 8 decline-in-value was assessed THREE
@@ -659,3 +670,72 @@ def compute_property_tax_estimate_with_county_rate(conn, purchase_price: float, 
             "year_lag": rate_info["year_lag"], "tax": tax,
             "citation": f"{PROP13_CITATION}; {rate_info['citation']}",
             "source_url": rate_info["source_url"]}
+
+
+def compute_tra_rate(conn, county: str, tra_number: str, tax_year: int = DEFAULT_LIEN_YEAR):
+    """Exact per-Tax-Rate-Area (TRA) combined rate lookup -- a NARROW
+    PILOT for exactly ONE county (Kern), not a general solution. Mirrors
+    compute_county_override_rate's shape (same "most recent tax_year <=
+    requested" lookup, same reasoning -- this data is only knowable in
+    arrears relative to DEFAULT_LIEN_YEAR, same as the county-average
+    data). tra_number is the zero-padded "NNN-NNN" form Kern's own rate
+    book uses (e.g. "001-002") -- the caller normalizes user-typed
+    variants (e.g. "1-2") before calling this.
+
+    Unlike compute_county_override_rate, this stores and returns the FULL
+    combined rate directly (already 1% base + all overrides, exactly as
+    Kern's own rate book publishes it) -- not a separately-tracked override
+    portion. See extract_kern_tra_rates.py's own docstring for exactly how
+    this data was extracted and validated (2,455 TRAs, 0 unclosed/
+    duplicate blocks).
+
+    Returns None if county isn't "Kern" (no other county has any rows in
+    this table) or the TRA number isn't found (unrecognized/mistyped, or
+    a real TRA this pilot's extraction didn't capture)."""
+    r = conn.execute(
+        "SELECT tax_year, area_name, total_rate, citation, source_url, as_of "
+        "FROM tra_rates WHERE county=%s AND tra_number=%s AND tax_year<=%s "
+        "ORDER BY tax_year DESC LIMIT 1", (county, tra_number, tax_year)).fetchone()
+    if not r:
+        return None
+    data_vintage_year, area_name, total_rate, citation, source_url, as_of = r
+    return {
+        "county": county, "tra_number": tra_number, "area_name": area_name,
+        "requested_tax_year": tax_year, "data_vintage_year": data_vintage_year,
+        "data_vintage_fiscal_year_label": f"{data_vintage_year}-{str(data_vintage_year + 1)[-2:]}",
+        "year_lag": tax_year - data_vintage_year,
+        "total_rate": float(total_rate), "citation": citation, "source_url": source_url,
+        "as_of": as_of,
+    }
+
+
+def compute_property_tax_estimate_with_tra_rate(conn, purchase_price: float, purchase_year: int,
+                                                 county: str, tra_number: str,
+                                                 current_tax_year: int = DEFAULT_LIEN_YEAR,
+                                                 homeowners_exemption: bool = False):
+    """Composes compute_property_tax_estimate with compute_tra_rate --
+    mirrors compute_property_tax_estimate_with_county_rate's shape exactly,
+    but applies the TRA's own total_rate DIRECTLY (not PROP13_BASE_RATE +
+    an override, since this table already stores the full combined figure)
+    to the SAME assessed_value the core estimate computes (after the
+    Homeowners' Exemption, if requested -- same order-of-operations
+    precedent as every other composed function in this module).
+
+    Returns None if the core estimate fails OR the (county, tra_number)
+    pair has no row -- the caller falls back to the county-average
+    composed estimate in that case, unchanged."""
+    base = compute_property_tax_estimate(purchase_price, purchase_year, current_tax_year,
+                                          homeowners_exemption=homeowners_exemption)
+    if not base:
+        return None
+    rate_info = compute_tra_rate(conn, county, tra_number, current_tax_year)
+    if not rate_info:
+        return None
+    total_rate = rate_info["total_rate"]
+    tax = round(total_rate * base["assessed_value"], 2)
+    return {**base, "county": county, "tra_number": tra_number, "area_name": rate_info["area_name"],
+            "total_rate": total_rate,
+            "data_vintage_year": rate_info["data_vintage_year"],
+            "data_vintage_fiscal_year_label": rate_info["data_vintage_fiscal_year_label"],
+            "year_lag": rate_info["year_lag"], "tax": tax,
+            "citation": rate_info["citation"], "source_url": rate_info["source_url"]}

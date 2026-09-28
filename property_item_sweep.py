@@ -3,20 +3,28 @@ income_item_sweep.py's proven pattern (cached, resumable, mandatory
 regression gate after any change to property_tax.py/engine.py's property
 path).
 
-Covers all 7 built slices (core Prop 13 estimate, Disabled Veterans'
+Covers all 8 built slices (core Prop 13 estimate, Disabled Veterans'
 Exemption, Prop 19 base-year-value transfer, Prop 19 parent-child/
 grandparent-grandchild exclusion, supplemental assessment, county-average
 local override rate, Prop 8 decline-in-value for the ordinary market-
-decline case) plus the composed purchase+DV path, the remaining 2
-out-of-scope redirects (local-tra-rate -- the remaining EXACT-per-parcel
-gap, distinct from the county-average slice above -- and prop8-decline-
-damage-destruction, the genuinely different disaster/destruction case,
-distinct from the ordinary-decline slice above; Mello-Roos is a 3rd,
-not_applicable rather than deferred, see property_tax_inventory.py), and
-the missing-fact clarification -- using CORRECTED hand-verified values
-(the Prop 19 100%/105%/110% timing mechanic was wrong in an early design
-and fixed before any of these cases were locked in; see property_tax.py's
-own docstring for the correction).
+decline case, exact-per-TRA rates for a Kern County pilot) plus the
+composed purchase+DV path, the remaining 2 out-of-scope redirects
+(local-tra-rate -- the remaining EXACT-per-parcel gap for the OTHER 57
+counties, distinct from both the county-average slice AND the Kern pilot
+above -- and prop8-decline-damage-destruction, the genuinely different
+disaster/destruction case, distinct from the ordinary-decline slice above;
+Mello-Roos is a 3rd, not_applicable rather than deferred, see property_
+tax_inventory.py), and the missing-fact clarification -- using CORRECTED
+hand-verified values (the Prop 19 100%/105%/110% timing mechanic was wrong
+in an early design and fixed before any of these cases were locked in; see
+property_tax.py's own docstring for the correction).
+
+The Kern County TRA cases use REAL extracted data (2,455 actual TRAs, not
+a sample or an average) -- see extract_kern_tra_rates.py's own docstring
+for the extraction methodology (a real column-layout parsing problem,
+solved and validated against the full document) and property_tax_
+inventory.py's 'tra-rate-kern-pilot' item for the explicit narrow scope
+(Kern only -- every other county still uses the county-average).
 
 The Prop 8 decline-in-value cases are the SECOND such reversal this
 session: this item was assessed "genuinely out of reach" 3 separate times
@@ -250,6 +258,26 @@ ITEMS = [
     # value -> must ask, not guess
     ("I bought my house for $500,000 in 2015. Has it declined in value?",
      {"status": "needs_review", "domain": "property"}),
+
+    # --- H: exact-per-TRA rate, Kern County pilot only ---
+    # real extracted TRA 001-001 (BAKERSFIELD INSIDE), total_rate
+    # 0.01163785 (1.163785%) -- same $400,000/2015 scenario as case A
+    # (FBYV $497,349.72) -> tax = round(0.01163785*497349.72, 2) = $5,788.08
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Kern County, TRA 001-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5788.08}),
+    # bare rate-only lookup for the same real TRA
+    ("What is the property tax rate for TRA 001-001 in Kern County?",
+     {"status": "answered", "domain": "property", "category": "property_tax_tra_rate", "rate": 0.01163785}),
+    # unknown Kern TRA (not in the 2,455-row pilot dataset) -> falls back
+    # gracefully to Kern's own county-average estimate, NOT a crash --
+    # same $6,231.29 already verified for the county-average feature
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Kern County, TRA 999-999?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate", "tax": 6231.29}),
+    # a DIFFERENT county's own TRA numbering scheme is never misapplied to
+    # Kern's table -- falls back to THAT county's own average (LA's own
+    # 0.1827% override, already verified for the county-average feature)
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Los Angeles County, TRA 001-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate", "tax": 5882.16}),
 
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)

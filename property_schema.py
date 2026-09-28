@@ -8,7 +8,7 @@ never JSONB-facts" precedent as income_schema.py, which explicitly rejected
 that shape as unauditable (the prior-generation SQL system in this repo
 tried it).
 
-Four genuinely different fact shapes:
+Five genuinely different fact shapes:
   - ca_disabled_veterans_exemption -- inflation-indexed, republished
     annually by BOE Letter To Assessors (R&TC 205.5), same "one row per
     tax_year" shape as income_schema.py's ca_standard_deduction. NOT keyed
@@ -36,6 +36,17 @@ Four genuinely different fact shapes:
     below. See property_tax.compute_county_override_rate for the lookup
     (deliberately NOT an exact tax_year match -- see that function's own
     docstring for why).
+  - tra_rates -- exact per-Tax-Rate-Area (TRA) combined ad-valorem rate,
+    a NARROWLY-SCOPED PILOT for exactly ONE county (Kern) -- NOT a general
+    58-county solution (that stays deferred, see property_tax_inventory.py's
+    'local-tra-rate' item; this is a separate 'tra-rate-kern-pilot' item).
+    Stores the FULL combined rate directly (1% base + all overrides
+    already summed by Kern's own rate book), unlike county_override_rates'
+    override-only figure -- a simpler representation matching what the
+    source actually publishes. Seeded by load_kern_tra_rates.py from a CSV
+    produced by extract_kern_tra_rates.py (a real, hands-on-validated PDF
+    extraction -- see that script's own docstring for the extraction
+    algorithm and the two real bugs found and fixed while building it).
 
 The Homeowners' Exemption ($7,000) is NOT a table here -- it's fixed
 directly in the CA Constitution (Art. XIII Sec. 3(k)), not annually
@@ -44,7 +55,7 @@ in property_tax.py, same class as CASUALTY_LOSS_AGI_FLOOR_RATE in
 income_brackets.py. If ever amended, promote to a tax_year-keyed table then.
 
 Usage:
-  python property_schema.py create   # create all 4 tables (idempotent)
+  python property_schema.py create   # create all 5 tables (idempotent)
   python property_schema.py seed     # insert verified DV-exemption + ledger rows
   python property_schema.py status   # row counts
 """
@@ -121,6 +132,28 @@ CREATE TABLE IF NOT EXISTS county_override_rates (
     as_of         DATE,
     UNIQUE (tax_year, county)
 );
+
+-- Exact per-TRA combined ad-valorem rate -- a NARROW PILOT for exactly ONE
+-- county (Kern), not a general 58-county solution (see property_tax_
+-- inventory.py's separate 'local-tra-rate' vs. 'tra-rate-kern-pilot'
+-- items). total_rate is the FULL combined rate (1% base + all overrides
+-- already summed by the source), unlike county_override_rates.
+-- override_rate above -- a simpler representation matching what Kern's
+-- own rate book actually publishes. Same "most recent tax_year <=
+-- requested" lookup design as county_override_rates, same reason (only
+-- knowable in arrears relative to DEFAULT_LIEN_YEAR).
+CREATE TABLE IF NOT EXISTS tra_rates (
+    id          SERIAL PRIMARY KEY,
+    tax_year    INTEGER NOT NULL,
+    county      TEXT NOT NULL,
+    tra_number  TEXT NOT NULL,
+    area_name   TEXT,
+    total_rate  NUMERIC NOT NULL,
+    citation    TEXT,
+    source_url  TEXT,
+    as_of       DATE,
+    UNIQUE (tax_year, county, tra_number)
+);
 """
 
 # Verified directly against BOE Letter To Assessors 2025/014 (2025-05-21)
@@ -142,7 +175,7 @@ def create():
     with db.get_conn() as conn:
         conn.execute(SCHEMA)
     print("property domain schema created (ca_disabled_veterans_exemption, "
-          "property_rule_embeddings, property_tax_inventory, county_override_rates)")
+          "property_rule_embeddings, property_tax_inventory, county_override_rates, tra_rates)")
     status()
 
 
@@ -166,7 +199,7 @@ def seed():
 def status():
     conn = db.get_conn()
     for tbl in ("ca_disabled_veterans_exemption", "property_rule_embeddings", "property_tax_inventory",
-                "county_override_rates"):
+                "county_override_rates", "tra_rates"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:32} {n} rows")
     conn.close()

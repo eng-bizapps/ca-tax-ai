@@ -8288,6 +8288,41 @@ def _property_county_match(question: str):
     return canonical, m.start(1), m.end(1)
 
 
+# Kern County TRA-number recognition (exact-per-TRA pilot, tra_rates table
+# -- see property_tax.compute_tra_rate's own docstring for the narrow
+# scope). Requires an explicit anchor phrase immediately before the
+# number -- a bare "\d{1,3}-\d{1,3}" pattern alone is NOT safely
+# recognizable as a TRA number (it could be almost anything -- a phone
+# extension, an arbitrary reference number), so this mirrors every other
+# anchor-gated extraction in this file (e.g. _property_supplemental_
+# month_year_re's own month+year anchor requirement). Kern's own rate
+# book prints TRA numbers zero-padded ("001-002"); a taxpayer reading
+# their own bill might type it either way ("TRA 1-2" or "TRA 001-002"),
+# so captured digits are always re-padded to the canonical 3-digit form
+# for lookup, never trusted as typed.
+_KERN_TRA_RE = re.compile(
+    r"(?:\btra\b|\btax rate area\b|\barea code\b)\s*#?\s*(\d{1,3})\s*-\s*(\d{1,3})",
+    re.IGNORECASE)
+
+
+def _property_tra_match(question: str):
+    """Returns (zero-padded 'NNN-NNN' TRA number, start, end), or None.
+    Does NOT check which county the question mentions -- callers must
+    combine this with _property_county_match and confirm the county is
+    Kern (currently the only county with any tra_rates rows) before using
+    the result, since a TRA-number scheme is only meaningful within one
+    county's own numbering. Callers extracting dollar amounts MUST mask
+    (start, end) out of _amounts()'s own list first -- found live: a TRA
+    number like "001-001" is ALSO parsed as phantom dollar amounts by that
+    shared regex (no dollar-sign requirement), the same phantom-digit bug
+    class already hit repeatedly elsewhere in this file (form numbers, IRC
+    sections, ages, percentages)."""
+    m = _KERN_TRA_RE.search(question)
+    if not m:
+        return None
+    return f"{int(m.group(1)):03d}-{int(m.group(2)):03d}", m.start(), m.end()
+
+
 def detect_property_estimate_signal(question: str) -> bool:
     q = question.lower()
     if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
@@ -8516,6 +8551,88 @@ def _property_has_any_signal(question: str) -> bool:
     return False
 
 
+def _property_purchase_amounts(question: str, year_match) -> list:
+    """_amounts() filtered to exclude year_match's own span AND any
+    recognized Kern TRA-number span -- shared by EVERY property-estimate
+    answer function that extracts a purchase price (the TRA-composed, the
+    county-composed, and the plain estimate). Found live: a stated "TRA
+    NNN-NNN" is ALSO parsed as phantom dollar amounts by _amounts() (no
+    dollar-sign requirement) -- masking it only in the TRA-specific answer
+    function wasn't enough, since a question with an unrecognized/wrong-
+    county TRA number correctly falls through to these OTHER functions,
+    which would otherwise hit the exact same phantom-digit corruption
+    (same recurring bug class as form numbers/IRC sections/ages/percents
+    elsewhere in this file) and silently fail to answer at all."""
+    y_start, y_end = year_match.span()
+    amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question) if a_e <= y_start or a_s >= y_end]
+    tra_match = _property_tra_match(question)
+    if tra_match is not None:
+        _, tra_s, tra_e = tra_match
+        amounts = [(a, a_s, a_e) for a, a_s, a_e in amounts if a_e <= tra_s or a_s >= tra_e]
+    return amounts
+
+
+def _property_estimate_with_tra_answer(question: str, base: dict):
+    """Core Prop 13 estimate COMPOSED with an EXACT Kern County TRA rate --
+    see property_tax.compute_property_tax_estimate_with_tra_rate's
+    docstring. Must run BEFORE _property_estimate_with_county_answer
+    (more specific wins, same composed-before-narrower ordering precedent
+    used throughout this file) -- a question giving an exact Kern TRA
+    number deserves the exact answer, not the county-wide average.
+    Declines (returns None) if the county isn't Kern, no TRA number is
+    recognized, or the TRA number isn't in the (2,455-row) pilot dataset
+    -- falls through to the county-average composed answer in every case,
+    unchanged."""
+    if not detect_property_estimate_signal(question):
+        return None
+    county_match = _property_county_match(question)
+    if county_match is None or county_match[0] != "Kern":
+        return None
+    tra_match = _property_tra_match(question)
+    if tra_match is None:
+        return None
+    tra_number = tra_match[0]
+    year_match = _property_purchase_year_match(question)
+    if year_match is None:
+        return None
+    purchase_year = int(year_match.group(0))
+    amounts = _property_purchase_amounts(question, year_match)
+    if len(amounts) != 1:
+        return None
+    purchase_price = amounts[0][0]
+    q = question.lower()
+    homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_property_tax_estimate_with_tra_rate(
+            conn, purchase_price, purchase_year, "Kern", tra_number,
+            homeowners_exemption=homeowners_exemption)
+    if not calc:
+        return None
+    exemption_note = ""
+    if homeowners_exemption:
+        exemption_note = (f" after subtracting the ${property_tax.HOMEOWNERS_EXEMPTION_AMOUNT:,.0f} "
+                           f"Homeowners' Exemption ({property_tax.HOMEOWNERS_EXEMPTION_CITATION})")
+    result = {**base, "status": "answered", "category": "property_tax_estimate_with_tra_rate",
+              "amount": purchase_price, "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    lag_note = ""
+    if calc["year_lag"] > 0:
+        lag_note = f" (using the most recently available FY{calc['data_vintage_fiscal_year_label']} rate)"
+    result["answer_text"] = (
+        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} in Kern County TRA "
+        f"{tra_number} ({calc['area_name']}), your estimated {calc['current_tax_year']} California "
+        f"property tax is about ${calc['tax']:,.2f} ({calc['total_rate']*100:.4f}% -- the EXACT combined "
+        f"rate for this specific Tax Rate Area{lag_note}, applied to a "
+        f"${calc['factored_base_year_value']:,.2f} factored base year value{exemption_note}) "
+        f"({calc['citation']}). This compounds your purchase price at the FULL 2%/year cap Proposition "
+        "13 allows -- a deliberate overestimate. This is an EXACT per-parcel rate (not a county-wide "
+        "average) -- Kern County is currently the only county with this level of detail available; every "
+        "other county still uses a county-wide average. This also does not include Mello-Roos or other "
+        "special assessments, or a Proposition 8 decline-in-value adjustment."
+    )
+    return result
+
+
 def _property_estimate_with_county_answer(question: str, base: dict):
     """Core Prop 13 estimate COMPOSED with a recognized county's average
     local override rate -- see property_tax.compute_property_tax_estimate_
@@ -8538,9 +8655,7 @@ def _property_estimate_with_county_answer(question: str, base: dict):
     if year_match is None:
         return None
     purchase_year = int(year_match.group(0))
-    y_start, y_end = year_match.span()
-    amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question)
-               if a_e <= y_start or a_s >= y_end]
+    amounts = _property_purchase_amounts(question, year_match)
     if len(amounts) != 1:
         return None
     purchase_price = amounts[0][0]
@@ -8587,16 +8702,17 @@ def _property_estimate_answer(question: str, base: dict):
     if year_match is None:
         return None
     purchase_year = int(year_match.group(0))
-    y_start, y_end = year_match.span()
-    # OVERLAP-based removal, not _remove_amount_span's exact-tuple-equality
-    # match -- found live that _amounts()'s own regex (\$?\s*digits) can
-    # greedily consume a leading space before the year, making its match
-    # span start 1 char earlier than the year regex's own span (e.g.
-    # "in 2015" -> _amounts() spans the space+digits, the year regex spans
-    # only the digits) -- an exact-tuple removal silently misses this,
-    # leaving the phantom year amount in the list.
-    amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question)
-               if a_e <= y_start or a_s >= y_end]
+    # _property_purchase_amounts does OVERLAP-based year-span removal (not
+    # _remove_amount_span's exact-tuple-equality match) -- found live that
+    # _amounts()'s own regex (\$?\s*digits) can greedily consume a leading
+    # space before the year, making its match span start 1 char earlier
+    # than the year regex's own span (e.g. "in 2015" -> _amounts() spans
+    # the space+digits, the year regex spans only the digits) -- an
+    # exact-tuple removal silently misses this. It also masks any Kern
+    # TRA-number span, so a stated "TRA NNN-NNN" elsewhere in the question
+    # (declined by the TRA-specific answer function, e.g. an unknown TRA
+    # or a non-Kern county) doesn't phantom-corrupt this fallback path.
+    amounts = _property_purchase_amounts(question, year_match)
     if len(amounts) != 1:
         return None
     purchase_price = amounts[0][0]
@@ -8903,6 +9019,41 @@ def _property_prop19_transfer_answer(question: str, base: dict):
         f"{timing_label} -- a different timing bucket (before the sale = 100% comparison, within "
         "1 year = 105%, within 2 years = 110%) changes this figure; state the exact timing if "
         "different."
+    )
+    return result
+
+
+def _property_tra_rate_answer(question: str, base: dict):
+    """Bare rate-only question for a Kern County TRA -- gives the EXACT
+    per-TRA rate directly. Must run BEFORE _property_local_rate_with_
+    county_answer (more specific wins). Declines if the county isn't Kern,
+    no TRA number is recognized, or the TRA isn't in the pilot dataset --
+    falls through to the county-average rate-only answer in every case."""
+    if not detect_local_rate_out_of_scope(question):
+        return None
+    county_match = _property_county_match(question)
+    if county_match is None or county_match[0] != "Kern":
+        return None
+    tra_match = _property_tra_match(question)
+    if tra_match is None:
+        return None
+    tra_number = tra_match[0]
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_tra_rate(conn, "Kern", tra_number)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_tra_rate",
+              "rate": calc["total_rate"], "citation": calc["citation"], "source_url": calc["source_url"]}
+    lag_note = ""
+    if calc["year_lag"] > 0:
+        lag_note = (f" (most recently available data is FY{calc['data_vintage_fiscal_year_label']}, "
+                    f"{calc['year_lag']} fiscal year{'s' if calc['year_lag'] != 1 else ''} behind the "
+                    "current lien year)")
+    result["answer_text"] = (
+        f"Kern County TRA {tra_number} ({calc['area_name']}) has an exact combined property tax rate of "
+        f"about {calc['total_rate']*100:.4f}%{lag_note} ({calc['citation']}). This is the EXACT rate for "
+        "this specific Tax Rate Area, not a county-wide average -- Kern County is currently the only "
+        "county with this level of detail available."
     )
     return result
 
@@ -9340,12 +9491,14 @@ def _answer_property(question: str):
     for fn in (_property_dv_composed_answer,
                _property_prop8_damage_destruction_answer,
                _property_prop8_decline_composed_answer, _property_prop8_decline_missing_fact_answer,
+               _property_estimate_with_tra_answer,
                _property_estimate_with_county_answer, _property_estimate_answer,
                _property_dv_exemption_answer,
                _property_prop19_transfer_answer,
                _property_supplemental_assessment_answer, _property_supplemental_assessment_missing_fact_answer,
                _property_parent_child_composed_answer, _property_parent_child_exclusion_answer,
                _property_parent_child_checklist_incomplete_answer, _property_parent_child_informational_answer,
+               _property_tra_rate_answer,
                _property_local_rate_with_county_answer, _property_local_rate_out_of_scope_answer,
                _property_mello_roos_out_of_scope_answer,
                _property_estimate_missing_fact_answer):
