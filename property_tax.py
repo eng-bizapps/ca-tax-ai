@@ -1,23 +1,26 @@
 """Ring 4 -- deterministic California property tax math (Prop 13 base year
-value, Disabled Veterans' Exemption, Prop 19 base-year-value transfers).
+value, Disabled Veterans' Exemption, Prop 19 base-year-value transfers,
+Prop 19 parent-child exclusion value cap, supplemental assessments).
 LLM-free, same principle as income_brackets.py/entity_tax.py: a number that
 changes a taxpayer's answer is computed by code, never composed by a model.
 
 Scope, verified against BOE Publication 29/800-10, BOE's official Prop 19
-page, Cal. Const. Art. XIII A, and Rev. & Tax. Code directly (not secondary
-tax-prep sources) -- see property_tax_inventory.py for the full ledger of
-what's built vs. deliberately excluded and why. Three tractable slices:
-(1) the core Prop 13 base-year-value estimate, (2) the Disabled Veterans'
-Exemption, (3) the Prop 19 base-year-value transfer formula. Deliberately
-NOT modeled: exact local ad-valorem add-ons (real per-parcel data exists
-across 58 counties' tax-rate-area tables, just not centrally ingested),
-Mello-Roos CFD special taxes (no statewide registry exists at all), Prop 8
-decline-in-value / multi-year assessed-value history (path-dependent state
-a single question can't reconstruct, same complexity class as AMT's
-multi-year-basis limitation), Prop 19's parent-child exclusion eligibility
-(checklist-shaped, not formula-shaped), and supplemental assessments
-(tractable in principle but genuinely more complex -- a bimodal
-fiscal-year proration rule -- left for a dedicated future slice).
+page, BOE Letters To Assessors, Cal. Const. Art. XIII A, and Rev. & Tax.
+Code directly (not secondary tax-prep sources) -- see
+property_tax_inventory.py for the full ledger of what's built vs.
+deliberately excluded and why. Five tractable slices: (1) the core Prop 13
+base-year-value estimate, (2) the Disabled Veterans' Exemption, (3) the
+Prop 19 base-year-value transfer formula, (4) the Prop 19 parent-child/
+grandparent-grandchild exclusion's value-cap formula (eligibility itself is
+a checklist, see property_eligibility.py -- this module only computes the
+dollar consequence once eligibility is already confirmed True), (5)
+supplemental assessments (a bimodal fiscal-year proration rule). Still
+deliberately NOT modeled: exact local ad-valorem add-ons (real per-parcel
+data exists across 58 counties' tax-rate-area tables, just not centrally
+ingested), Mello-Roos CFD special taxes (no statewide registry exists at
+all), Prop 8 decline-in-value / multi-year assessed-value history
+(path-dependent state a single question can't reconstruct, same complexity
+class as AMT's multi-year-basis limitation).
 """
 # Property tax runs on a FISCAL year (Jul 1-Jun 30) driven by the PRIOR
 # Jan 1 lien date -- NOT the same year-boundary convention income_brackets.
@@ -230,3 +233,210 @@ def compute_prop19_base_year_transfer(original_byv: float, original_fcv: float,
             "value_add": round(value_add, 2),
             "new_taxable_value": round(new_taxable_value, 2), "tax": tax,
             "citation": PROP19_CITATION, "source_url": PROP19_SOURCE_URL}
+
+
+# BOE republishes this every 2 years (odd years, effective Feb 16) per
+# R&TC 63.2(d) -- current figure covers Feb 16 2025-Feb 15 2027. Bump when
+# BOE publishes the 2027 figure (expect ~Dec 2026/Jan 2027), not before.
+# Bare constant, not a tax_year-keyed table, same "promote to a table later,
+# not now" precedent as HOMEOWNERS_EXEMPTION_AMOUNT -- only one cycle is
+# confirmed right now.
+PARENT_CHILD_EXCLUSION_VALUE_CAP = 1_044_586.0
+
+PARENT_CHILD_EXCLUSION_CITATION = ("Rev. & Tax. Code Sec. 63.2; Cal. Const. Art. XIII A Sec. "
+                                    "2.1(c); BOE Letter To Assessors 2026/026")
+PARENT_CHILD_EXCLUSION_SOURCE_URL = "https://www.boe.ca.gov/prop19/"
+
+
+def compute_parent_child_exclusion_value(old_fbyv: float, fmv: float, pct_interest: float = 1.0):
+    """R&TC 63.2(d) value-cap formula for a Prop 19 parent-child (or
+    grandparent-grandchild) transfer that has ALREADY been confirmed
+    eligible -- see property_eligibility.detect_parent_child_exclusion_
+    qualifies for the eligibility determination itself, a genuinely
+    separate checklist-shaped question this function does NOT evaluate.
+    Trusts eligibility the same way compute_prop19_base_year_transfer's own
+    docstring cites income_brackets.compute_charitable_cap trusting a
+    pre-floor charitable_amount -- "trust the stated figures" is this
+    codebase's standing precedent for a compute function one layer below
+    an eligibility gate.
+
+    value_cap = old_fbyv + PARENT_CHILD_EXCLUSION_VALUE_CAP
+    excess = max(0, fmv - value_cap)
+    new_taxable_value = old_fbyv + excess    (== old_fbyv, unchanged, if fmv <= value_cap)
+    transferred_share_value = new_taxable_value * pct_interest
+
+    Confirmed via BOE's own worked-example MECHANIC (LTA 2026/026 Q50) --
+    the mechanic (value_cap = old FBYV + current addend; excess = max(0,
+    fmv-value_cap); new_taxable_value = old_fbyv+excess, prorated by
+    pct_interest) is not in doubt. That example's own DOLLAR FIGURES,
+    however, don't reconcile against PARENT_CHILD_EXCLUSION_VALUE_CAP
+    ($163,076 old FBYV + $1,044,586 =/= the example's stated $1,163,076
+    cap -- the example's own numbers only work with a $1,000,000 addend,
+    an earlier cycle's figure) -- so that example is deliberately NOT used
+    anywhere in this codebase as a regression fixture; see
+    property_item_sweep.py for a fresh, self-consistent worked example
+    instead.
+
+    pct_interest applies only to the TRANSFERRED share's new taxable value
+    -- the untransferred remainder (if pct_interest < 1) keeps its own old
+    FBYV proportionally, unchanged, and is NOT part of this function's
+    return (the caller already knows the untransferred share never
+    reassesses at all).
+
+    Returns None if old_fbyv/fmv is negative or pct_interest is outside
+    (0, 1]."""
+    if old_fbyv is None or fmv is None or old_fbyv < 0 or fmv < 0:
+        return None
+    if pct_interest is None or not (0 < pct_interest <= 1):
+        return None
+    value_cap = old_fbyv + PARENT_CHILD_EXCLUSION_VALUE_CAP
+    reassessed = fmv > value_cap
+    excess = max(0.0, fmv - value_cap)
+    new_taxable_value = old_fbyv + excess
+    transferred_share_value = round(new_taxable_value * pct_interest, 2)
+    tax = round(PROP13_BASE_RATE * transferred_share_value, 2)
+    return {
+        "old_fbyv": old_fbyv, "fmv": fmv, "pct_interest": pct_interest,
+        "value_cap": round(value_cap, 2), "reassessed": reassessed,
+        "excess": round(excess, 2), "new_taxable_value": round(new_taxable_value, 2),
+        "transferred_share_value": transferred_share_value, "tax": tax,
+        "citation": PARENT_CHILD_EXCLUSION_CITATION,
+        "source_url": PARENT_CHILD_EXCLUSION_SOURCE_URL,
+    }
+
+
+# Keyed by the PRESUMED EFFECTIVE MONTH (R&TC 75.41(b): the event date is
+# legally presumed to be the FIRST DAY OF THE FOLLOWING CALENDAR MONTH,
+# always rounding UP regardless of which day the event actually occurred
+# in) -- NOT the raw event month. Only whole months from the presumed
+# effective date through June 30 count. Cross-confirmed independently
+# against both R&TC 75.41(c)'s own table and BOE's separate published
+# Supplemental Assessment page -- this table is solid.
+SUPPLEMENTAL_PRORATION_FACTOR = {
+    7: 1.00, 8: 0.92, 9: 0.83, 10: 0.75, 11: 0.67, 12: 0.58,
+    1: 0.50, 2: 0.42, 3: 0.33, 4: 0.25, 5: 0.17, 6: 0.08,
+}
+
+SUPPLEMENTAL_CITATION = "Rev. & Tax. Code Sec. 75.11, 75.41; BOE Pub. 29 pp.11-12,16"
+SUPPLEMENTAL_SOURCE_URL = "https://www.boe.ca.gov/proptaxes/pdf/pub29.pdf"
+
+
+def _presumed_effective_date(event_month: int, event_year: int):
+    """R&TC 75.41(b) rounds the event date UP to the first day of the
+    FOLLOWING calendar month, regardless of which day of event_month the
+    event actually happened. A December event rolls the CALENDAR year
+    forward (presumed January of event_year+1) but stays in the SAME
+    fiscal year as the event itself (FY runs Jul-Jun) -- this asymmetry
+    (calendar-year rollover without a fiscal-year rollover) is the
+    single easiest place to get this feature wrong."""
+    presumed_month = event_month % 12 + 1
+    presumed_year = event_year + 1 if event_month == 12 else event_year
+    return presumed_month, presumed_year
+
+
+def _fiscal_year_start(presumed_month: int, presumed_year: int) -> int:
+    return presumed_year if presumed_month >= 7 else presumed_year - 1
+
+
+def compute_supplemental_assessment(event_month: int, event_year: int,
+                                     new_base_year_value: float,
+                                     prior_taxable_value: float = None,
+                                     event_type: str = "change_of_ownership",
+                                     ownership_pct: float = 1.0):
+    """R&TC 75.11/75.41 bimodal supplemental-assessment proration.
+
+    added_value = new_base_year_value - prior_taxable_value  (change of
+                  ownership -- prior_taxable_value required) OR
+                  new_base_year_value directly (new construction -- no
+                  comparison, the added value IS the assessment)
+    factor = SUPPLEMENTAL_PRORATION_FACTOR[presumed_effective_month]
+    supplemental_1 = added_value * factor * ownership_pct  (always computed
+                      -- proration for the remainder of the CURRENT fiscal
+                      year, from the presumed effective date through June 30)
+
+    R&TC 75.11(b) bimodal rule, keyed off the RAW event month (Jan-May
+    inclusive -> presumed effective month Feb-Jun):
+      - Jan 1-May 31 event: a SECOND supplemental assessment, for the
+        ENTIRE next fiscal year, is ALSO owed -- because the next regular
+        roll's Jan 1 lien date already passed before the event, so that
+        roll would otherwise still show the OLD value. For a FULL-interest
+        transfer this second supplemental is UNPRORATED (factor 1.00,
+        the entire added_value). For a PARTIAL-interest transfer, the
+        statute uses a genuinely different formula (sum of the new base
+        year value of the transferred portion + the taxable value of the
+        remainder on the roll being prepared, minus the taxable value of
+        the whole property on that roll) that needs facts (the remainder's
+        and whole property's taxable values ON THE ROLL BEING PREPARED)
+        this function doesn't have -- deliberately NOT computed; returns
+        supplemental_2=None with partial_interest_second_supplemental_note
+        explaining why, rather than guessing. supplemental_1 is still
+        returned in full either way -- an unknowable second number is never
+        a reason to withhold the first, known one.
+      - Jun 1-Dec 31 event: only ONE supplemental assessment (the next
+        Jan 1 lien date hasn't happened yet, so the following regular roll
+        will already capture the new value on its own).
+
+    Tax rate is PROP13_BASE_RATE for both supplementals -- R&TC 75.41(a):
+    the SAME total ad valorem rate that would otherwise apply, no special
+    supplemental rate exists. (Same local-TRA-rate-gap disclosure as the
+    core Prop 13 estimate applies -- this only models the 1% constitutional
+    base; the caller's answer text must disclose that, not this function.)
+
+    Returns None if event_month not in 1..12, new_base_year_value <= 0,
+    event_type not recognized, ownership_pct outside (0, 1], or
+    event_type=='change_of_ownership' with prior_taxable_value missing/
+    negative."""
+    if event_month is None or not (1 <= event_month <= 12):
+        return None
+    if new_base_year_value is None or new_base_year_value <= 0:
+        return None
+    if event_type not in ("change_of_ownership", "new_construction"):
+        return None
+    if ownership_pct is None or not (0 < ownership_pct <= 1):
+        return None
+    if event_type == "change_of_ownership":
+        if prior_taxable_value is None or prior_taxable_value < 0:
+            return None
+        added_value = max(0.0, new_base_year_value - prior_taxable_value)
+    else:
+        added_value = new_base_year_value
+
+    presumed_month, presumed_year = _presumed_effective_date(event_month, event_year)
+    fiscal_year_start = _fiscal_year_start(presumed_month, presumed_year)
+    factor = SUPPLEMENTAL_PRORATION_FACTOR[presumed_month]
+    bimodal = 1 <= event_month <= 5
+
+    supplemental_1 = round(added_value * factor * ownership_pct, 2)
+    supplemental_1_tax = round(PROP13_BASE_RATE * supplemental_1, 2)
+
+    supplemental_2 = None
+    supplemental_2_tax = None
+    partial_interest_second_supplemental_note = None
+    supplemental_count = 1
+    if bimodal:
+        if ownership_pct == 1.0:
+            supplemental_2 = round(added_value, 2)
+            supplemental_2_tax = round(PROP13_BASE_RATE * supplemental_2, 2)
+            supplemental_count = 2
+        else:
+            partial_interest_second_supplemental_note = (
+                "A second supplemental assessment also applies for the entire next fiscal year, "
+                "but for a partial-interest transfer it's computed differently (new base year "
+                "value of the transferred portion, plus the taxable value of the remainder on "
+                "the roll being prepared, minus the taxable value of the whole property on that "
+                "roll) -- not modeled here; your county assessor issues that second bill."
+            )
+
+    return {
+        "event_month": event_month, "event_year": event_year,
+        "presumed_effective_month": presumed_month, "presumed_effective_year": presumed_year,
+        "fiscal_year_start": fiscal_year_start,
+        "fiscal_year_label": f"{fiscal_year_start}-{str(fiscal_year_start + 1)[-2:]}",
+        "proration_factor": factor, "event_type": event_type,
+        "added_value": round(added_value, 2), "ownership_pct": ownership_pct,
+        "bimodal": bimodal, "supplemental_count": supplemental_count,
+        "supplemental_1": supplemental_1, "supplemental_1_tax": supplemental_1_tax,
+        "supplemental_2": supplemental_2, "supplemental_2_tax": supplemental_2_tax,
+        "partial_interest_second_supplemental_note": partial_interest_second_supplemental_note,
+        "citation": SUPPLEMENTAL_CITATION, "source_url": SUPPLEMENTAL_SOURCE_URL,
+    }

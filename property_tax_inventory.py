@@ -126,28 +126,55 @@ ITEMS = [
      "either trusting a stated current assessed value (defeats the purpose of computing it) or "
      "tracking every intervening year's actual market-value enrollment, which almost no taxpayer "
      "reports accurately from memory."),
-    ("excluded", None, "parent-child-exclusion", "Prop 19 parent-child/grandparent-grandchild exclusion eligibility",
-     "both", "moderate", "Rev. & Tax. Code Sec. 63.2; BOE Pub. 29 p.10; BOE Prop 19 page",
-     "deferred_new_engine", None,
-     "Eligibility-CHECKLIST-shaped, not formula-shaped -- same class as HOH eligibility "
-     "determination, not a simple stated fact. Post-2021 rules are genuinely narrow and easy to "
-     "misapply: limited to a family home/family farm only, requires the transferee to move in "
-     "and file for the homeowners'/disabled veterans' exemption within a year, grandparent-"
-     "grandchild transfers only qualify if all intervening parents are deceased, and even a "
-     "qualifying transfer carries a value cap (currently $1,044,586, adjusted every 2 years) "
-     "above which the excess IS reassessed. A wrong 'yes it qualifies' assumption produces a "
-     "wildly wrong number (full market-value reassessment) rather than a mildly-off one -- a bad "
-     "category for 'trust and compute.'"),
-    ("excluded", None, "supplemental-assessment", "Supplemental assessment on change of ownership/new construction",
-     "both", "moderate", "Rev. & Tax. Code Sec. 75.11 et seq.; BOE Pub. 29 pp.11-12,16",
-     "deferred_new_engine", None,
-     "Tractable IF the applicable rate is known/assumed (same disclosed-approximation posture as "
-     "the core estimate), but genuinely more complex than the base 3 slices: a BIMODAL fiscal-"
-     "year proration rule (an event between Jan 1-May 31 triggers TWO supplemental assessments, "
-     "one for the remainder of the current fiscal year and one for the entire next fiscal year; "
-     "an event between Jun 1-Dec 31 triggers only ONE, prorated for the remainder of the current "
-     "fiscal year), not a simple month-fraction. Left for a dedicated future slice rather than "
-     "folded into v1's core estimate."),
+    ("parent_child_exclusion", None, "parent-child-exclusion", "Prop 19 parent-child/grandparent-grandchild exclusion eligibility",
+     "both", "moderate", "Rev. & Tax. Code Sec. 63.2; Cal. Const. Art. XIII A Sec. 2.1(c); "
+     "BOE Letter To Assessors 2026/026",
+     "built", None,
+     "Built as an eligibility-CHECKLIST-shaped determination, same tri-state True/False/None "
+     "pattern as income_eligibility.py's HOH determination -- property_eligibility.detect_"
+     "parent_child_exclusion_qualifies / engine._property_parent_child_exclusion_answer (+ a "
+     "composed variant, _property_parent_child_composed_answer, when a dollar amount is also "
+     "computable via property_tax.compute_parent_child_exclusion_value). Models: family home "
+     "(requires the transferee to move in AND file for the homeowners'/disabled veterans' "
+     "exemption, both within 1 year, no exceptions) vs. family farm (no occupancy/filing "
+     "requirement at all); child/stepchild/in-law/adopted/foster relationships, including the "
+     "divorce-ends-a-step/in-law-link rule; grandparent-grandchild transfers, gated on the "
+     "grandchild's grandparent's-own-child parent being deceased; and the value cap (currently "
+     "$1,044,586, adjusted every 2 years -- property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP) above "
+     "which the excess IS reassessed. Also models a narrow hard-decline gate: a transfer stated "
+     "as more than 3 years old AND already resold to a third party is categorically ineligible "
+     "for retroactive relief. DISCLOSED as assumed rather than independently verified: the "
+     "transferor's own prior Homeowners'/DV-Exemption eligibility on the family home. DEFERRED "
+     "(returns None, never guessed): the biological-child-given-up-for-adoption exception, "
+     "multi-generational step/in-law nuances inside the grandparent deceased-gate beyond the "
+     "single flat fact, and split-parcel dual-category verdicts. One research inconsistency "
+     "found and resolved before shipping: BOE's own LTA 2026/026 Q50 worked example doesn't "
+     "reconcile against the current $1,044,586 cap figure (its numbers only work with a $1M "
+     "addend) -- not used as a regression fixture; see property_tax.compute_parent_child_"
+     "exclusion_value's docstring and property_item_sweep.py for a fresh self-consistent example."),
+    ("supplemental_assessment", None, "supplemental-assessment", "Supplemental assessment on change of ownership/new construction",
+     "both", "moderate", "Rev. & Tax. Code Sec. 75.11, 75.41; BOE Pub. 29 pp.11-12,16",
+     "built", None,
+     "Built via property_tax.compute_supplemental_assessment / engine._property_supplemental_"
+     "assessment_answer. Models the BIMODAL R&TC 75.11 proration rule (an event between Jan 1-"
+     "May 31 triggers TWO supplemental assessments -- one prorated for the remainder of the "
+     "current fiscal year, plus, for a FULL-interest transfer, one unprorated for the entire next "
+     "fiscal year; an event between Jun 1-Dec 31 triggers only ONE, prorated for the remainder of "
+     "the current fiscal year) using property_tax.SUPPLEMENTAL_PRORATION_FACTOR, a 12-entry table "
+     "cross-confirmed against both R&TC 75.41(c)'s own table and BOE's separately published page. "
+     "Correctly implements the R&TC 75.41(b) presumed-effective-date rounding rule (always the "
+     "1st of the FOLLOWING calendar month) including its two rollover edge cases (a June event "
+     "rolls into the next fiscal year at factor 1.00 but stays in the 'one supplemental' bucket; "
+     "a December event rolls into the next CALENDAR year for the presumed date but stays in the "
+     "SAME fiscal year as the event). Uses the same 1% PROP13_BASE_RATE as the core estimate -- "
+     "no special supplemental rate exists -- and discloses the same local-TRA-rate-gap caveat. "
+     "DEFERRED (disclosed, not guessed): the partial-interest transfer's second-supplemental "
+     "formula, which needs facts (remainder/whole-property taxable values on the roll being "
+     "prepared) this codebase's 'trust one question's stated figures' shape can't safely obtain -- "
+     "the first supplemental is still computed in full even when the second is deferred. The "
+     "interspousal-transfer and qualifying-parent-child-exclusion exemptions from any supplemental "
+     "at all are disclosed in the answer text, not actively cross-checked against the parent-child "
+     "feature's own verdict in this v1."),
 ]
 
 

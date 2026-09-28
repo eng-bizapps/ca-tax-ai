@@ -25,6 +25,7 @@ import income_eligibility
 import income_nonresident
 import income_db
 import property_db
+import property_eligibility
 import property_tax
 import district_rates
 import local_rates
@@ -8163,10 +8164,59 @@ LOCAL_RATE_OUT_OF_SCOPE_TERMS = {"property tax rate", "tax rate area", "tax rate
 MELLO_ROOS_OUT_OF_SCOPE_TERMS = {"mello-roos", "mello roos", "cfd", "community facilities district",
                                  "special assessment", "special tax district"}
 PROP8_DECLINE_OUT_OF_SCOPE_TERMS = {"prop 8", "proposition 8", "decline in value", "declined in value"}
-PARENT_CHILD_EXCLUSION_OUT_OF_SCOPE_TERMS = {
-    "parent-child exclusion", "parent child exclusion", "inherited my parents",
-    "inherited from my parents", "transferred from my parents", "grandparent-grandchild",
+
+# Parent-child/grandparent-grandchild exclusion eligibility now lives in
+# property_eligibility.py (a real determination, not an out-of-scope
+# defer) -- PARENT_CHILD_TRIGGER_TERMS there carries forward this old
+# out-of-scope term set verbatim, so the pre-existing sweep regression case
+# keeps matching.
+
+SUPPLEMENTAL_ASSESSMENT_TERMS = {
+    "supplemental assessment", "supplemental tax bill", "supplemental property tax",
+    "supplemental assessment bill",
 }
+SUPPLEMENTAL_NEW_CONSTRUCTION_TERMS = {
+    "new construction", "built an addition", "completed construction",
+    "added a room", "finished construction", "completed new construction",
+}
+SUPPLEMENTAL_NEW_VALUE_ANCHOR_TERMS = {
+    "new base year value", "new assessed value", "value after construction",
+    "added value", "new taxable value", "the new value",
+}
+SUPPLEMENTAL_PRIOR_VALUE_ANCHOR_TERMS = {
+    "prior taxable value", "old taxable value", "previous assessed value",
+    "existing taxable value", "the old value", "current taxable value",
+}
+PARENT_CHILD_OLD_FBYV_ANCHOR_TERMS = {
+    "old base year value", "old factored base year value", "current base year value",
+    "existing base year value", "base year value of",
+}
+PARENT_CHILD_FMV_ANCHOR_TERMS = {
+    "full cash value", "fair market value", "market value", "fmv", "worth",
+}
+
+# Month-name date parsing -- genuinely new parsing surface (the only other
+# date handling in this file, _dates()/_DATE_RE, is numeric MM/DD/YYYY
+# only). Day-of-month is deliberately never captured: R&TC 75.41(b)
+# presumes the effective date is the 1st of the FOLLOWING month regardless
+# of which day the event actually happened, so the exact day is irrelevant
+# to the proration math -- see property_tax._presumed_effective_date.
+_MONTH_NAMES = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_MONTH_LABELS = [None, "January", "February", "March", "April", "May", "June",
+                  "July", "August", "September", "October", "November", "December"]
+# longest names first so "sept" isn't cut short by an earlier "sep" match
+# attempt at the same position (both are valid, but alternation tries
+# left-to-right and either is fine here -- ordering is defensive, not load-
+# bearing, since both map to month 9 anyway).
+_MONTH_NAME_PATTERN = "|".join(sorted(_MONTH_NAMES.keys(), key=len, reverse=True))
+_SUPPLEMENTAL_MONTH_YEAR_RE = re.compile(
+    rf"\b({_MONTH_NAME_PATTERN})\.?\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?((?:19|20)\d{{2}})\b",
+    re.IGNORECASE)
 
 
 def detect_property_estimate_signal(question: str) -> bool:
@@ -8242,9 +8292,79 @@ def detect_prop8_decline_out_of_scope(question: str) -> bool:
     return any(t in q for t in PROP8_DECLINE_OUT_OF_SCOPE_TERMS)
 
 
-def detect_parent_child_exclusion_out_of_scope(question: str) -> bool:
+def detect_parent_child_exclusion_signal(question: str) -> bool:
+    """Thin wrapper around property_eligibility's own trigger-term set --
+    replaces the old detect_parent_child_exclusion_out_of_scope (this used
+    to always defer; now a real determination is attempted first, with an
+    informational fallback only when no personal facts are stated at all --
+    see _property_parent_child_informational_answer)."""
     q = question.lower()
-    return any(t in q for t in PARENT_CHILD_EXCLUSION_OUT_OF_SCOPE_TERMS)
+    return any(t in q for t in property_eligibility.PARENT_CHILD_TRIGGER_TERMS)
+
+
+def detect_supplemental_assessment_signal(question: str) -> bool:
+    q = question.lower()
+    return any(t in q for t in SUPPLEMENTAL_ASSESSMENT_TERMS)
+
+
+def _property_supplemental_month_year_match(question: str):
+    return _SUPPLEMENTAL_MONTH_YEAR_RE.search(question)
+
+
+def _property_pct_interest_match(question: str):
+    """Returns (fraction, (digit_start, digit_end)) for a stated N%
+    figure, or None if not stated or out of the valid (0, 1] range once
+    converted. The digit span (not the whole "N%" match) is what needs
+    masking out of _amounts()'s own list -- that regex has no dollar-sign
+    requirement (`\\$?` is optional), so a bare percentage like "41.67%"
+    is ALSO parsed as a phantom $41.67 amount, the same phantom-digit
+    class as the purchase-year/age/Prop-19-number collisions already
+    fixed elsewhere in this file. Shared by the parent-child value-cap
+    composed answer (fractional interest transferred) and the
+    supplemental-assessment answer (fractional ownership interest) --
+    same underlying fact shape in both features."""
+    m = re.search(r"\b(\d{1,3}(?:\.\d+)?)\s*%", question)
+    if not m:
+        return None
+    val = float(m.group(1)) / 100.0
+    if not (0 < val <= 1):
+        return None
+    return val, m.span(1)
+
+
+def _property_supplemental_extract(question: str):
+    """Shared extraction for the supplemental-assessment answer and its
+    missing-fact counterpart: month/year (None, None if unstated),
+    event_type, ownership_pct (defaults to 1.0), and the remaining dollar
+    amounts with the year's own span and any pct-interest span masked out
+    (position-based removal, same precedent as _property_purchase_year_
+    match's own docstring)."""
+    q = question.lower()
+    month_match = _property_supplemental_month_year_match(question)
+    if month_match is None:
+        return None, None, None, 1.0, []
+    month = _MONTH_NAMES[month_match.group(1).lower()]
+    year = int(month_match.group(2))
+    y_s, y_e = month_match.span(2)
+    event_type = ("new_construction" if any(t in q for t in SUPPLEMENTAL_NEW_CONSTRUCTION_TERMS)
+                  else "change_of_ownership")
+    amounts = [(a, s, e) for a, s, e in _amounts(question) if e <= y_s or s >= y_e]
+    pct_match = _property_pct_interest_match(question)
+    ownership_pct = 1.0
+    if pct_match is not None:
+        ownership_pct, (pct_s, pct_e) = pct_match
+        amounts = [(a, s, e) for a, s, e in amounts if e <= pct_s or s >= pct_e]
+    return month, year, event_type, ownership_pct, amounts
+
+
+def detect_supplemental_assessment_missing_fact(question: str) -> bool:
+    if not detect_supplemental_assessment_signal(question):
+        return False
+    month, _year, event_type, _pct, amounts = _property_supplemental_extract(question)
+    if month is None:
+        return True
+    needed = 1 if event_type == "new_construction" else 2
+    return len(amounts) < needed
 
 
 def _property_has_any_signal(question: str) -> bool:
@@ -8254,7 +8374,8 @@ def _property_has_any_signal(question: str) -> bool:
     for check in (detect_property_estimate_signal, detect_property_estimate_missing_fact,
                   detect_dv_exemption_signal, detect_prop19_transfer_signal,
                   detect_local_rate_out_of_scope, detect_mello_roos_out_of_scope,
-                  detect_prop8_decline_out_of_scope, detect_parent_child_exclusion_out_of_scope):
+                  detect_prop8_decline_out_of_scope, detect_parent_child_exclusion_signal,
+                  detect_supplemental_assessment_signal, detect_supplemental_assessment_missing_fact):
         try:
             if check(question):
                 return True
@@ -8637,19 +8758,256 @@ def _property_prop8_decline_out_of_scope_answer(question: str, base: dict):
     return result
 
 
-def _property_parent_child_exclusion_out_of_scope_answer(question: str, base: dict):
-    if not detect_parent_child_exclusion_out_of_scope(question):
+def _property_parent_child_composed_answer(question: str, base: dict):
+    """Parent-child/grandparent-grandchild exclusion WITH the dollar
+    value-cap computed -- requires eligibility (property_eligibility.
+    detect_parent_child_exclusion_qualifies) to already be True AND both
+    an old base year value and a full cash value stated. Must run BEFORE
+    the boolean-only answer function below, mirroring _property_dv_
+    composed_answer's own composed-before-narrower ordering requirement."""
+    if property_eligibility.detect_parent_child_exclusion_qualifies(question) is not True:
+        return None
+    amounts = _amounts(question)
+    year_spans = [m.span() for m in re.finditer(r"\b(19|20)\d{2}\b", question)]
+    amounts = [(a, s, e) for a, s, e in amounts if all(e <= ys or s >= ye for ys, ye in year_spans)]
+    pct_interest = 1.0
+    pct_match = _property_pct_interest_match(question)
+    if pct_match is not None:
+        pct_interest, (pct_s, pct_e) = pct_match
+        amounts = [(a, s, e) for a, s, e in amounts if e <= pct_s or s >= pct_e]
+    fmv_match = _amount_near_anchor_edge(question, PARENT_CHILD_FMV_ANCHOR_TERMS, amounts)
+    if fmv_match is None:
+        return None
+    remaining = _remove_amount_span(amounts, fmv_match)
+    fbyv_match = _amount_near_anchor_edge(question, PARENT_CHILD_OLD_FBYV_ANCHOR_TERMS, remaining)
+    if fbyv_match is None:
+        return None
+    fmv, old_fbyv = fmv_match[0], fbyv_match[0]
+    calc = property_tax.compute_parent_child_exclusion_value(old_fbyv, fmv, pct_interest)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_parent_child_exclusion",
+              "taxable": True, "amount": calc["transferred_share_value"], "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    interest_note = f" ({pct_interest * 100:.2f}% interest transferred)" if pct_interest != 1.0 else ""
+    if calc["reassessed"]:
+        result["answer_text"] = (
+            f"Based on what you stated, this transfer qualifies for the Proposition 19 parent-child "
+            f"exclusion{interest_note}. Your old factored base year value of ${old_fbyv:,.2f} plus the "
+            f"current value-cap addition of ${property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP:,.2f} gives "
+            f"a value cap of ${calc['value_cap']:,.2f}; since the stated full cash value of ${fmv:,.2f} "
+            f"exceeds that cap, the ${calc['excess']:,.2f} excess IS added to your base year value, for "
+            f"a new taxable value of ${calc['new_taxable_value']:,.2f} and an estimated property tax of "
+            f"about ${calc['tax']:,.2f} ({calc['citation']}). The value cap is adjusted every 2 years -- "
+            "confirm the current figure with your county assessor if this transfer is near a Feb 16 "
+            "adjustment date."
+        )
+    else:
+        result["answer_text"] = (
+            f"Based on what you stated, this transfer qualifies for the Proposition 19 parent-child "
+            f"exclusion{interest_note}, and your stated full cash value of ${fmv:,.2f} does NOT exceed "
+            f"the value cap of ${calc['value_cap']:,.2f} (your old factored base year value of "
+            f"${old_fbyv:,.2f} plus the current ${property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP:,.2f} "
+            f"addition) -- so NO reassessment occurs at all; your base year value carries over "
+            f"unchanged at ${calc['new_taxable_value']:,.2f} ({calc['citation']})."
+        )
+    return result
+
+
+_PARENT_CHILD_FALSE_REASON_TEXT = {
+    "claim_window_closed": (
+        "the exclusion claim must be filed within 3 years of the transfer, or before the "
+        "property transfers to a third party, whichever is earlier -- since you stated this "
+        "transfer happened more than 3 years ago AND the property has since been resold, that "
+        "window has closed (a late claim only gets prospective relief, which requires the "
+        "ORIGINAL transferee to still own the property)"
+    ),
+    "unrelated_party": (
+        "the exclusion only applies to transfers between parents/children (or, with an extra "
+        "condition, grandparents/grandchildren) -- not to an unrelated party"
+    ),
+    "step_link_ended": (
+        "a stepchild/in-law relationship for this exclusion is deemed to exist only until the "
+        "underlying marriage ends by divorce (or, if it ends by the stepparent's death, until "
+        "the surviving stepparent remarries) -- since you stated the marriage ended by divorce, "
+        "this relationship no longer qualifies"
+    ),
+    "grandparent_still_alive": (
+        "the grandparent-grandchild exclusion requires ALL of the grandchild's parents who "
+        "themselves qualify as the grandparent's own children to be deceased as of the transfer "
+        "date -- since you stated that parent is still alive, this transfer doesn't qualify (the "
+        "parent-child exclusion may still apply directly between the living parent and "
+        "grandparent, as a separate transfer)"
+    ),
+    "occupancy_or_filing_negated": (
+        "the family home category requires the transferee to move in AND separately file for "
+        "the Homeowners' or Disabled Veterans' Exemption, both within 1 year of the transfer, "
+        "with no exceptions -- since you stated one of these didn't happen, this transfer "
+        "doesn't qualify for the family home category (the family farm category, if applicable, "
+        "has no such requirement)"
+    ),
+}
+
+
+def _property_parent_child_exclusion_answer(question: str, base: dict):
+    """Boolean-only parent-child exclusion determination -- either no
+    dollar inputs were stated, or the composed answer above already
+    declined (e.g. amounts present but unanchored). See property_
+    eligibility.detect_parent_child_exclusion_qualifies's own docstring
+    for the tri-state contract this mirrors, and _income_hoh_
+    determination_answer for the analogous income-domain precedent."""
+    verdict = property_eligibility.detect_parent_child_exclusion_qualifies(question)
+    if verdict is None:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_parent_child_exclusion",
+              "taxable": verdict, "citation": property_eligibility.PARENT_CHILD_EXCLUSION_CITATION,
+              "source_url": property_eligibility.PARENT_CHILD_EXCLUSION_SOURCE_URL}
+    if verdict:
+        result["answer_text"] = (
+            "Based on what you stated, this transfer qualifies for California's Proposition 19 "
+            "parent-child (or grandparent-grandchild) exclusion from reassessment "
+            f"({property_eligibility.PARENT_CHILD_EXCLUSION_CITATION}). If the property's full "
+            "cash value exceeds your old factored base year value plus the current value-cap "
+            f"addition (${property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP:,.2f}), the excess above "
+            "that cap IS still reassessed -- state both figures if you'd like the exact dollar "
+            "amount."
+        )
+    else:
+        reason = property_eligibility.parent_child_exclusion_false_reason(question)
+        reason_text = _PARENT_CHILD_FALSE_REASON_TEXT.get(
+            reason, "the facts you stated don't meet the exclusion's requirements")
+        result["answer_text"] = (
+            f"Based on what you stated, this transfer does NOT qualify for the Proposition 19 "
+            f"parent-child exclusion: {reason_text} "
+            f"({property_eligibility.PARENT_CHILD_EXCLUSION_CITATION})."
+        )
+    return result
+
+
+def _property_parent_child_checklist_incomplete_answer(question: str, base: dict):
+    """When the question is clearly attempting a parent-child-exclusion
+    determination but doesn't state enough facts to reach one, give the
+    specific checklist instead of a generic defer -- mirrors
+    _income_hoh_checklist_incomplete_answer exactly."""
+    if not property_eligibility.detect_parent_child_exclusion_checklist_incomplete(question):
         return None
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
-        "Proposition 19's parent-child (and grandparent-grandchild) exclusion from "
-        "reassessment was significantly narrowed starting February 2021 -- it now applies "
-        "ONLY to a family home or family farm, requires the transferee to move in and file for "
-        "the homeowners' or disabled veterans' exemption within a year, and carries a value cap "
-        "(currently $1,044,586, adjusted every two years) above which the excess IS reassessed. "
-        "Whether this exclusion applies to your specific situation is an eligibility "
-        "determination this assistant can't make from a single question -- consult your county "
-        "assessor or a property tax professional to confirm."
+        "To determine if a transfer qualifies for California's Proposition 19 parent-child (or "
+        "grandparent-grandchild) exclusion, I need ALL of the following stated in one question: "
+        "(1) the relationship (child, stepchild, in-law, adopted, or foster child -- or, for "
+        "grandparent-grandchild, confirmation that the grandchild's parent who is the "
+        "grandparent's own child is deceased), (2) whether the property is a family home or a "
+        "family farm, and (3) for a family home ONLY, that the transferee moved in AND filed for "
+        "the Homeowners' or Disabled Veterans' Exemption, both within 1 year of the transfer (a "
+        "family farm has no occupancy or filing requirement). Example: \"My daughter moved into "
+        "the family home within a year of the transfer and filed for the homeowners exemption "
+        "within a year -- does she qualify for the parent-child exclusion?\""
+    )
+    return result
+
+
+def _property_parent_child_informational_answer(question: str, base: dict):
+    """Fallback for a parent-child-exclusion-flavored question with ZERO
+    personal facts stated (e.g. "what is the parent-child exclusion?") --
+    preserves the pre-existing sweep case's needs_review outcome, but now
+    notes that a real determination is available given specific facts,
+    rather than unconditionally deferring to the county assessor the way
+    the old out-of-scope stub this replaces used to."""
+    if not detect_parent_child_exclusion_signal(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "Proposition 19's parent-child (and grandparent-grandchild) exclusion from reassessment "
+        "was significantly narrowed starting February 2021 -- it now applies ONLY to a family "
+        "home or family farm, requires the transferee to move in and file for the homeowners' or "
+        "disabled veterans' exemption within a year (family home only), and carries a value cap "
+        f"(currently ${property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP:,.2f}, adjusted every two "
+        "years) above which the excess IS reassessed. I can give you an actual determination if "
+        "you state the specific facts of your situation -- the relationship, family home vs. "
+        "family farm, and (for a family home) whether the transferee moved in and filed the "
+        "exemption within a year."
+    )
+    return result
+
+
+def _property_supplemental_assessment_answer(question: str, base: dict):
+    """Supplemental assessment -- see property_tax.compute_supplemental_
+    assessment's docstring for the bimodal R&TC 75.11 proration rule and
+    the presumed-effective-date rounding (75.41(b)) this answer text must
+    disclose every time, same "disclose the approximation, don't bury it
+    in a docstring" precedent as every other property compute path."""
+    if not detect_supplemental_assessment_signal(question):
+        return None
+    month, year, event_type, ownership_pct, amounts = _property_supplemental_extract(question)
+    if month is None:
+        return None
+    new_value_match = _amount_near_anchor_edge(question, SUPPLEMENTAL_NEW_VALUE_ANCHOR_TERMS, amounts)
+    if event_type == "new_construction":
+        if new_value_match is None and amounts:
+            new_value_match = amounts[0]
+        if new_value_match is None:
+            return None
+        new_base_year_value = new_value_match[0]
+        prior_taxable_value = None
+    else:
+        if new_value_match is None:
+            return None
+        remaining = _remove_amount_span(amounts, new_value_match)
+        prior_match = _amount_near_anchor_edge(question, SUPPLEMENTAL_PRIOR_VALUE_ANCHOR_TERMS, remaining)
+        if prior_match is None:
+            return None
+        new_base_year_value = new_value_match[0]
+        prior_taxable_value = prior_match[0]
+    calc = property_tax.compute_supplemental_assessment(
+        month, year, new_base_year_value, prior_taxable_value, event_type, ownership_pct)
+    if not calc:
+        return None
+    presumed_label = f"{_MONTH_LABELS[calc['presumed_effective_month']]} {calc['presumed_effective_year']}"
+    event_label = f"{_MONTH_LABELS[month]} {year}"
+    added_value_label = "added value" if event_type == "new_construction" else "increase in value"
+    event_type_label = "new construction completed" if event_type == "new_construction" else "change of ownership"
+    text = (
+        f"For a {event_type_label} in {event_label}: California law presumes the effective date "
+        f"is the first day of the following month ({presumed_label}), giving a proration factor "
+        f"of {calc['proration_factor']:.2f} for the rest of fiscal year {calc['fiscal_year_label']}. "
+        f"Your first supplemental assessment on the ${calc['added_value']:,.2f} {added_value_label} "
+        f"is about ${calc['supplemental_1']:,.2f} (tax approximately ${calc['supplemental_1_tax']:,.2f}) "
+        f"({calc['citation']})."
+    )
+    if calc["supplemental_count"] == 2:
+        text += (
+            f" Because the event fell between January and May, a SECOND supplemental assessment "
+            f"for the entire next fiscal year also applies -- unprorated, at the full "
+            f"${calc['supplemental_2']:,.2f} (tax approximately ${calc['supplemental_2_tax']:,.2f}) -- "
+            "since the next January 1 lien date already passed before the event."
+        )
+    if calc["partial_interest_second_supplemental_note"]:
+        text += " " + calc["partial_interest_second_supplemental_note"]
+    text += (
+        " This uses the same 1% constitutional base rate as a regular bill and does NOT include "
+        "any voter-approved local bonds or other add-ons specific to your tax rate area, which can "
+        "add roughly 0.1% more on average statewide. Interspousal transfers, and transfers that "
+        "qualify for the Proposition 19 parent-child exclusion, never trigger a supplemental "
+        "assessment at all."
+    )
+    result = {**base, "status": "answered", "category": "property_tax_supplemental_assessment",
+              "amount": calc["added_value"], "tax": calc["supplemental_1_tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"], "answer_text": text}
+    return result
+
+
+def _property_supplemental_assessment_missing_fact_answer(question: str, base: dict):
+    if not detect_supplemental_assessment_missing_fact(question):
+        return None
+    result = {**base, "status": "needs_review"}
+    result["answer_text"] = (
+        "To estimate a supplemental assessment, I need the month and year of the change of "
+        "ownership or completed new construction, plus either (a) for new construction, the new "
+        "base year value of the construction, or (b) for a change of ownership, both the new base "
+        "year value (full cash value at the transfer) and the prior taxable value. Please ask "
+        "again and include these, for example \"I bought a home for $600,000 in March 2026, the "
+        "prior taxable value was $250,000, what's my supplemental assessment?\""
     )
     return result
 
@@ -8672,9 +9030,12 @@ def _answer_property(question: str):
         "domain": "property",
     }
     for fn in (_property_dv_composed_answer, _property_estimate_answer, _property_dv_exemption_answer,
-               _property_prop19_transfer_answer, _property_local_rate_out_of_scope_answer,
+               _property_prop19_transfer_answer,
+               _property_supplemental_assessment_answer, _property_supplemental_assessment_missing_fact_answer,
+               _property_parent_child_composed_answer, _property_parent_child_exclusion_answer,
+               _property_parent_child_checklist_incomplete_answer, _property_parent_child_informational_answer,
+               _property_local_rate_out_of_scope_answer,
                _property_mello_roos_out_of_scope_answer, _property_prop8_decline_out_of_scope_answer,
-               _property_parent_child_exclusion_out_of_scope_answer,
                _property_estimate_missing_fact_answer):
         result = fn(question, base)
         if result:

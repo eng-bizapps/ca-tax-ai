@@ -3,12 +3,25 @@ income_item_sweep.py's proven pattern (cached, resumable, mandatory
 regression gate after any change to property_tax.py/engine.py's property
 path).
 
-Covers all 3 built slices (core Prop 13 estimate, Disabled Veterans'
-Exemption, Prop 19 base-year-value transfer) plus the composed purchase+DV
-path, the 4 out-of-scope redirects, and the missing-fact clarification --
-using CORRECTED hand-verified values (the Prop 19 100%/105%/110% timing
-mechanic was wrong in an early design and fixed before any of these cases
-were locked in; see property_tax.py's own docstring for the correction).
+Covers all 5 built slices (core Prop 13 estimate, Disabled Veterans'
+Exemption, Prop 19 base-year-value transfer, Prop 19 parent-child/
+grandparent-grandchild exclusion, supplemental assessment) plus the
+composed purchase+DV path, the remaining 2 out-of-scope redirects
+(local-tra-rate, prop8-decline -- Mello-Roos is a 3rd, not_applicable
+rather than deferred, see property_tax_inventory.py), and the missing-fact
+clarification -- using CORRECTED hand-verified values (the Prop 19
+100%/105%/110% timing mechanic was wrong in an early design and fixed
+before any of these cases were locked in; see property_tax.py's own
+docstring for the correction).
+
+The parent-child/supplemental-assessment dollar cases below use FRESH,
+self-computed round numbers, NOT the BOE LTA 2026/026 Q50 worked example --
+that example's own figures don't reconcile against the current
+$1,044,586 value-cap constant (see property_tax.compute_parent_child_
+exclusion_value's docstring), so it's deliberately not used as a fixture.
+Only the underlying MECHANIC and the supplemental proration factor table
+are independently BOE-confirmed; the dollar amounts here are chosen for
+clean arithmetic, not sourced from a lower-confidence AI-summarized fetch.
 
 Also regression-covers 3 real bugs found live during this domain's build,
 each with a dedicated case below so they can never silently regress:
@@ -106,6 +119,64 @@ ITEMS = [
     ("I am 70 years old. This is my 2nd time transferring my base year value under Prop 19. My original adjusted base year value is $200,000, my original full cash value is $700,000, and I am buying a replacement home within 1 year at a full cash value of $900,000.",
      {"status": "answered", "domain": "property", "category": "property_tax_prop19_transfer", "tax": 3650.00}),
 
+    # --- D: Prop 19 parent-child/grandparent-grandchild exclusion ---
+    # family home, all facts stated -> qualifies
+    ("My son moved into the family home within a year of the transfer and filed for the homeowners exemption within a year -- do I qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion", "taxable": True}),
+    # family farm -- NO occupancy/filing requirement, regression-guards
+    # that the family-home-only gate doesn't leak into the farm category
+    ("I transferred my family farm to my son -- does he qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion", "taxable": True}),
+    # clean False: unrelated party
+    ("The property was transferred to an unrelated party -- do they qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion", "taxable": False}),
+    # clean False: claim window closed (>3 years ago + already resold)
+    ("This was transferred to my son more than 5 years ago and I already sold it to someone else -- do I still qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion", "taxable": False}),
+    # checklist-incomplete: relationship + category stated, but occupancy/
+    # filing timing omitted -- must ask, not guess
+    ("My son moved into the family home -- does he qualify for the parent-child exclusion?",
+     {"status": "needs_review", "domain": "property"}),
+    # value-cap-exceeded, composed dollar answer: old FBYV $200,000, FMV
+    # $1,400,000 -> value_cap = 200,000 + 1,044,586 = $1,244,586; excess =
+    # 1,400,000 - 1,244,586 = $155,414; new_taxable_value = $355,414;
+    # tax = 1% x 355,414 = $3,554.14 (fresh self-consistent numbers, not
+    # the non-reconciling BOE LTA 2026/026 Q50 example -- see module note)
+    ("My daughter moved into the family home within a year of the transfer and filed for the homeowners exemption within a year. The old base year value is $200,000 and the full cash value is $1,400,000. Do I qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion",
+      "taxable": True, "tax": 3554.14}),
+    # under the cap: FMV $900,000 < value_cap $1,244,586 -> NO reassessment,
+    # new_taxable_value = old_fbyv = $200,000, tax = 1% x 200,000 = $2,000.00
+    ("My daughter moved into the family home within a year of the transfer and filed for the homeowners exemption within a year. The old base year value is $200,000 and the full cash value is $900,000. Do I qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion",
+      "taxable": True, "tax": 2000.00}),
+
+    # --- E: supplemental assessment ---
+    # Jan-May event (March 2026) -> presumed effective April (factor 0.25),
+    # BIMODAL, full interest -> TWO supplementals: added_value = 500,000 -
+    # 200,000 = $300,000; supplemental_1 tax = 1% x (300,000 x 0.25) =
+    # $750.00; supplemental_2 (entire next FY, unprorated) tax = 1% x
+    # 300,000 = $3,000.00
+    ("In March 2026, there was a change of ownership. The new base year value is $500,000 and the prior taxable value was $200,000. What's my supplemental assessment?",
+     {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 750.00}),
+    # Jun-Dec event (September 2026) -> presumed effective October (factor
+    # 0.75), NOT bimodal -> ONE supplemental only: added_value = 650,000 -
+    # 500,000 = $150,000; tax = 1% x (150,000 x 0.75) = $1,125.00
+    ("In September 2026, there was a change of ownership. The new base year value is $650,000 and the prior taxable value was $500,000. What's my supplemental assessment bill?",
+     {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 1125.00}),
+    # June-event rollover edge case: presumed effective date rolls into
+    # the NEXT fiscal year (July, same calendar year) but stays in the
+    # "one supplemental" bucket (factor 1.00, unprorated): added_value =
+    # 700,000 - 580,000 = $120,000; tax = 1% x 120,000 = $1,200.00
+    ("In June 2026, there was a change of ownership. The new base year value is $700,000 and the prior taxable value was $580,000. What's my supplemental assessment?",
+     {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 1200.00}),
+    # December-event rollover edge case: presumed effective date rolls
+    # into the NEXT calendar year (January) but stays in the SAME fiscal
+    # year as the event -- factor 0.50: added_value = 700,000 - 580,000 =
+    # $120,000; tax = 1% x (120,000 x 0.50) = $600.00
+    ("In December 2026, there was a change of ownership. The new base year value is $700,000 and the prior taxable value was $580,000. What's my supplemental assessment?",
+     {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 600.00}),
+
     # --- out-of-scope redirects (disclose why, not a generic refusal) ---
     ("what is the property tax rate in los angeles",
      {"status": "needs_review", "domain": "property"}),
@@ -113,6 +184,8 @@ ITEMS = [
      {"status": "needs_review", "domain": "property"}),
     ("my home's value declined under prop 8, what happens to my assessment",
      {"status": "needs_review", "domain": "property"}),
+    # zero-personal-fact parent-child question -> informational fallback
+    # (preserves this exact case's pre-existing needs_review outcome)
     ("can I use the parent-child exclusion to avoid reassessment",
      {"status": "needs_review", "domain": "property"}),
 
