@@ -3,16 +3,25 @@ income_item_sweep.py's proven pattern (cached, resumable, mandatory
 regression gate after any change to property_tax.py/engine.py's property
 path).
 
-Covers all 5 built slices (core Prop 13 estimate, Disabled Veterans'
+Covers all 6 built slices (core Prop 13 estimate, Disabled Veterans'
 Exemption, Prop 19 base-year-value transfer, Prop 19 parent-child/
-grandparent-grandchild exclusion, supplemental assessment) plus the
-composed purchase+DV path, the remaining 2 out-of-scope redirects
-(local-tra-rate, prop8-decline -- Mello-Roos is a 3rd, not_applicable
-rather than deferred, see property_tax_inventory.py), and the missing-fact
-clarification -- using CORRECTED hand-verified values (the Prop 19
-100%/105%/110% timing mechanic was wrong in an early design and fixed
-before any of these cases were locked in; see property_tax.py's own
-docstring for the correction).
+grandparent-grandchild exclusion, supplemental assessment, county-average
+local override rate) plus the composed purchase+DV path, the remaining 2
+out-of-scope redirects (local-tra-rate -- the remaining EXACT-per-parcel
+gap, distinct from the county-average slice above -- and prop8-decline;
+Mello-Roos is a 3rd, not_applicable rather than deferred, see property_
+tax_inventory.py), and the missing-fact clarification -- using CORRECTED
+hand-verified values (the Prop 19 100%/105%/110% timing mechanic was wrong
+in an early design and fixed before any of these cases were locked in; see
+property_tax.py's own docstring for the correction).
+
+The county-override-rate dollar cases use REAL data, independently
+verified this session (not just BOE-worked-example-adjacent like the
+Prop-19 fix above): the CA State Controller's Office's own JSON API,
+cross-checked county-by-county for plausibility, with the 2 anomalous
+counties (San Benito, Plumas) independently confirmed as data errors
+against each county's own bond tax-rate statement/resolution before being
+excluded -- see load_county_override_rates.py's own docstring.
 
 The parent-child/supplemental-assessment dollar cases below use FRESH,
 self-computed round numbers, NOT the BOE LTA 2026/026 Q50 worked example --
@@ -177,6 +186,27 @@ ITEMS = [
     ("In December 2026, there was a change of ownership. The new base year value is $700,000 and the prior taxable value was $580,000. What's my supplemental assessment?",
      {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 600.00}),
 
+    # --- F: county-average local override rate ---
+    # composed estimate with a recognized county (Kern, override_rate
+    # 0.002529): total_rate 0.012529, FBYV $497,349.72 (same $400k/2015
+    # scenario as case A above) -> tax = round(0.012529*497349.72, 2) = $6,231.29
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Kern County?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate", "tax": 6231.29}),
+    # recognized-but-EXCLUDED county (San Benito, confirmed SCO data error)
+    # -> falls back to the plain 1%-only estimate, identical to no-county case
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in San Benito County?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate", "tax": 4973.50}),
+    # NOT a recognized CA county at all -> same generic fallback, no crash
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Multnomah County?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate", "tax": 4973.50}),
+    # bare rate-only question, recognized county -> specific answer instead
+    # of the generic deferral
+    ("What is the property tax rate in Kern County?",
+     {"status": "answered", "domain": "property", "category": "property_tax_county_rate", "rate": 0.002529}),
+    # existing out-of-scope case below (no literal "County" suffix) is the
+    # regression guard that this feature's strict suffix requirement wasn't
+    # accidentally loosened -- see "what is the property tax rate in los angeles"
+
     # --- out-of-scope redirects (disclose why, not a generic refusal) ---
     ("what is the property tax rate in los angeles",
      {"status": "needs_review", "domain": "property"}),
@@ -220,6 +250,9 @@ def _check(result, expected):
         got = result.get(k)
         if k in ("tax", "amount"):
             if got is None or abs(float(got) - want) > TOL:
+                return False, k
+        elif k == "rate":
+            if got is None or abs(float(got) - want) > 0.000001:
                 return False, k
         elif got != want:
             return False, k

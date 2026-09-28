@@ -102,12 +102,33 @@ ITEMS = [
     ("excluded", None, "local-tra-rate", "Exact local ad-valorem add-on (voter-approved bonds by tax rate area)",
      "addition", "common", "BOE Pub. 29 p.6/p.16; LAO property tax primer",
      "deferred_new_engine", None,
-     "Real, per-parcel data exists (each of 58 counties' own tax-rate-area rate tables), just "
-     "not centrally ingested into this codebase yet -- genuinely buildable later, same complexity "
-     "class as business-entity apportionment, NOT narrow enough to mark not_applicable. LAO's own "
-     "figure: voter-approved debt rates average roughly one-tenth of 1% (~1.1% total ad-valorem) "
-     "statewide, but real per-parcel variation exists across tens of thousands of TRAs -- the "
-     "core estimate discloses this rather than guessing a single number."),
+     "The remaining EXACT per-parcel gap, now that a county-WIDE AVERAGE is built separately (see "
+     "'local-override-rate' below) -- real per-parcel data exists (each of 58 counties' own "
+     "differently-formatted tax-rate-area rate books/lookup tools, e.g. LA County's own online TRA "
+     "lookup vs. Kern County's own PDF rate book), just not centrally ingested into this codebase, "
+     "genuinely buildable later but a real per-county scraping/data-engineering project, not a "
+     "single source to ingest once. A taxpayer also wouldn't typically know their own TRA number "
+     "without looking it up, unlike stating their county."),
+    ("local_override_rate", None, "local-override-rate",
+     "County-average voter-approved local ad-valorem override rate (bonds), by county",
+     "addition", "common", 'California State Controller\'s Office, "CA Property Tax Data" portal, '
+     "FY2025-26 Allocations + Levies by county",
+     "built", None,
+     "Built via property_tax.compute_county_override_rate / compute_property_tax_estimate_with_"
+     "county_rate, engine._property_estimate_with_county_answer / _property_local_rate_with_"
+     "county_answer. Real per-COUNTY (not per-parcel-TRA) average override rate, derived from the "
+     "SCO portal's own JSON API: override_rate = county Levies / (county Allocations / 0.01) -- "
+     "Allocations is the 1% base (lets you back out total assessed value), Levies is the total "
+     "voter-approved local override. 56 of 58 counties seeded; San Benito and Plumas deliberately "
+     "EXCLUDED as confirmed SCO data errors (San Benito's SCO-implied 5.32% override rate vs. its "
+     "own bond tax-rate statement's normal ~0.025% scale; Plumas's SCO-implied 0.996% vs. its own "
+     "county resolution's countywide total of 0.042%, ~24x off) -- the portal's own glossary "
+     "disclaims responsibility for county-submitted data accuracy. Lookup uses 'most recent "
+     "tax_year <= requested', NOT an exact match like ca_disabled_veterans_exemption -- county bond "
+     "resolutions are adopted Aug-Sept and SCO aggregates afterward, so this data structurally lags "
+     "DEFAULT_LIEN_YEAR by about a fiscal year; an exact-match lookup would silently break every "
+     "year the moment DEFAULT_LIEN_YEAR is bumped. Still a county-WIDE AVERAGE, not exact-per-"
+     "parcel -- see 'local-tra-rate' above for that remaining gap."),
     ("excluded", None, "mello-roos", "Mello-Roos Community Facilities District special taxes",
      "addition", "moderate", "Mello-Roos Community Facilities Act of 1982, Gov. Code Sec. 53311 et seq.",
      "not_applicable", None,

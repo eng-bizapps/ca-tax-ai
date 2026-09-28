@@ -8,7 +8,7 @@ never JSONB-facts" precedent as income_schema.py, which explicitly rejected
 that shape as unauditable (the prior-generation SQL system in this repo
 tried it).
 
-Three genuinely different fact shapes:
+Four genuinely different fact shapes:
   - ca_disabled_veterans_exemption -- inflation-indexed, republished
     annually by BOE Letter To Assessors (R&TC 205.5), same "one row per
     tax_year" shape as income_schema.py's ca_standard_deduction. NOT keyed
@@ -26,6 +26,16 @@ Three genuinely different fact shapes:
     schedule_ca_inventory) because that table physically lives in the
     INCOME database -- form540_inventory.py's cross-part reuse trick only
     works within one database, and Ring 4 is a separate database by design.
+  - county_override_rates -- a MANY-rows-per-tax_year table (unlike
+    ca_disabled_veterans_exemption's one-row-per-year shape), one row per
+    CA county's voter-approved local ad-valorem override rate on top of
+    the 1% base, sourced from the CA State Controller's "CA Property Tax
+    Data" portal. Seeded by the separate load_county_override_rates.py
+    (mirrors load_payroll_withholding_data.py's own "large externally-
+    sourced dataset gets its own loader file" precedent), not seed()
+    below. See property_tax.compute_county_override_rate for the lookup
+    (deliberately NOT an exact tax_year match -- see that function's own
+    docstring for why).
 
 The Homeowners' Exemption ($7,000) is NOT a table here -- it's fixed
 directly in the CA Constitution (Art. XIII Sec. 3(k)), not annually
@@ -34,7 +44,7 @@ in property_tax.py, same class as CASUALTY_LOSS_AGI_FLOOR_RATE in
 income_brackets.py. If ever amended, promote to a tax_year-keyed table then.
 
 Usage:
-  python property_schema.py create   # create all 3 tables (idempotent)
+  python property_schema.py create   # create all 4 tables (idempotent)
   python property_schema.py seed     # insert verified DV-exemption + ledger rows
   python property_schema.py status   # row counts
 """
@@ -90,6 +100,27 @@ CREATE TABLE IF NOT EXISTS property_tax_inventory (
     notes           TEXT,
     UNIQUE (tax_year, line_ref, item_label)
 );
+
+-- County-average voter-approved local ad-valorem OVERRIDE rate (on top of
+-- the 1% base) -- CA State Controller's Office "CA Property Tax Data"
+-- portal (Allocations + Levies by county). MANY rows per tax_year (one
+-- per county), unlike ca_disabled_veterans_exemption above -- tax_year is
+-- the LIEN YEAR the underlying fiscal-year data represents (property_tax.
+-- DEFAULT_LIEN_YEAR's own convention), looked up via "most recent
+-- tax_year <= requested" (property_tax.compute_county_override_rate),
+-- not an exact match -- county bond resolutions are adopted Aug-Sept and
+-- this data is aggregated afterward, so it naturally lags
+-- DEFAULT_LIEN_YEAR by about a fiscal year.
+CREATE TABLE IF NOT EXISTS county_override_rates (
+    id            SERIAL PRIMARY KEY,
+    tax_year      INTEGER NOT NULL,
+    county        TEXT NOT NULL,
+    override_rate NUMERIC NOT NULL,
+    citation      TEXT,
+    source_url    TEXT,
+    as_of         DATE,
+    UNIQUE (tax_year, county)
+);
 """
 
 # Verified directly against BOE Letter To Assessors 2025/014 (2025-05-21)
@@ -111,7 +142,7 @@ def create():
     with db.get_conn() as conn:
         conn.execute(SCHEMA)
     print("property domain schema created (ca_disabled_veterans_exemption, "
-          "property_rule_embeddings, property_tax_inventory)")
+          "property_rule_embeddings, property_tax_inventory, county_override_rates)")
     status()
 
 
@@ -134,7 +165,8 @@ def seed():
 
 def status():
     conn = db.get_conn()
-    for tbl in ("ca_disabled_veterans_exemption", "property_rule_embeddings", "property_tax_inventory"):
+    for tbl in ("ca_disabled_veterans_exemption", "property_rule_embeddings", "property_tax_inventory",
+                "county_override_rates"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:32} {n} rows")
     conn.close()

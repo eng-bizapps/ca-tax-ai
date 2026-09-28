@@ -1,26 +1,35 @@
 """Ring 4 -- deterministic California property tax math (Prop 13 base year
 value, Disabled Veterans' Exemption, Prop 19 base-year-value transfers,
-Prop 19 parent-child exclusion value cap, supplemental assessments).
+Prop 19 parent-child exclusion value cap, supplemental assessments,
+county-average local override rates).
 LLM-free, same principle as income_brackets.py/entity_tax.py: a number that
 changes a taxpayer's answer is computed by code, never composed by a model.
 
 Scope, verified against BOE Publication 29/800-10, BOE's official Prop 19
-page, BOE Letters To Assessors, Cal. Const. Art. XIII A, and Rev. & Tax.
-Code directly (not secondary tax-prep sources) -- see
-property_tax_inventory.py for the full ledger of what's built vs.
-deliberately excluded and why. Five tractable slices: (1) the core Prop 13
-base-year-value estimate, (2) the Disabled Veterans' Exemption, (3) the
-Prop 19 base-year-value transfer formula, (4) the Prop 19 parent-child/
-grandparent-grandchild exclusion's value-cap formula (eligibility itself is
-a checklist, see property_eligibility.py -- this module only computes the
-dollar consequence once eligibility is already confirmed True), (5)
-supplemental assessments (a bimodal fiscal-year proration rule). Still
-deliberately NOT modeled: exact local ad-valorem add-ons (real per-parcel
-data exists across 58 counties' tax-rate-area tables, just not centrally
-ingested), Mello-Roos CFD special taxes (no statewide registry exists at
-all), Prop 8 decline-in-value / multi-year assessed-value history
-(path-dependent state a single question can't reconstruct, same complexity
-class as AMT's multi-year-basis limitation).
+page, BOE Letters To Assessors, Cal. Const. Art. XIII A, Rev. & Tax. Code,
+and the CA State Controller's Office "CA Property Tax Data" portal
+directly (not secondary tax-prep sources) -- see property_tax_inventory.py
+for the full ledger of what's built vs. deliberately excluded and why. Six
+tractable slices: (1) the core Prop 13 base-year-value estimate, (2) the
+Disabled Veterans' Exemption, (3) the Prop 19 base-year-value transfer
+formula, (4) the Prop 19 parent-child/grandparent-grandchild exclusion's
+value-cap formula (eligibility itself is a checklist, see property_
+eligibility.py -- this module only computes the dollar consequence once
+eligibility is already confirmed True), (5) supplemental assessments (a
+bimodal fiscal-year proration rule), (6) county-average local ad-valorem
+OVERRIDE rates (compute_county_override_rate/compute_property_tax_
+estimate_with_county_rate -- a COUNTY-WIDE AVERAGE for 56 of 58 counties,
+sourced from the SCO portal's Allocations+Levies data, NOT an exact
+per-parcel Tax-Rate-Area figure; San Benito and Plumas are deliberately
+excluded, confirmed SCO data errors -- see load_county_override_rates.py's
+own docstring for the cross-check evidence). Still deliberately NOT
+modeled: exact per-parcel local ad-valorem rates by Tax Rate Area (real
+data exists across 58 counties' own differently-formatted rate books,
+just not centrally ingested -- the county-AVERAGE in (6) is a real but
+coarser substitute), Mello-Roos CFD special taxes (no statewide registry
+exists at all), Prop 8 decline-in-value / multi-year assessed-value
+history (path-dependent state a single question can't reconstruct, same
+complexity class as AMT's multi-year-basis limitation).
 """
 # Property tax runs on a FISCAL year (Jul 1-Jun 30) driven by the PRIOR
 # Jan 1 lien date -- NOT the same year-boundary convention income_brackets.
@@ -440,3 +449,115 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
         "partial_interest_second_supplemental_note": partial_interest_second_supplemental_note,
         "citation": SUPPLEMENTAL_CITATION, "source_url": SUPPLEMENTAL_SOURCE_URL,
     }
+
+
+# All 58 real CA counties -- deliberately includes San Benito and Plumas
+# (which have NO county_override_rates row, confirmed SCO data errors, see
+# load_county_override_rates.py's own docstring) so they're RECOGNIZED as
+# valid counties by any caller checking membership -- a lookup for either
+# correctly falls through to "no data" rather than the county not being
+# recognized as a county at all.
+CA_COUNTIES = frozenset({
+    "Alameda", "Alpine", "Amador", "Butte", "Calaveras", "Colusa",
+    "Contra Costa", "Del Norte", "El Dorado", "Fresno", "Glenn",
+    "Humboldt", "Imperial", "Inyo", "Kern", "Kings", "Lake", "Lassen",
+    "Los Angeles", "Madera", "Marin", "Mariposa", "Mendocino", "Merced",
+    "Modoc", "Mono", "Monterey", "Napa", "Nevada", "Orange", "Placer",
+    "Plumas", "Riverside", "Sacramento", "San Benito", "San Bernardino",
+    "San Diego", "San Francisco", "San Joaquin", "San Luis Obispo",
+    "San Mateo", "Santa Barbara", "Santa Clara", "Santa Cruz", "Shasta",
+    "Sierra", "Siskiyou", "Solano", "Sonoma", "Stanislaus", "Sutter",
+    "Tehama", "Trinity", "Tulare", "Tuolumne", "Ventura", "Yolo", "Yuba",
+})
+
+COUNTY_OVERRIDE_RATE_CITATION = ('California State Controller\'s Office, "CA Property Tax Data" '
+                                  'portal, FY2025-26 Allocations + Levies by county')
+COUNTY_OVERRIDE_RATE_SOURCE_URL = "https://propertytax.bythenumbers.sco.ca.gov/"
+
+
+def compute_county_override_rate(conn, county: str, tax_year: int = DEFAULT_LIEN_YEAR):
+    """Looks up county_override_rates for `county`, using the MOST RECENT
+    vintage AT OR BEFORE tax_year -- deliberately NOT an exact tax_year
+    match the way compute_disabled_veterans_exemption_ca's WHERE tax_year=
+    %s is. DV-exemption rows are published by BOE a YEAR IN ADVANCE; this
+    data is the opposite -- county bond resolutions are adopted Aug-Sept
+    and the SCO portal aggregates afterward, so it's naturally a vintage
+    BEHIND DEFAULT_LIEN_YEAR. An exact match would silently return None
+    for the entire current year every time DEFAULT_LIEN_YEAR is bumped,
+    since a same-year row won't exist yet -- county override rates change
+    gradually (bonds amortize down, new ones occasionally added), so using
+    the most recent REAL county-specific rate as this year's estimate is a
+    much smaller approximation than the core estimate's own 2%/year-cap
+    overestimate already is.
+
+    Returns None if county isn't a recognized CA county (not in
+    CA_COUNTIES) or has no row at or before tax_year -- San Benito and
+    Plumas are recognized counties with NO row (confirmed SCO data
+    errors, deliberately excluded, never a guessed number)."""
+    if county not in CA_COUNTIES:
+        return None
+    r = conn.execute(
+        "SELECT tax_year, override_rate, citation, source_url, as_of "
+        "FROM county_override_rates WHERE county=%s AND tax_year<=%s "
+        "ORDER BY tax_year DESC LIMIT 1", (county, tax_year)).fetchone()
+    if not r:
+        return None
+    data_vintage_year, override_rate, citation, source_url, as_of = r
+    return {
+        "county": county, "requested_tax_year": tax_year,
+        "data_vintage_year": data_vintage_year,
+        "data_vintage_fiscal_year_label": f"{data_vintage_year}-{str(data_vintage_year + 1)[-2:]}",
+        "year_lag": tax_year - data_vintage_year,
+        "override_rate": float(override_rate),
+        "citation": citation or COUNTY_OVERRIDE_RATE_CITATION,
+        "source_url": source_url or COUNTY_OVERRIDE_RATE_SOURCE_URL,
+        "as_of": as_of,
+    }
+
+
+def compute_property_tax_estimate_with_county_rate(conn, purchase_price: float, purchase_year: int,
+                                                     county: str,
+                                                     current_tax_year: int = DEFAULT_LIEN_YEAR,
+                                                     homeowners_exemption: bool = False):
+    """Composes compute_property_tax_estimate with compute_county_override_
+    rate: total_rate = PROP13_BASE_RATE + override_rate, applied to the SAME
+    assessed_value the core estimate computes -- i.e. AFTER the Homeowners'
+    Exemption if requested (the exemption reduces the net taxable value the
+    FULL combined ad-valorem rate applies to, both the 1% base and voted
+    debt overrides, not just the 1% portion -- standard CA property-tax
+    mechanics, not independently re-verified this session the way the DV-
+    exemption mutual-exclusivity rule was).
+
+    Citation is MERGED (both PROP13_CITATION and the county-rate citation),
+    not overwritten -- a deliberate small improvement over compute_
+    property_tax_with_dv_exemption's own precedent of dropping the base
+    citation, since here two independently-sourced rates are being SUMMED,
+    not one figure replacing another.
+
+    KNOWN v1 GAP, not fixed here: does not compose with the Disabled
+    Veterans' Exemption -- a DV+county question answers via the unchanged
+    compute_property_tax_with_dv_exemption path, without the county
+    override rate, the same way Prop 19 and DV aren't composed with each
+    other either.
+
+    Returns None if the core estimate fails OR the county has no rate row
+    at or before current_tax_year (unrecognized name, or recognized-but-
+    excluded like San Benito/Plumas) -- the caller falls back to the plain
+    core estimate + generic statewide-average disclosure in that case,
+    unchanged from before this feature existed."""
+    base = compute_property_tax_estimate(purchase_price, purchase_year, current_tax_year,
+                                          homeowners_exemption=homeowners_exemption)
+    if not base:
+        return None
+    rate_info = compute_county_override_rate(conn, county, current_tax_year)
+    if not rate_info:
+        return None
+    total_rate = PROP13_BASE_RATE + rate_info["override_rate"]
+    tax = round(total_rate * base["assessed_value"], 2)
+    return {**base, "county": county, "override_rate": rate_info["override_rate"],
+            "total_rate": total_rate,
+            "data_vintage_year": rate_info["data_vintage_year"],
+            "data_vintage_fiscal_year_label": rate_info["data_vintage_fiscal_year_label"],
+            "year_lag": rate_info["year_lag"], "tax": tax,
+            "citation": f"{PROP13_CITATION}; {rate_info['citation']}",
+            "source_url": rate_info["source_url"]}

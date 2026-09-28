@@ -8218,6 +8218,37 @@ _SUPPLEMENTAL_MONTH_YEAR_RE = re.compile(
     rf"\b({_MONTH_NAME_PATTERN})\.?\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?((?:19|20)\d{{2}})\b",
     re.IGNORECASE)
 
+# County-name recognition for the county-average local override rate
+# feature -- requires a literal "County" suffix, mirrors local_rates.py's
+# own detect()'s documented rationale for sales tax ("avoid false
+# positives like the cities named Commerce, Industry, or Orange") -- several
+# of the 58 real CA county names (Orange, Kings, Lake, Butte...) are also
+# common English words, so the bare name alone is unsafe to match. Built as
+# a longest-first alternation directly from the known 58-name enumeration
+# (same construction as _MONTH_NAME_PATTERN above) rather than a generic
+# capture-then-validate regex -- every alternative is a known full name, so
+# multi-word counties (Los Angeles, San Diego, Contra Costa, Santa Clara,
+# San Luis Obispo) are handled automatically with no risk of over-capturing
+# leading words the way a bare "\b([A-Za-z ]+?)\s+county\b" capture group
+# would (e.g. "northern Los Angeles County").
+_CA_COUNTY_NAME_PATTERN = "|".join(
+    re.escape(c) for c in sorted(property_tax.CA_COUNTIES, key=len, reverse=True))
+_CA_COUNTY_RE = re.compile(rf"\b({_CA_COUNTY_NAME_PATTERN})\s+County\b", re.IGNORECASE)
+
+
+def _property_county_match(question: str):
+    """Returns (canonical_county_name, start, end) for the FIRST
+    recognized '<Name> County' mention, or None. Recognizes all 58 real
+    CA counties (property_tax.CA_COUNTIES) -- including San Benito/Plumas,
+    which have no county_override_rates row (confirmed data errors), so a
+    lookup for either correctly falls through to "recognized, no data"
+    rather than failing to recognize them as counties at all."""
+    m = _CA_COUNTY_RE.search(question)
+    if not m:
+        return None
+    canonical = next(c for c in property_tax.CA_COUNTIES if c.lower() == m.group(1).lower())
+    return canonical, m.start(1), m.end(1)
+
 
 def detect_property_estimate_signal(question: str) -> bool:
     q = question.lower()
@@ -8382,6 +8413,67 @@ def _property_has_any_signal(question: str) -> bool:
         except Exception:
             continue
     return False
+
+
+def _property_estimate_with_county_answer(question: str, base: dict):
+    """Core Prop 13 estimate COMPOSED with a recognized county's average
+    local override rate -- see property_tax.compute_property_tax_estimate_
+    with_county_rate's docstring for the composition mechanic. Must run
+    BEFORE the plain _property_estimate_answer below (composed-before-
+    narrower, same ordering precedent as _property_dv_composed_answer),
+    so a question stating a recognized county gets the more specific
+    answer. Declines (returns None) for an unrecognized county name OR a
+    recognized-but-excluded one (San Benito/Plumas, confirmed SCO data
+    errors) -- falls through to the plain estimate + generic statewide-
+    average disclosure in either case, unchanged from before this feature
+    existed."""
+    if not detect_property_estimate_signal(question):
+        return None
+    county_match = _property_county_match(question)
+    if county_match is None:
+        return None
+    county, _c_s, _c_e = county_match
+    year_match = _property_purchase_year_match(question)
+    if year_match is None:
+        return None
+    purchase_year = int(year_match.group(0))
+    y_start, y_end = year_match.span()
+    amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question)
+               if a_e <= y_start or a_s >= y_end]
+    if len(amounts) != 1:
+        return None
+    purchase_price = amounts[0][0]
+    q = question.lower()
+    homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_property_tax_estimate_with_county_rate(
+            conn, purchase_price, purchase_year, county, homeowners_exemption=homeowners_exemption)
+    if not calc:
+        return None
+    exemption_note = ""
+    if homeowners_exemption:
+        exemption_note = (f" after subtracting the ${property_tax.HOMEOWNERS_EXEMPTION_AMOUNT:,.0f} "
+                           f"Homeowners' Exemption ({property_tax.HOMEOWNERS_EXEMPTION_CITATION})")
+    result = {**base, "status": "answered", "category": "property_tax_estimate_with_county_rate",
+              "amount": purchase_price, "tax": calc["tax"],
+              "citation": calc["citation"], "source_url": calc["source_url"]}
+    lag_note = ""
+    if calc["year_lag"] > 0:
+        lag_note = (f" (using the most recently available FY{calc['data_vintage_fiscal_year_label']} "
+                    f"{county} County rate data as an approximation)")
+    result["answer_text"] = (
+        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} in {county} County, your "
+        f"estimated {calc['current_tax_year']} California property tax is about ${calc['tax']:,.2f} "
+        f"({calc['total_rate']*100:.4f}% -- California's 1% constitutional base plus {county} County's own "
+        f"{calc['override_rate']*100:.4f}% average voter-approved local override rate{lag_note}, applied to "
+        f"a ${calc['factored_base_year_value']:,.2f} factored base year value{exemption_note}) "
+        f"({calc['citation']}). This compounds your purchase price at the FULL 2%/year cap Proposition 13 "
+        "allows -- a deliberate overestimate. The county rate is a COUNTY-WIDE AVERAGE (California State "
+        "Controller's Office data), not an exact per-parcel Tax Rate Area figure -- your actual bill may "
+        "differ somewhat depending on which TRA your specific parcel sits in. This also does not include "
+        "Mello-Roos or other special assessments, or a Proposition 8 decline-in-value adjustment."
+    )
+    return result
 
 
 def _property_estimate_answer(question: str, base: dict):
@@ -8714,6 +8806,42 @@ def _property_prop19_transfer_answer(question: str, base: dict):
     return result
 
 
+def _property_local_rate_with_county_answer(question: str, base: dict):
+    """Upgrades the bare rate-only question (no purchase price/year
+    stated) for a recognized county WITH a rate row -- gives the actual
+    average combined rate directly instead of the generic deferral. Must
+    run BEFORE _property_local_rate_out_of_scope_answer below, which stays
+    the correct fallback for an unrecognized county, a recognized-but-
+    excluded one (San Benito/Plumas), or no county stated at all."""
+    if not detect_local_rate_out_of_scope(question):
+        return None
+    county_match = _property_county_match(question)
+    if county_match is None:
+        return None
+    county = county_match[0]
+    with property_db.get_conn() as conn:
+        calc = property_tax.compute_county_override_rate(conn, county)
+    if not calc:
+        return None
+    result = {**base, "status": "answered", "category": "property_tax_county_rate",
+              "rate": calc["override_rate"], "citation": calc["citation"], "source_url": calc["source_url"]}
+    lag_note = ""
+    if calc["year_lag"] > 0:
+        lag_note = (f" (most recently available data is FY{calc['data_vintage_fiscal_year_label']}, "
+                    f"{calc['year_lag']} fiscal year{'s' if calc['year_lag'] != 1 else ''} behind the "
+                    "current lien year)")
+    total_pct = (property_tax.PROP13_BASE_RATE + calc["override_rate"]) * 100
+    result["answer_text"] = (
+        f"In {county} County, voter-approved local bonds/overrides add about "
+        f"{calc['override_rate']*100:.4f}% on top of California's 1% constitutional base rate, for a total "
+        f"average combined rate of about {total_pct:.4f}%{lag_note} ({calc['citation']}). This is a "
+        "COUNTY-WIDE AVERAGE (California State Controller's Office Allocations/Levies data), not an exact "
+        "per-parcel Tax Rate Area figure -- your county assessor or auditor-controller can confirm the "
+        "precise rate for your specific parcel."
+    )
+    return result
+
+
 def _property_local_rate_out_of_scope_answer(question: str, base: dict):
     if not detect_local_rate_out_of_scope(question):
         return None
@@ -9029,12 +9157,14 @@ def _answer_property(question: str):
         "city_cannabis_tax": None, "route_dist": None, "rerank_v2_key": None,
         "domain": "property",
     }
-    for fn in (_property_dv_composed_answer, _property_estimate_answer, _property_dv_exemption_answer,
+    for fn in (_property_dv_composed_answer,
+               _property_estimate_with_county_answer, _property_estimate_answer,
+               _property_dv_exemption_answer,
                _property_prop19_transfer_answer,
                _property_supplemental_assessment_answer, _property_supplemental_assessment_missing_fact_answer,
                _property_parent_child_composed_answer, _property_parent_child_exclusion_answer,
                _property_parent_child_checklist_incomplete_answer, _property_parent_child_informational_answer,
-               _property_local_rate_out_of_scope_answer,
+               _property_local_rate_with_county_answer, _property_local_rate_out_of_scope_answer,
                _property_mello_roos_out_of_scope_answer, _property_prop8_decline_out_of_scope_answer,
                _property_estimate_missing_fact_answer):
         result = fn(question, base)
