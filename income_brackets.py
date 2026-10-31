@@ -5329,7 +5329,10 @@ def compute_amt_screen_ca_tax(conn, income_amount: float, filing_status: str,
 # 1, 2015" -- IRC 56(b)(3) (the ISO AMT preference) is a long-stable,
 # pre-2015 provision, so this conformity-date snapshot creates no
 # divergence risk for this specific line, unlike several other
-# conformity-date items found elsewhere in this project.
+# conformity-date items found elsewhere in this project. (SB 711 audit
+# 2026-10-31: the 2025 Schedule P (540) instructions STILL say AMT conforms
+# "as of January 1, 2015" under R&TC 17062.1 -- AMT has its own conformity
+# date that SB 711's general 2015->2025 move did not change.)
 #
 # CRITICAL CARVE-OUT, directly from the same source: "If you acquired
 # stock by exercising an ISO and you disposed of that stock in the same

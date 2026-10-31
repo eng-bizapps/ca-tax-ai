@@ -3005,6 +3005,10 @@ ITEMS = [
      {"status": "answered", "domain": "income", "category": "mortgage_forgiveness_debt_relief", "taxable": True}),
     ("can I deduct classroom supplies I bought as a teacher on my california taxes",
      {"status": "answered", "domain": "income", "category": "educator_expenses", "taxable": True}),
+    # SB 711 audit (2026-10-31): California does NOT conform to the federal
+    # moving-expense suspension, for civilians too (FTB 3913 / Sched CA line 14)
+    ("Can I deduct my moving expenses on my California return? I moved 400 miles for a new job in 2025",
+     {"status": "answered", "domain": "income", "category": "moving_expense_deduction"}),
     ("I received a wildfire disaster settlement payment, is that taxable in california",
      {"status": "answered", "domain": "income", "category": "wildfire_disaster_settlement_exclusion", "taxable": False}),
     ("I got money from the kincade fire pge settlement, is that taxable in california",

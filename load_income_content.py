@@ -434,6 +434,37 @@ INCOME_TOPICS = [
         "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-ca-instructions.html",
     },
     {
+        "topic_key": "moving_expense_deduction",
+        "topic_label": "Moving expense deduction (FTB 3913)",
+        "schedule_ca_line": "Pt I Sec C line 14",
+        # taxable=None deliberately (same precedent as alimony_spousal_support):
+        # whether a deduction is allowed depends on the distance and time tests,
+        # not a categorical verdict.
+        "taxable": None,
+        "summary": ("Unlike federal law (which suspends the moving expense deduction for "
+                     "everyone except active-duty members of the Armed Forces), California "
+                     "does NOT conform to the suspension: you can deduct unreimbursed moving "
+                     "expenses on your California return, using form FTB 3913 (attach it to "
+                     "Form 540), and enter the deduction on Schedule CA (540), Part I, line "
+                     "14, column C. For a non-military move you must meet BOTH tests: the "
+                     "distance test -- your new workplace must be at least 50 miles farther "
+                     "from your old home than your old workplace was -- and the time test -- "
+                     "if you are an employee, you must work full time in the area of the new "
+                     "workplace for at least 39 weeks during the 12 months after the move "
+                     "(self-employed: 39 weeks in the first 12 months and 78 weeks in the "
+                     "first 24). The move must also be closely related in time and place to "
+                     "starting the new job. Deductible costs are transporting and storing "
+                     "household goods and personal effects, and travel (including lodging, "
+                     "but not meals) from the old home to the new one, less any amount your "
+                     "employer paid you that was not in your federal W-2 wages. Active-duty "
+                     "military members moving under a permanent change of station skip the "
+                     "distance and time tests but have no California adjustment. The 2025 "
+                     "standard mileage rate for driving your own vehicle to move is 21 cents "
+                     "a mile."),
+        "citation": "FTB 2025 Instructions for Form FTB 3913; FTB 2025 Instructions for Schedule CA (540) -- Line 14, Moving Expenses",
+        "source_url": "https://www.ftb.ca.gov/forms/2025/2025-3913-instructions.html",
+    },
+    {
         "topic_key": "military_retirement_exclusion",
         "topic_label": "Military retirement pay / DoD Survivor Benefit Plan exclusion",
         "schedule_ca_line": "Pt I Sec A line 5a/5b",

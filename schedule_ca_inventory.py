@@ -670,8 +670,15 @@ ITEMS = [
      "subtraction", "moderate", "Sched CA (540) Pt I Sec C line 13",
      "built", "hsa_contributions_and_earnings", "Part of HSA non-conformity cluster, already covered"),
     ("I", "C", "14", "Moving expenses (FTB 3913)",
-     "addition", "narrow", "Sched CA (540) Pt I Sec C line 14; FTB 3913",
-     "not_applicable", None, "Military-adjacent population"),
+     "subtraction", "common", "Sched CA (540) Pt I Sec C line 14; FTB 3913 and its 2025 instructions",
+     "built", "moving_expense_deduction",
+     "SB 711 audit 2026-10-31: previously mis-ledgered not_applicable ('military-adjacent "
+     "population'). The 2025 Schedule CA instructions say California does not conform to the "
+     "federal suspension of the moving expense deduction for anyone except active-duty military, "
+     "and tell non-military taxpayers to prepare FTB 3913 too -- so any employee or self-employed "
+     "person moving for a new job (50-mile distance test, 39-week time test) can deduct. Built as "
+     "an informational topic (tests + deductible costs); no dollar compute because the expense "
+     "total and reimbursements are the taxpayer's own figures."),
     ("I", "C", "15", "Deductible part of self-employment tax (worker reclassification)",
      "subtraction", "narrow", "Sched CA (540) Pt I Sec C line 15",
      "not_applicable", None, None),
