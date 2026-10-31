@@ -1,16 +1,16 @@
 """Ring 4 -- deterministic California property tax math (Prop 13 base year
 value, Disabled Veterans' Exemption, Prop 19 base-year-value transfers,
 Prop 19 parent-child exclusion value cap, supplemental assessments,
-county-average local override rates, an exact-per-TRA rate pilot for Kern
-County).
+county-average local override rates, exact per-TRA rates for the counties
+in TRA_FORMATS).
 LLM-free, same principle as income_brackets.py/entity_tax.py: a number that
 changes a taxpayer's answer is computed by code, never composed by a model.
 
 Scope, verified against BOE Publication 29/800-10, BOE's official Prop 19
 page, BOE Letters To Assessors, Cal. Const. Art. XIII A, Rev. & Tax. Code
 (read directly from leginfo.legislature.ca.gov, not a secondary source),
-the CA State Controller's Office "CA Property Tax Data" portal, and Kern
-County's own published rate book directly -- see property_tax_inventory.py
+the CA State Controller's Office "CA Property Tax Data" portal, and each
+covered county's own published rate book directly -- see property_tax_inventory.py
 for the full ledger of what's built vs. deliberately excluded and why.
 Eight tractable slices: (1) the
 core Prop 13 base-year-value estimate, (2) the Disabled Veterans'
@@ -28,19 +28,18 @@ data errors -- see load_county_override_rates.py's own docstring for the
 cross-check evidence), (7) Prop 8 decline-in-value for the ORDINARY market-
 decline case (compute_property_tax_prop8_decline -- see the SECOND
 correction note below; damage/destruction stays deferred, a genuinely
-different mechanic), (8) exact per-TRA combined rates for Kern County ONLY
-(compute_tra_rate/compute_property_tax_estimate_with_tra_rate -- a
-narrowly-scoped PILOT proving exact rate data is real and usable, NOT a
-general 58-county solution; every other county still uses the (6)
-county-average -- see extract_kern_tra_rates.py's own docstring for the
-extraction methodology and property_tax_inventory.py's separate
-'tra-rate-kern-pilot' vs. 'local-tra-rate' items). Still deliberately NOT
-modeled: exact per-parcel local ad-valorem rates by Tax Rate Area for the
-OTHER 57 counties (real data exists, each in its own differently-formatted
-source -- confirmed via live survey this session that even the largest
-counties share no common format, and at least one -- LA -- gates its own
-tool behind bot-protection -- the county-AVERAGE in (6) is the real but
-coarser substitute for those 57), Mello-Roos CFD special taxes (no
+different mechanic), (8) exact per-TRA combined rates for the counties in
+TRA_FORMATS (compute_tra_rate/compute_property_tax_estimate_with_tra_rate
+-- real data from each county's own published rate book; every county NOT
+in TRA_FORMATS still uses the (6) county-average -- see extract_kern_tra_
+rates.py's and extract_tra_rates.py's docstrings for the extraction
+methodology and property_tax_inventory.py's 'tra-rate-*' vs. 'local-tra-
+rate' items). Still deliberately NOT modeled: exact per-parcel rates for
+counties not in TRA_FORMATS (each publishes its own differently-formatted
+source -- confirmed via live survey that even the largest counties share no
+common format, and some gate their tools behind bot-protection or publish
+no machine-readable source -- the county-AVERAGE in (6) is the real but
+coarser substitute for those), Mello-Roos CFD special taxes (no
 statewide registry exists at all), and Prop 8 decline-in-value for
 property damaged/destroyed by disaster (Rev. & Tax. Code Sec. 51(b)/(c) --
 a genuinely separate, itself multi-year/path-dependent mechanic, see (7)
@@ -271,6 +270,90 @@ def compute_property_tax_prop8_decline(purchase_price: float, purchase_year: int
             "homeowners_exemption": homeowners_exemption, "exemption_applied": exemption_applied,
             "assessed_value": round(assessed_value, 2), "tax": tax,
             "citation": PROP8_DECLINE_CITATION, "source_url": PROP8_DECLINE_SOURCE_URL}
+
+
+DISASTER_RELIEF_CITATION = "Rev. & Tax. Code Sec. 170(b), (g), (h)"
+DISASTER_RELIEF_SOURCE_URL = "https://www.boe.ca.gov/proptaxes/disaster-relief.htm"
+DISASTER_RELIEF_MIN_LOSS = 10000.0      # R&TC 170(b): relief only if the loss is $10,000 or more
+
+
+def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: int,
+                                          value_before: float, value_after: float,
+                                          damage_lien_year: int,
+                                          target_lien_year: int = DEFAULT_LIEN_YEAR,
+                                          pct_restored: float = 0.0,
+                                          homeowners_exemption: bool = False):
+    """R&TC Sec. 170 disaster-relief reassessment (read directly from
+    leginfo, not a secondary source), for a county whose board of
+    supervisors has adopted a Sec. 170 ordinance (BOE's disaster-relief page
+    says all counties now have one; an ordinance may still be limited to
+    Governor-proclaimed disasters). Taxable value on a LATER lien date:
+
+      roll_value      = min(factored base year value on the roll in effect
+                            when the damage occurred, value_before)
+      pct_reduction   = (value_before - value_after) / value_before      [170(b)]
+      damaged_value   = roll_value * (1 - pct_reduction)
+      damaged_at_L    = damaged_value * 1.02 ** (L - damage_lien_year)   [170(g)]
+      fbyv_at_L       = purchase_price * 1.02 ** (L - purchase_year)
+      taxable_at_L    = damaged_at_L + (fbyv_at_L - damaged_at_L) * pct_restored
+                                                                 [170(g) 2nd para]
+
+    value_before/value_after are the assessor's full cash values immediately
+    before/after the damage (the caller trusts the stated figures, same as
+    every other compute function here). damage_lien_year is the lien year of
+    the roll in effect on the damage date (damage in Jul-Dec = that calendar
+    year; Jan-Jun = the prior year). The 2% inflation factor is the cap, as
+    in compute_property_tax_estimate: a disclosed overestimate.
+
+    NOT modeled: the damage-year proration of Sec. 170(e) (so target_lien_year
+    must be after damage_lien_year, else None), land/improvement/personal
+    property separate percentages (one blended percentage is used), the
+    additional assessments on completion (170(h)), the Sec. 70(c) new-
+    construction exclusion, the 5-year (8 for LA/Ventura 2025 fires)
+    rebuild-window, and local rates above 1%.
+
+    Returns {"eligible": False, ...} when the loss is under $10,000; None for
+    unusable inputs."""
+    if not purchase_price or purchase_price <= 0 or purchase_year is None:
+        return None
+    if value_before is None or value_before <= 0 or value_after is None or not 0 <= value_after <= value_before:
+        return None
+    if damage_lien_year is None or damage_lien_year < purchase_year:
+        return None
+    if target_lien_year is None or target_lien_year <= damage_lien_year:
+        return None
+    if not 0.0 <= pct_restored <= 1.0:
+        return None
+    loss = value_before - value_after
+    out = {"purchase_price": purchase_price, "purchase_year": purchase_year,
+           "value_before": value_before, "value_after": value_after, "loss": round(loss, 2),
+           "damage_lien_year": damage_lien_year, "target_lien_year": target_lien_year,
+           "pct_restored": pct_restored, "citation": DISASTER_RELIEF_CITATION,
+           "source_url": DISASTER_RELIEF_SOURCE_URL}
+    fbyv_at_target = purchase_price * (1 + PROP13_INFLATION_CAP_RATE) ** (target_lien_year - purchase_year)
+    exemption_applied = HOMEOWNERS_EXEMPTION_AMOUNT if homeowners_exemption else 0.0
+    out["homeowners_exemption"] = homeowners_exemption
+    out["exemption_applied"] = exemption_applied
+    out["factored_base_year_value"] = round(fbyv_at_target, 2)
+    if loss < DISASTER_RELIEF_MIN_LOSS:
+        taxable = fbyv_at_target
+        out.update(eligible=False, pct_reduction=0.0, damaged_value=None,
+                   taxable_value=round(taxable, 2))
+    else:
+        fbyv_at_damage = purchase_price * (1 + PROP13_INFLATION_CAP_RATE) ** (damage_lien_year - purchase_year)
+        roll_value = min(fbyv_at_damage, value_before)
+        pct_reduction = loss / value_before
+        damaged_value = roll_value * (1 - pct_reduction)
+        damaged_at_target = damaged_value * (1 + PROP13_INFLATION_CAP_RATE) ** (target_lien_year - damage_lien_year)
+        taxable = damaged_at_target + max(0.0, fbyv_at_target - damaged_at_target) * pct_restored
+        out.update(eligible=True, roll_value=round(roll_value, 2), pct_reduction=round(pct_reduction, 6),
+                   damaged_value=round(damaged_value, 2),
+                   damaged_value_at_target=round(damaged_at_target, 2), taxable_value=round(taxable, 2))
+    assessed = max(0.0, taxable - exemption_applied)
+    out["assessed_value"] = round(assessed, 2)
+    out["tax"] = round(PROP13_BASE_RATE * assessed, 2)
+    out["undamaged_tax"] = round(PROP13_BASE_RATE * max(0.0, fbyv_at_target - exemption_applied), 2)
+    return out
 
 
 # Timing bucket -> the percentage of the ORIGINAL home's full cash value
@@ -672,26 +755,63 @@ def compute_property_tax_estimate_with_county_rate(conn, purchase_price: float, 
             "source_url": rate_info["source_url"]}
 
 
+# Counties with exact per-TRA data in tra_rates, and each county's own TRA
+# number format as the digit-group widths its rate book uses (TRA numbering
+# is only meaningful within one county -- these are NOT interchangeable):
+# Kern "001-002" -> (3, 3); Orange "01-227" -> (2, 3); San Diego "03014" ->
+# (5,). Must stay in sync with load_tra_rates.py's own registry (the loader
+# asserts this). Each county's rows carry their own vintage (tax_year), so
+# counties that have published a newer rate book can be refreshed
+# independently of the rest.
+TRA_FORMATS = {
+    "Kern": (3, 3),
+    "Orange": (2, 3),
+    "San Diego": (5,),
+    "San Joaquin": (3, 3),
+    "San Luis Obispo": (3, 3),
+    "Solano": (6,),
+    "Sonoma": (3, 3),
+    "Stanislaus": (3, 3),
+    "Tulare": (3, 3),
+    "Ventura": (5,),
+}
+
+
+def normalize_tra_number(county: str, groups):
+    """Canonical zero-padded TRA string for `county` from the digit groups a
+    user typed (e.g. Kern ["1", "2"] -> "001-002"; San Diego ["3014"] ->
+    "03014"), or None if the county has no TRA data or the typed shape
+    doesn't match that county's own format (wrong group count, or a group
+    wider than the county's format allows). Users reading their own bill
+    may drop leading zeros, so padding is applied, never trusted as typed."""
+    fmt = TRA_FORMATS.get(county)
+    if fmt is None or len(groups) != len(fmt):
+        return None
+    parts = []
+    for g, width in zip(groups, fmt):
+        if not g.isdigit() or len(g.lstrip("0") or "0") > width:
+            return None
+        parts.append(str(int(g)).zfill(width))
+    return "-".join(parts)
+
+
 def compute_tra_rate(conn, county: str, tra_number: str, tax_year: int = DEFAULT_LIEN_YEAR):
-    """Exact per-Tax-Rate-Area (TRA) combined rate lookup -- a NARROW
-    PILOT for exactly ONE county (Kern), not a general solution. Mirrors
-    compute_county_override_rate's shape (same "most recent tax_year <=
-    requested" lookup, same reasoning -- this data is only knowable in
-    arrears relative to DEFAULT_LIEN_YEAR, same as the county-average
-    data). tra_number is the zero-padded "NNN-NNN" form Kern's own rate
-    book uses (e.g. "001-002") -- the caller normalizes user-typed
-    variants (e.g. "1-2") before calling this.
+    """Exact per-Tax-Rate-Area (TRA) combined rate lookup for the counties
+    in TRA_FORMATS. Mirrors compute_county_override_rate's shape (same
+    "most recent tax_year <= requested" lookup, same reasoning -- this data
+    is only knowable in arrears relative to DEFAULT_LIEN_YEAR, same as the
+    county-average data). tra_number is the canonical zero-padded form
+    from normalize_tra_number.
 
     Unlike compute_county_override_rate, this stores and returns the FULL
     combined rate directly (already 1% base + all overrides, exactly as
-    Kern's own rate book publishes it) -- not a separately-tracked override
-    portion. See extract_kern_tra_rates.py's own docstring for exactly how
-    this data was extracted and validated (2,455 TRAs, 0 unclosed/
-    duplicate blocks).
+    each county's own rate book publishes it) -- not a separately-tracked
+    override portion. See extract_kern_tra_rates.py / extract_tra_rates.py
+    for how each county's data was extracted and validated.
 
-    Returns None if county isn't "Kern" (no other county has any rows in
-    this table) or the TRA number isn't found (unrecognized/mistyped, or
-    a real TRA this pilot's extraction didn't capture)."""
+    Returns None if the county has no rows in this table or the TRA number
+    isn't found (unrecognized/mistyped, or a real TRA the extraction
+    didn't capture)."""
     r = conn.execute(
         "SELECT tax_year, area_name, total_rate, citation, source_url, as_of "
         "FROM tra_rates WHERE county=%s AND tra_number=%s AND tax_year<=%s "

@@ -130,7 +130,14 @@ ITEMS = [
      "year the moment DEFAULT_LIEN_YEAR is bumped. Still a county-WIDE AVERAGE, not exact-per-"
      "parcel -- see 'local-tra-rate' above for that remaining gap."),
     ("tra_rate_pilot", None, "tra-rate-kern-pilot",
-     "Exact per-TRA local ad-valorem rate, Kern County pilot (2,455 TRAs)",
+     "Exact per-TRA local ad-valorem rate, 10 counties (Kern pilot + 9 more; ~19,000 TRAs): "
+     "Kern, San Diego, Orange, San Joaquin, Sonoma, Tulare, Stanislaus, San Luis Obispo, Ventura, Solano. "
+     "Generalized from the Kern pilot by extract_tra_rates.py / load_tra_rates.py (per-county vintage "
+     "in each row's tax_year; property_tax.TRA_FORMATS declares each county's TRA number shape). "
+     "Remaining counties: public sources blocked to automated download (Santa Clara, Sacramento, "
+     "Fresno, Contra Costa, Marin, Monterey, Riverside, Alameda, Santa Barbara) or unavailable "
+     "(Los Angeles bot-gated, San Bernardino none) -- they keep the county-average fallback. "
+     "ORIGINAL KERN-PILOT NOTE FOLLOWS:",
      "addition", "narrow", "Kern County Auditor-Controller-County Clerk, Annual Property Tax Rate "
      "Book, FY2025-26",
      "built", None,
@@ -182,23 +189,29 @@ ITEMS = [
      "engine._property_prop8_decline_composed_answer. Does NOT compose with the county-average "
      "override rate (a disclosed v1 gap, same 'not every pairwise combination' precedent as DV+county "
      "and DV+Prop19). See 'prop8-decline-damage-destruction' below for the genuinely different, "
-     "still-deferred disaster/destruction case."),
+     "disaster/destruction case, now handled as a Sec. 170 reassessment."),
     ("prop8_decline", None, "prop8-decline-damage-destruction",
-     "Proposition 8 decline-in-value for property damaged/destroyed by disaster",
-     "both", "moderate", "Rev. & Tax. Code Sec. 51(b), (c)",
-     "deferred_new_engine", None,
-     "GENUINELY DIFFERENT from the ordinary market-decline case above -- itself a real multi-year, "
-     "path-dependent mechanic, verified directly from the statute text, not conflated with the "
-     "ordinary case: if the county has NOT adopted a Sec. 170 disaster-relief ordinance, land and "
-     "improvements are valued SEPARATELY, and the result 'shall then become the base year value of "
-     "the real property until that property is restored, repaired, or reconstructed' (Sec. 51(b)) -- "
-     "a new, persistent base year value this codebase has no inputs to track. If the county HAS "
-     "adopted a Sec. 170 ordinance, the value is computed under that entirely separate provision "
-     "(Sec. 51(c)), which this codebase doesn't model at all. Real path exists (county assessor "
-     "records, Sec. 170 ordinances), just not centrally ingested -- same tractability class as "
-     "local-tra-rate, not not_applicable. engine.py actively walls this case off (detect_prop8_"
-     "damage_destruction_exclusion) before it could ever be silently miscomputed via the ordinary-"
-     "decline formula."),
+     "Property damaged/destroyed by disaster: Sec. 170 reassessment of taxable value (stated before/after values)",
+     "both", "moderate", "Rev. & Tax. Code Sec. 170(b), (g), (h); Sec. 51(b), (c)",
+     "built", None,
+     "Built after reading Sec. 170 directly in full from leginfo (not a secondary source): the assessor "
+     "reduces the roll value by the percentage loss in full cash value ((before - after) / before, "
+     "only if the loss is >= $10,000), and that damaged value compounds at the Sec. 51(a) factor until "
+     "restored (170(g)); partial restoration adds back (factored base year value before the calamity - "
+     "damaged value) x percent complete; full restoration returns the taxable value to the factored "
+     "base year value. property_tax.compute_disaster_relief_reassessment / engine._property_prop8_"
+     "damage_destruction_answer, taking stated purchase price/year, damage month+year (Jul-Dec -> that "
+     "year's lien date, Jan-Jun -> prior year's), value before/after (or the dollar damage), and an "
+     "optional % rebuilt. BOE's disaster-relief page says every county now has a Sec. 170 ordinance, so "
+     "the answer assumes one covering the event and a timely application. DISCLOSED / NOT MODELED: the "
+     "assessor, not the taxpayer, sets the before/after values (the answer trusts stated figures); one "
+     "blended percentage rather than separate land/improvement/personalty percentages; the damage-year "
+     "proration (170(e)) -- a target lien year not after the damage's lien year is not computed; the "
+     "additional assessments on completion (170(h)) and Sec. 70(c) new-construction exclusion; the "
+     "5-year (8-year for LA/Ventura 2025 fires) rebuild window; the 2% cap used in place of actual "
+     "CPI; local rates above 1%. Missing facts defer to needs_review with an example of what to state. "
+     "The no-ordinance Sec. 51(b) path (land/improvements valued separately, new base year value) is "
+     "not separately modeled."),
     ("parent_child_exclusion", None, "parent-child-exclusion", "Prop 19 parent-child/grandparent-grandchild exclusion eligibility",
      "both", "moderate", "Rev. & Tax. Code Sec. 63.2; Cal. Const. Art. XIII A Sec. 2.1(c); "
      "BOE Letter To Assessors 2026/026",

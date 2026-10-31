@@ -8288,39 +8288,62 @@ def _property_county_match(question: str):
     return canonical, m.start(1), m.end(1)
 
 
-# Kern County TRA-number recognition (exact-per-TRA pilot, tra_rates table
-# -- see property_tax.compute_tra_rate's own docstring for the narrow
-# scope). Requires an explicit anchor phrase immediately before the
-# number -- a bare "\d{1,3}-\d{1,3}" pattern alone is NOT safely
-# recognizable as a TRA number (it could be almost anything -- a phone
-# extension, an arbitrary reference number), so this mirrors every other
-# anchor-gated extraction in this file (e.g. _property_supplemental_
-# month_year_re's own month+year anchor requirement). Kern's own rate
-# book prints TRA numbers zero-padded ("001-002"); a taxpayer reading
-# their own bill might type it either way ("TRA 1-2" or "TRA 001-002"),
-# so captured digits are always re-padded to the canonical 3-digit form
-# for lookup, never trusted as typed.
-_KERN_TRA_RE = re.compile(
-    r"(?:\btra\b|\btax rate area\b|\barea code\b)\s*#?\s*(\d{1,3})\s*-\s*(\d{1,3})",
+# TRA-number recognition (exact-per-TRA rates, tra_rates table -- see
+# property_tax.TRA_FORMATS for the covered counties and each county's own
+# number format: Kern "001-002", Orange "01-227", San Diego "03014").
+# Requires an explicit anchor phrase immediately before the number -- a
+# bare digit pattern alone is NOT safely recognizable as a TRA number (it
+# could be almost anything -- a phone extension, an arbitrary reference
+# number), so this mirrors every other anchor-gated extraction in this
+# file (e.g. the supplemental-assessment month+year anchor requirement). A
+# taxpayer reading their own bill might type a TRA with or without leading
+# zeros ("TRA 1-2" vs "TRA 001-002"), so captured digit groups are always
+# re-padded to the COUNTY's own canonical format for lookup
+# (property_tax.normalize_tra_number), never trusted as typed.
+_TRA_RE = re.compile(
+    r"(?:\btra\b|\btax rate area\b|\barea code\b)\s*#?\s*(\d{1,6})(?:\s*-\s*(\d{1,3}))?",
     re.IGNORECASE)
 
 
-def _property_tra_match(question: str):
-    """Returns (zero-padded 'NNN-NNN' TRA number, start, end), or None.
-    Does NOT check which county the question mentions -- callers must
-    combine this with _property_county_match and confirm the county is
-    Kern (currently the only county with any tra_rates rows) before using
-    the result, since a TRA-number scheme is only meaningful within one
-    county's own numbering. Callers extracting dollar amounts MUST mask
-    (start, end) out of _amounts()'s own list first -- found live: a TRA
-    number like "001-001" is ALSO parsed as phantom dollar amounts by that
-    shared regex (no dollar-sign requirement), the same phantom-digit bug
-    class already hit repeatedly elsewhere in this file (form numbers, IRC
-    sections, ages, percentages)."""
-    m = _KERN_TRA_RE.search(question)
+def _property_tra_span(question: str):
+    """Returns (digit_groups, start, end) for the first anchored TRA-number
+    mention, or None -- county-independent. Callers extracting dollar
+    amounts MUST mask (start, end) out of _amounts()'s own list first --
+    found live: a TRA number like "001-001" is ALSO parsed as phantom
+    dollar amounts by that shared regex (no dollar-sign requirement), the
+    same phantom-digit bug class already hit repeatedly elsewhere in this
+    file (form numbers, IRC sections, ages, percentages)."""
+    m = _TRA_RE.search(question)
     if not m:
         return None
-    return f"{int(m.group(1)):03d}-{int(m.group(2)):03d}", m.start(), m.end()
+    groups = [g for g in m.groups() if g is not None]
+    return groups, m.start(), m.end()
+
+
+def _property_tra_match(question: str, county: str):
+    """Returns (canonical TRA number for `county`, start, end), or None if no
+    TRA is stated or it doesn't fit that county's own number format. A TRA
+    numbering scheme is only meaningful within one county, so callers must
+    pass the county the question actually names (and confirm it's in
+    property_tax.TRA_FORMATS before relying on the result)."""
+    span = _property_tra_span(question)
+    if span is None:
+        return None
+    groups, start, end = span
+    tra = property_tax.normalize_tra_number(county, groups)
+    if tra is None:
+        return None
+    return tra, start, end
+
+
+def _tra_coverage_note() -> str:
+    names = sorted(property_tax.TRA_FORMATS)
+    if len(names) > 1:
+        listed = ", ".join(names[:-1]) + f" and {names[-1]}"
+    else:
+        listed = names[0]
+    return (f"Exact per-TRA rates are currently available for {listed} "
+            "counties; every other county uses a county-wide average.")
 
 
 def detect_property_estimate_signal(question: str) -> bool:
@@ -8553,7 +8576,7 @@ def _property_has_any_signal(question: str) -> bool:
 
 def _property_purchase_amounts(question: str, year_match) -> list:
     """_amounts() filtered to exclude year_match's own span AND any
-    recognized Kern TRA-number span -- shared by EVERY property-estimate
+    anchored TRA-number span (any county's) -- shared by EVERY property-estimate
     answer function that extracts a purchase price (the TRA-composed, the
     county-composed, and the plain estimate). Found live: a stated "TRA
     NNN-NNN" is ALSO parsed as phantom dollar amounts by _amounts() (no
@@ -8565,30 +8588,31 @@ def _property_purchase_amounts(question: str, year_match) -> list:
     elsewhere in this file) and silently fail to answer at all."""
     y_start, y_end = year_match.span()
     amounts = [(a, a_s, a_e) for a, a_s, a_e in _amounts(question) if a_e <= y_start or a_s >= y_end]
-    tra_match = _property_tra_match(question)
-    if tra_match is not None:
-        _, tra_s, tra_e = tra_match
+    tra_span = _property_tra_span(question)
+    if tra_span is not None:
+        _, tra_s, tra_e = tra_span
         amounts = [(a, a_s, a_e) for a, a_s, a_e in amounts if a_e <= tra_s or a_s >= tra_e]
     return amounts
 
 
 def _property_estimate_with_tra_answer(question: str, base: dict):
-    """Core Prop 13 estimate COMPOSED with an EXACT Kern County TRA rate --
-    see property_tax.compute_property_tax_estimate_with_tra_rate's
-    docstring. Must run BEFORE _property_estimate_with_county_answer
-    (more specific wins, same composed-before-narrower ordering precedent
-    used throughout this file) -- a question giving an exact Kern TRA
-    number deserves the exact answer, not the county-wide average.
-    Declines (returns None) if the county isn't Kern, no TRA number is
-    recognized, or the TRA number isn't in the (2,455-row) pilot dataset
-    -- falls through to the county-average composed answer in every case,
-    unchanged."""
+    """Core Prop 13 estimate COMPOSED with an EXACT per-TRA rate for a county
+    in property_tax.TRA_FORMATS -- see property_tax.compute_property_tax_
+    estimate_with_tra_rate's docstring. Must run BEFORE _property_estimate_
+    with_county_answer (more specific wins, same composed-before-narrower
+    ordering precedent used throughout this file) -- a question giving an
+    exact TRA number deserves the exact answer, not the county-wide
+    average. Declines (returns None) if the county isn't covered, no TRA
+    number is recognized in that county's own format, or the TRA isn't in
+    that county's dataset -- falls through to the county-average composed
+    answer in every case, unchanged."""
     if not detect_property_estimate_signal(question):
         return None
     county_match = _property_county_match(question)
-    if county_match is None or county_match[0] != "Kern":
+    if county_match is None or county_match[0] not in property_tax.TRA_FORMATS:
         return None
-    tra_match = _property_tra_match(question)
+    county = county_match[0]
+    tra_match = _property_tra_match(question, county)
     if tra_match is None:
         return None
     tra_number = tra_match[0]
@@ -8604,7 +8628,7 @@ def _property_estimate_with_tra_answer(question: str, base: dict):
     homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
     with property_db.get_conn() as conn:
         calc = property_tax.compute_property_tax_estimate_with_tra_rate(
-            conn, purchase_price, purchase_year, "Kern", tra_number,
+            conn, purchase_price, purchase_year, county, tra_number,
             homeowners_exemption=homeowners_exemption)
     if not calc:
         return None
@@ -8618,16 +8642,16 @@ def _property_estimate_with_tra_answer(question: str, base: dict):
     lag_note = ""
     if calc["year_lag"] > 0:
         lag_note = f" (using the most recently available FY{calc['data_vintage_fiscal_year_label']} rate)"
+    area_note = f" ({calc['area_name']})" if calc["area_name"] else ""
     result["answer_text"] = (
-        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} in Kern County TRA "
-        f"{tra_number} ({calc['area_name']}), your estimated {calc['current_tax_year']} California "
+        f"Assuming a ${purchase_price:,.2f} purchase price in {purchase_year} in {county} County TRA "
+        f"{tra_number}{area_note}, your estimated {calc['current_tax_year']} California "
         f"property tax is about ${calc['tax']:,.2f} ({calc['total_rate']*100:.4f}% -- the EXACT combined "
         f"rate for this specific Tax Rate Area{lag_note}, applied to a "
         f"${calc['factored_base_year_value']:,.2f} factored base year value{exemption_note}) "
         f"({calc['citation']}). This compounds your purchase price at the FULL 2%/year cap Proposition "
         "13 allows -- a deliberate overestimate. This is an EXACT per-parcel rate (not a county-wide "
-        "average) -- Kern County is currently the only county with this level of detail available; every "
-        "other county still uses a county-wide average. This also does not include Mello-Roos or other "
+        f"average). {_tra_coverage_note()} This also does not include Mello-Roos or other "
         "special assessments, or a Proposition 8 decline-in-value adjustment."
     )
     return result
@@ -8708,10 +8732,10 @@ def _property_estimate_answer(question: str, base: dict):
     # space before the year, making its match span start 1 char earlier
     # than the year regex's own span (e.g. "in 2015" -> _amounts() spans
     # the space+digits, the year regex spans only the digits) -- an
-    # exact-tuple removal silently misses this. It also masks any Kern
+    # exact-tuple removal silently misses this. It also masks any anchored
     # TRA-number span, so a stated "TRA NNN-NNN" elsewhere in the question
     # (declined by the TRA-specific answer function, e.g. an unknown TRA
-    # or a non-Kern county) doesn't phantom-corrupt this fallback path.
+    # or an uncovered county) doesn't phantom-corrupt this fallback path.
     amounts = _property_purchase_amounts(question, year_match)
     if len(amounts) != 1:
         return None
@@ -9024,22 +9048,24 @@ def _property_prop19_transfer_answer(question: str, base: dict):
 
 
 def _property_tra_rate_answer(question: str, base: dict):
-    """Bare rate-only question for a Kern County TRA -- gives the EXACT
-    per-TRA rate directly. Must run BEFORE _property_local_rate_with_
-    county_answer (more specific wins). Declines if the county isn't Kern,
-    no TRA number is recognized, or the TRA isn't in the pilot dataset --
-    falls through to the county-average rate-only answer in every case."""
+    """Bare rate-only question for a TRA in a county in property_tax.TRA_
+    FORMATS -- gives the EXACT per-TRA rate directly. Must run BEFORE
+    _property_local_rate_with_county_answer (more specific wins). Declines
+    if the county isn't covered, no TRA number is recognized in that
+    county's own format, or the TRA isn't in its dataset -- falls through
+    to the county-average rate-only answer in every case."""
     if not detect_local_rate_out_of_scope(question):
         return None
     county_match = _property_county_match(question)
-    if county_match is None or county_match[0] != "Kern":
+    if county_match is None or county_match[0] not in property_tax.TRA_FORMATS:
         return None
-    tra_match = _property_tra_match(question)
+    county = county_match[0]
+    tra_match = _property_tra_match(question, county)
     if tra_match is None:
         return None
     tra_number = tra_match[0]
     with property_db.get_conn() as conn:
-        calc = property_tax.compute_tra_rate(conn, "Kern", tra_number)
+        calc = property_tax.compute_tra_rate(conn, county, tra_number)
     if not calc:
         return None
     result = {**base, "status": "answered", "category": "property_tax_tra_rate",
@@ -9049,11 +9075,11 @@ def _property_tra_rate_answer(question: str, base: dict):
         lag_note = (f" (most recently available data is FY{calc['data_vintage_fiscal_year_label']}, "
                     f"{calc['year_lag']} fiscal year{'s' if calc['year_lag'] != 1 else ''} behind the "
                     "current lien year)")
+    area_note = f" ({calc['area_name']})" if calc["area_name"] else ""
     result["answer_text"] = (
-        f"Kern County TRA {tra_number} ({calc['area_name']}) has an exact combined property tax rate of "
+        f"{county} County TRA {tra_number}{area_note} has an exact combined property tax rate of "
         f"about {calc['total_rate']*100:.4f}%{lag_note} ({calc['citation']}). This is the EXACT rate for "
-        "this specific Tax Rate Area, not a county-wide average -- Kern County is currently the only "
-        "county with this level of detail available."
+        f"this specific Tax Rate Area, not a county-wide average. {_tra_coverage_note()}"
     )
     return result
 
@@ -9124,24 +9150,118 @@ def _property_mello_roos_out_of_scope_answer(question: str, base: dict):
     return result
 
 
+_DISASTER_RESTORED_PCT_RE = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s*%\s*(?:of\s+(?:it|the\s+(?:home|house|work|rebuild))\s+)?"
+    r"(?:is\s+|has\s+been\s+|was\s+)?(?:rebuilt|restored|repaired|reconstructed|complete|completed|done|finished)"
+    r"|(?:rebuilt|restored|repaired|reconstructed|completed|finished)\s+(?:about\s+|roughly\s+)?"
+    r"(\d{1,3}(?:\.\d+)?)\s*%", re.IGNORECASE)
+_DISASTER_FULLY_RESTORED_RE = re.compile(
+    r"\b(?:fully|completely)\s+(?:rebuilt|restored|repaired|reconstructed)\b|"
+    r"\b(?:rebuild|restoration|repairs?|reconstruction)\s+(?:is|was|has been)\s+(?:fully\s+)?complete", re.IGNORECASE)
+_DISASTER_BEFORE_ANCHORS = {"before the", "before it", "before"}
+_DISASTER_AFTER_ANCHORS = {"after the", "after it", "afterward", "after"}
+_DISASTER_LOSS_ANCHORS = {"in damage", "of damage", "damage of", "damage was", "damage is", "damages of",
+                          "loss of", "loss was", "in losses", "worth of damage"}
+
+
+def _property_disaster_extract(question: str):
+    """Facts for the Sec. 170 disaster-relief computation, None for each one
+    not stated: (purchase_price, purchase_year, value_before, value_after,
+    damage_month, damage_year, pct_restored). The damage date is the first
+    'Month YYYY' in the question (its month decides which lien-date roll was
+    in effect); the purchase year is the earliest other year. value_after
+    may be given directly or as a damage dollar amount subtracted from
+    value_before. A restoration percentage is masked out of the dollar
+    amounts so '60% rebuilt' can't be read as $60."""
+    md = _SUPPLEMENTAL_MONTH_YEAR_RE.search(question)
+    damage_month = _MONTH_NAMES[md.group(1).lower()] if md else None
+    damage_year = int(md.group(2)) if md else None
+    year_matches = list(re.finditer(r"\b(19|20)\d{2}\b", question))
+    other_years = [int(m.group(0)) for m in year_matches if not (md and md.start(2) <= m.start() < md.end(2))]
+    purchase_year = min(other_years) if other_years else None
+    masks = [m.span() for m in year_matches] + [m.span() for m in _DISASTER_RESTORED_PCT_RE.finditer(question)]
+    pct_restored = 0.0
+    pm = _DISASTER_RESTORED_PCT_RE.search(question)
+    if pm:
+        pct_restored = min(100.0, float(pm.group(1) or pm.group(2))) / 100.0
+    elif _DISASTER_FULLY_RESTORED_RE.search(question):
+        pct_restored = 1.0
+    amounts = [(a, s_, e) for a, s_, e in _amounts(question)
+               if all(e <= ms or s_ >= me for ms, me in masks)]
+    purchase = _amount_near_anchor_edge(question, PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS, amounts)
+    if purchase is None:
+        return None, purchase_year, None, None, damage_month, damage_year, pct_restored
+    rest = _remove_amount_span(amounts, purchase)
+    before = _amount_near_anchor_edge(question, _DISASTER_BEFORE_ANCHORS, rest)
+    rest2 = _remove_amount_span(rest, before) if before else rest
+    after = _amount_near_anchor_edge(question, _DISASTER_AFTER_ANCHORS, rest2)
+    loss = None
+    if after is None:
+        loss = _amount_near_anchor_edge(question, _DISASTER_LOSS_ANCHORS, rest2)
+    value_before = before[0] if before else None
+    value_after = after[0] if after else (value_before - loss[0] if (loss and value_before) else None)
+    return purchase[0], purchase_year, value_before, value_after, damage_month, damage_year, pct_restored
+
+
 def _property_prop8_damage_destruction_answer(question: str, base: dict):
-    """R&TC 51(b)/(c) -- property damaged/destroyed by disaster, a
-    genuinely different, itself multi-year/path-dependent mechanic (see
-    property_tax.py's own SECOND correction-found note). Must run FIRST in
+    """Property damaged/destroyed by disaster. With every needed fact stated
+    (purchase price/year, damage month+year, value before and after the
+    damage, optional restoration progress) this computes the Sec. 170
+    reassessed taxable value (property_tax.compute_disaster_relief_
+    reassessment). Otherwise it defers (R&TC 51(b)/(c) is a genuinely
+    different mechanic from an ordinary market decline). Must run FIRST in
     the Prop 8 group, before the ordinary-decline compute path, so this
     case is never silently (and wrongly) run through that formula."""
     if not detect_prop8_damage_destruction_exclusion(question):
         return None
+    (purchase_price, purchase_year, value_before, value_after,
+     damage_month, damage_year, pct_restored) = _property_disaster_extract(question)
+    if None not in (purchase_price, purchase_year, value_before, value_after, damage_month, damage_year):
+        damage_lien_year = damage_year if damage_month >= 7 else damage_year - 1
+        q = question.lower()
+        homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+        calc = property_tax.compute_disaster_relief_reassessment(
+            purchase_price, purchase_year, value_before, value_after, damage_lien_year,
+            property_tax.DEFAULT_LIEN_YEAR, pct_restored, homeowners_exemption)
+        if calc:
+            result = {**base, "status": "answered", "category": "property_tax_disaster_relief",
+                      "taxable": calc["eligible"], "amount": calc["assessed_value"], "tax": calc["tax"],
+                      "citation": calc["citation"], "source_url": calc["source_url"]}
+            year = property_tax.DEFAULT_LIEN_YEAR
+            if not calc["eligible"]:
+                result["answer_text"] = (
+                    f"A loss of ${calc['loss']:,.2f} is under the $10,000 minimum for disaster-relief "
+                    f"reassessment (R&TC Sec. 170(b)), so no Sec. 170 reduction applies -- normal Prop 13 "
+                    f"taxation continues: estimated {year} assessed value ${calc['assessed_value']:,.2f}, "
+                    f"tax about ${calc['tax']:,.2f}.")
+            else:
+                restored = ("" if not calc["pct_restored"] else
+                            f" with {calc['pct_restored']:.0%} of the repair/rebuild complete on the lien date")
+                result["answer_text"] = (
+                    f"Assuming your county's Sec. 170 disaster-relief ordinance covers this event and you "
+                    f"timely applied: a drop in full cash value from ${calc['value_before']:,.2f} to "
+                    f"${calc['value_after']:,.2f} is a {calc['pct_reduction']:.2%} reduction, applied to your "
+                    f"${calc['roll_value']:,.2f} roll value (the lower of your factored base year value and "
+                    f"pre-damage value) gives a damaged assessed value of ${calc['damaged_value']:,.2f}. "
+                    f"Compounded at up to 2% a year until restored, your {year} taxable value is about "
+                    f"${calc['taxable_value']:,.2f}{restored}, so estimated 1% property tax is about "
+                    f"${calc['tax']:,.2f} versus ${calc['undamaged_tax']:,.2f} undamaged ({calc['citation']}). "
+                    "This is an estimate: your assessor determines the actual before/after values (separately "
+                    "for land and improvements), prorates the year of the damage, and on completion of "
+                    "rebuilding makes an additional assessment back up to your factored base year value; the "
+                    "2% factor is the cap, not the actual CPI factor; and local voter-approved rates above 1% "
+                    "are not included.")
+            return result
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
-        "Property damaged or destroyed by disaster, misfortune, or calamity follows a genuinely "
-        "DIFFERENT rule than an ordinary market-value decline (Rev. & Tax. Code Sec. 51(b)/(c)): if "
-        "your county has NOT adopted a Sec. 170 disaster-relief ordinance, land and improvements are "
-        "valued separately, and the result becomes a NEW base year value that persists until the "
-        "property is restored, repaired, or reconstructed -- if your county HAS adopted a Sec. 170 "
-        "ordinance, the value is computed under that separate provision entirely. Either way, this "
-        "needs your county assessor's own determination, not a computation from a single stated "
-        "purchase price and market value."
+        "Property damaged or destroyed by disaster follows a genuinely DIFFERENT rule than an ordinary "
+        "market-value decline (Rev. & Tax. Code Sec. 51(b)/(c), Sec. 170): your county assessor determines "
+        "the before/after values and the reassessment. I can estimate the resulting taxable value if you "
+        "give me: your purchase price and year, the month and year of the damage, the property's value "
+        "before and after the damage (or the dollar amount of damage), and how much has been rebuilt, e.g. "
+        "\"I bought my house for $500,000 in 2015. It was damaged in January 2025 -- worth $800,000 before "
+        "the fire and $300,000 after. What is my assessed value?\" Relief requires a loss of at least "
+        "$10,000 and a timely application under your county's Sec. 170 ordinance."
     )
     return result
 

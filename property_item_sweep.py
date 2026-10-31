@@ -259,7 +259,23 @@ ITEMS = [
     ("I bought my house for $500,000 in 2015. Has it declined in value?",
      {"status": "needs_review", "domain": "property"}),
 
-    # --- H: exact-per-TRA rate, Kern County pilot only ---
+    # --- Sec. 170 disaster relief: $500k 2015 purchase; FBYV on the 2024 roll
+    # (damage Jan 2025 -> lien year 2024) = 500000*1.02**9 = 597,546.28;
+    # loss 800k->300k = 62.5% -> damaged value 224,079.86; x1.02**2 to 2026
+    # = 233,132.68 -> tax $2,331.33 (hand-verified)
+    ("I bought my house for $500,000 in 2015. It was damaged in a fire in January 2025 - worth $800,000 before the fire and $300,000 after. What is my assessed value?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 2331.33}),
+    # same, damage given as a dollar amount
+    ("I bought my house for $500,000 in 2015. It was destroyed in a wildfire in January 2025, $500,000 in damage, worth $800,000 before. What's my assessed value now?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 2331.33}),
+    # 60% rebuilt: 233,132.68 + (621,687.15 - 233,132.68) * 0.6 = 466,265.36
+    ("I bought my house for $500,000 in 2015. Damaged in a flood in January 2025, worth $800,000 before the flood and $300,000 after, and it is 60% rebuilt. Assessed value?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 4662.65}),
+    # loss under the $10,000 statutory floor -> no relief, normal Prop 13
+    ("I bought my house for $500,000 in 2015. Damaged in a flood in January 2025, worth $800,000 before the flood and $795,000 after. Assessed value?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 6216.87}),
+
+    # --- H: exact-per-TRA rate, 10 counties with a published, machine-extractable rate book ---
     # real extracted TRA 001-001 (BAKERSFIELD INSIDE), total_rate
     # 0.01163785 (1.163785%) -- same $400,000/2015 scenario as case A
     # (FBYV $497,349.72) -> tax = round(0.01163785*497349.72, 2) = $5,788.08
@@ -278,6 +294,16 @@ ITEMS = [
     # 0.1827% override, already verified for the county-average feature)
     ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Los Angeles County, TRA 001-001?",
      {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate", "tax": 5882.16}),
+
+    # other counties' exact TRA rates (each hand-checked against the county's
+    # own published PDF; same $400,000/2015 scenario)
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Orange County, TRA 01-227?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5651.38}),
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in San Diego County, TRA 03014?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5824.36}),
+    # Solano's 6-digit TRA (007000 = 1.119373% per the county's fund-by-fund sheet)
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Solano County, TRA 007000?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5567.2}),
 
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)

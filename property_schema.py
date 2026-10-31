@@ -36,17 +36,18 @@ Five genuinely different fact shapes:
     below. See property_tax.compute_county_override_rate for the lookup
     (deliberately NOT an exact tax_year match -- see that function's own
     docstring for why).
-  - tra_rates -- exact per-Tax-Rate-Area (TRA) combined ad-valorem rate,
-    a NARROWLY-SCOPED PILOT for exactly ONE county (Kern) -- NOT a general
-    58-county solution (that stays deferred, see property_tax_inventory.py's
-    'local-tra-rate' item; this is a separate 'tra-rate-kern-pilot' item).
-    Stores the FULL combined rate directly (1% base + all overrides
-    already summed by Kern's own rate book), unlike county_override_rates'
+  - tra_rates -- exact per-Tax-Rate-Area (TRA) combined ad-valorem rate for
+    the counties whose own published rate books could be extracted (see
+    property_tax.TRA_FORMATS for the current list) -- NOT every county
+    (each publishes a differently-formatted source; see property_tax_
+    inventory.py's 'local-tra-rate' item for the remainder). Stores the
+    FULL combined rate directly (1% base + all overrides already summed by
+    the county's own rate book), unlike county_override_rates'
     override-only figure -- a simpler representation matching what the
-    source actually publishes. Seeded by load_kern_tra_rates.py from a CSV
-    produced by extract_kern_tra_rates.py (a real, hands-on-validated PDF
-    extraction -- see that script's own docstring for the extraction
-    algorithm and the two real bugs found and fixed while building it).
+    sources actually publish. Seeded by load_tra_rates.py from CSVs
+    produced by extract_kern_tra_rates.py (Kern -- its docstring has the
+    column-layout algorithm and the two real bugs found while building it)
+    and extract_tra_rates.py (every other county).
 
 The Homeowners' Exemption ($7,000) is NOT a table here -- it's fixed
 directly in the CA Constitution (Art. XIII Sec. 3(k)), not annually
@@ -133,10 +134,9 @@ CREATE TABLE IF NOT EXISTS county_override_rates (
     UNIQUE (tax_year, county)
 );
 
--- Exact per-TRA combined ad-valorem rate -- a NARROW PILOT for exactly ONE
--- county (Kern), not a general 58-county solution (see property_tax_
--- inventory.py's separate 'local-tra-rate' vs. 'tra-rate-kern-pilot'
--- items). total_rate is the FULL combined rate (1% base + all overrides
+-- Exact per-TRA combined ad-valorem rate for the counties in property_tax.
+-- TRA_FORMATS, not every county (see property_tax_inventory.py's separate
+-- 'local-tra-rate' vs. 'tra-rate-*' items). total_rate is the FULL combined rate (1% base + all overrides
 -- already summed by the source), unlike county_override_rates.
 -- override_rate above -- a simpler representation matching what Kern's
 -- own rate book actually publishes. Same "most recent tax_year <=
