@@ -208,7 +208,8 @@ PROP8_DECLINE_SOURCE_URL = "https://www.boe.ca.gov/pdf/pub800-10.pdf"
 def compute_property_tax_prop8_decline(purchase_price: float, purchase_year: int,
                                         current_market_value: float,
                                         current_tax_year: int = DEFAULT_LIEN_YEAR,
-                                        homeowners_exemption: bool = False):
+                                        homeowners_exemption: bool = False,
+                                        total_rate: float = PROP13_BASE_RATE):
     """R&TC 51(a) decline-in-value ('Prop 8') for the ORDINARY market-
     decline case -- see this module's own SECOND correction-found note for
     the full reasoning. Confirmed directly from the statute text (not a
@@ -242,14 +243,11 @@ def compute_property_tax_prop8_decline(purchase_price: float, purchase_year: int
     prop19_base_year_transfer's own docstring documents for its own
     out-of-scope inputs.
 
-    KNOWN v1 GAP, not fixed here: does not compose with the county-
-    average local override rate (compute_county_override_rate) -- the
-    rate applied to whatever assessed_value results is orthogonal to
-    whether that value came from Prop 8 or not, but this codebase's own
-    established precedent this session is to not compose every pairwise
-    combination in v1 (DV+county isn't composed, DV+Prop19 isn't composed
-    either) -- a future compute_property_tax_prop8_decline_with_county_
-    rate remains a clean, low-risk addition later.
+    total_rate: the rate applied to the resulting assessed value. Defaults
+    to the 1% base; the caller passes the exact-TRA or county-average
+    combined rate from compute_local_rate when it has one -- the rate is
+    orthogonal to whether the value came from Prop 8 (the decline only
+    changes the assessed value; the voted debt overrides apply to it too).
 
     Returns None if the core estimate fails, or current_market_value is
     None/<= 0."""
@@ -264,8 +262,8 @@ def compute_property_tax_prop8_decline(purchase_price: float, purchase_year: int
     pre_exemption_assessed = min(factored_base_year_value, current_market_value)
     exemption_applied = HOMEOWNERS_EXEMPTION_AMOUNT if homeowners_exemption else 0.0
     assessed_value = max(0.0, pre_exemption_assessed - exemption_applied)
-    tax = round(PROP13_BASE_RATE * assessed_value, 2)
-    return {**base, "current_market_value": current_market_value, "prop8_active": prop8_active,
+    tax = round(total_rate * assessed_value, 2)
+    return {**base, "total_rate": total_rate, "current_market_value": current_market_value, "prop8_active": prop8_active,
             "pre_exemption_assessed_value": round(pre_exemption_assessed, 2),
             "homeowners_exemption": homeowners_exemption, "exemption_applied": exemption_applied,
             "assessed_value": round(assessed_value, 2), "tax": tax,
@@ -282,7 +280,8 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
                                           damage_lien_year: int,
                                           target_lien_year: int = DEFAULT_LIEN_YEAR,
                                           pct_restored: float = 0.0,
-                                          homeowners_exemption: bool = False):
+                                          homeowners_exemption: bool = False,
+                                          total_rate: float = PROP13_BASE_RATE):
     """R&TC Sec. 170 disaster-relief reassessment (read directly from
     leginfo, not a secondary source), for a county whose board of
     supervisors has adopted a Sec. 170 ordinance (BOE's disaster-relief page
@@ -305,12 +304,16 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
     year; Jan-Jun = the prior year). The 2% inflation factor is the cap, as
     in compute_property_tax_estimate: a disclosed overestimate.
 
+    total_rate (default the 1% base) is applied to both the relieved and the
+    undamaged taxable value; the caller passes the exact-TRA or county-
+    average combined rate from compute_local_rate when it has one.
+
     NOT modeled: the damage-year proration of Sec. 170(e) (so target_lien_year
     must be after damage_lien_year, else None), land/improvement/personal
     property separate percentages (one blended percentage is used), the
     additional assessments on completion (170(h)), the Sec. 70(c) new-
     construction exclusion, the 5-year (8 for LA/Ventura 2025 fires)
-    rebuild-window, and local rates above 1%.
+    rebuild-window.
 
     Returns {"eligible": False, ...} when the loss is under $10,000; None for
     unusable inputs."""
@@ -351,8 +354,9 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
                    damaged_value_at_target=round(damaged_at_target, 2), taxable_value=round(taxable, 2))
     assessed = max(0.0, taxable - exemption_applied)
     out["assessed_value"] = round(assessed, 2)
-    out["tax"] = round(PROP13_BASE_RATE * assessed, 2)
-    out["undamaged_tax"] = round(PROP13_BASE_RATE * max(0.0, fbyv_at_target - exemption_applied), 2)
+    out["total_rate"] = total_rate
+    out["tax"] = round(total_rate * assessed, 2)
+    out["undamaged_tax"] = round(total_rate * max(0.0, fbyv_at_target - exemption_applied), 2)
     return out
 
 
@@ -886,3 +890,29 @@ def compute_property_tax_estimate_with_tra_rate(conn, purchase_price: float, pur
             "data_vintage_fiscal_year_label": rate_info["data_vintage_fiscal_year_label"],
             "year_lag": rate_info["year_lag"], "tax": tax,
             "citation": rate_info["citation"], "source_url": rate_info["source_url"]}
+
+
+def compute_local_rate(conn, county, tra_number=None, tax_year: int = DEFAULT_LIEN_YEAR):
+    """Best available combined ad-valorem rate for a stated location, in the
+    same precedence the plain estimate uses: the EXACT TRA rate if the
+    (county, TRA) pair has a row, else the county-average (1% + override),
+    else None (caller keeps the 1% base and discloses it). Returns
+    {"basis": "tra"|"county_average", "total_rate", "county", "tra_number",
+    "area_name", "data_vintage_fiscal_year_label", "year_lag", "citation",
+    "source_url"}. Used to compose Prop 8 and Sec. 170 with local rates."""
+    if county is None:
+        return None
+    if tra_number:
+        t = compute_tra_rate(conn, county, tra_number, tax_year)
+        if t:
+            return {"basis": "tra", "total_rate": t["total_rate"], "county": county,
+                    "tra_number": tra_number, "area_name": t["area_name"],
+                    "data_vintage_fiscal_year_label": t["data_vintage_fiscal_year_label"],
+                    "year_lag": t["year_lag"], "citation": t["citation"], "source_url": t["source_url"]}
+    c = compute_county_override_rate(conn, county, tax_year)
+    if c:
+        return {"basis": "county_average", "total_rate": PROP13_BASE_RATE + c["override_rate"],
+                "county": county, "tra_number": None, "area_name": None,
+                "data_vintage_fiscal_year_label": c["data_vintage_fiscal_year_label"],
+                "year_lag": c["year_lag"], "citation": c["citation"], "source_url": c["source_url"]}
+    return None

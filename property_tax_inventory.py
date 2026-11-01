@@ -206,9 +206,9 @@ ITEMS = [
      "determination needs only the original purchase price/year (already used by the core estimate) "
      "plus one more trusted stated fact: current market value -- assessed_value = min(FBYV, "
      "current_market_value). Built via property_tax.compute_property_tax_prop8_decline / "
-     "engine._property_prop8_decline_composed_answer. Does NOT compose with the county-average "
-     "override rate (a disclosed v1 gap, same 'not every pairwise combination' precedent as DV+county "
-     "and DV+Prop19). See 'prop8-decline-damage-destruction' below for the genuinely different, "
+     "engine._property_prop8_decline_composed_answer. Composes with local rates (2026-10-31): "
+     "when the question names a county (and TRA) the assessed value is taxed at the exact-TRA rate, "
+     "else the county-average rate, else the 1% base (disclosed in the answer). See 'prop8-decline-damage-destruction' below for the genuinely different, "
      "disaster/destruction case, now handled as a Sec. 170 reassessment."),
     ("prop8_decline", None, "prop8-decline-damage-destruction",
      "Property damaged/destroyed by disaster: Sec. 170 reassessment of taxable value (stated before/after values)",
@@ -229,7 +229,8 @@ ITEMS = [
      "proration (170(e)) -- a target lien year not after the damage's lien year is not computed; the "
      "additional assessments on completion (170(h)) and Sec. 70(c) new-construction exclusion; the "
      "5-year (8-year for LA/Ventura 2025 fires) rebuild window; the 2% cap used in place of actual "
-     "CPI; local rates above 1%. Missing facts defer to needs_review with an example of what to state. "
+     "CPI. Local rates are composed (2026-10-31): exact-TRA rate if a TRA is stated, else county average, "
+     "else the 1% base (disclosed). Missing facts defer to needs_review with an example of what to state. "
      "The no-ordinance Sec. 51(b) path (land/improvements valued separately, new base year value) is "
      "not separately modeled."),
     ("parent_child_exclusion", None, "parent-child-exclusion", "Prop 19 parent-child/grandparent-grandchild exclusion eligibility",

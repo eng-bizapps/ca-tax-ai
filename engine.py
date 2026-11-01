@@ -8346,6 +8346,39 @@ def _tra_coverage_note() -> str:
             "counties; every other county uses a county-wide average.")
 
 
+def _property_local_rate(question: str):
+    """Local combined rate for a Prop 8 / Sec. 170 question that names a
+    county (and optionally a TRA): exact-TRA rate if covered, else the
+    county average, else None (the 1% base stays, as before). Returns the
+    property_tax.compute_local_rate dict or None."""
+    county_match = _property_county_match(question)
+    if county_match is None:
+        return None
+    county = county_match[0]
+    tra_number = None
+    if county in property_tax.TRA_FORMATS:
+        tra_match = _property_tra_match(question, county)
+        tra_number = tra_match[0] if tra_match else None
+    with property_db.get_conn() as conn:
+        return property_tax.compute_local_rate(conn, county, tra_number)
+
+
+def _property_local_rate_text(rate_info, calc_rate_applied: bool = True) -> str:
+    """Answer-text sentence describing which rate was applied."""
+    if rate_info is None:
+        return ("Tax is shown at the 1% constitutional base rate only; name your county (and TRA) to "
+                "include voter-approved local rates.")
+    lag = (f" (most recent available FY{rate_info['data_vintage_fiscal_year_label']} data)"
+           if rate_info["year_lag"] > 0 else "")
+    if rate_info["basis"] == "tra":
+        area = f" ({rate_info['area_name']})" if rate_info["area_name"] else ""
+        return (f"Tax uses the EXACT combined rate {rate_info['total_rate']*100:.4f}% for {rate_info['county']} "
+                f"County TRA {rate_info['tra_number']}{area}{lag} ({rate_info['citation']}).")
+    return (f"Tax uses {rate_info['county']} County's AVERAGE combined rate "
+            f"{rate_info['total_rate']*100:.4f}%{lag} ({rate_info['citation']}), not an exact per-TRA "
+            "figure -- give your TRA number for an exact rate where one is available.")
+
+
 def detect_property_estimate_signal(question: str) -> bool:
     q = question.lower()
     if any(t in q for t in PROPERTY_ITEMIZED_COLLISION_EXCLUDE):
@@ -8453,12 +8486,15 @@ def _property_prop8_extract(question: str):
     current tax year, else DEFAULT_LIEN_YEAR) and its anchor-based
     disambiguation between two dollar figures (purchase price vs. current
     market value) via _amount_near_anchor_edge/_remove_amount_span."""
-    year_matches = list(re.finditer(r"\b(19|20)\d{2}\b", question))
+    tra_span = _property_tra_span(question)
+    year_matches = [m for m in re.finditer(r"\b(19|20)\d{2}\b", question)
+                    if tra_span is None or not (tra_span[1] <= m.start() < tra_span[2])]
     if not year_matches:
         return None, None, None, None
     year_spans = [m.span() for m in year_matches]
     amounts = [(a, s, e) for a, s, e in _amounts(question)
-               if all(e <= ys or s >= ye for ys, ye in year_spans)]
+               if all(e <= ys or s >= ye for ys, ye in year_spans)
+               and (tra_span is None or e <= tra_span[1] or s >= tra_span[2])]
     purchase_match = _amount_near_anchor_edge(question, PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS, amounts)
     if purchase_match is None:
         return None, None, None, None
@@ -9176,10 +9212,13 @@ def _property_disaster_extract(question: str):
     md = _SUPPLEMENTAL_MONTH_YEAR_RE.search(question)
     damage_month = _MONTH_NAMES[md.group(1).lower()] if md else None
     damage_year = int(md.group(2)) if md else None
-    year_matches = list(re.finditer(r"\b(19|20)\d{2}\b", question))
+    tra_span = _property_tra_span(question)
+    year_matches = [m for m in re.finditer(r"\b(19|20)\d{2}\b", question)
+                    if tra_span is None or not (tra_span[1] <= m.start() < tra_span[2])]
     other_years = [int(m.group(0)) for m in year_matches if not (md and md.start(2) <= m.start() < md.end(2))]
     purchase_year = min(other_years) if other_years else None
-    masks = [m.span() for m in year_matches] + [m.span() for m in _DISASTER_RESTORED_PCT_RE.finditer(question)]
+    masks = ([m.span() for m in year_matches] + [m.span() for m in _DISASTER_RESTORED_PCT_RE.finditer(question)]
+             + ([(tra_span[1], tra_span[2])] if tra_span else []))
     pct_restored = 0.0
     pm = _DISASTER_RESTORED_PCT_RE.search(question)
     if pm:
@@ -9220,9 +9259,11 @@ def _property_prop8_damage_destruction_answer(question: str, base: dict):
         damage_lien_year = damage_year if damage_month >= 7 else damage_year - 1
         q = question.lower()
         homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+        rate_info = _property_local_rate(question)
         calc = property_tax.compute_disaster_relief_reassessment(
             purchase_price, purchase_year, value_before, value_after, damage_lien_year,
-            property_tax.DEFAULT_LIEN_YEAR, pct_restored, homeowners_exemption)
+            property_tax.DEFAULT_LIEN_YEAR, pct_restored, homeowners_exemption,
+            total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
         if calc:
             result = {**base, "status": "answered", "category": "property_tax_disaster_relief",
                       "taxable": calc["eligible"], "amount": calc["assessed_value"], "tax": calc["tax"],
@@ -9233,7 +9274,7 @@ def _property_prop8_damage_destruction_answer(question: str, base: dict):
                     f"A loss of ${calc['loss']:,.2f} is under the $10,000 minimum for disaster-relief "
                     f"reassessment (R&TC Sec. 170(b)), so no Sec. 170 reduction applies -- normal Prop 13 "
                     f"taxation continues: estimated {year} assessed value ${calc['assessed_value']:,.2f}, "
-                    f"tax about ${calc['tax']:,.2f}.")
+                    f"tax about ${calc['tax']:,.2f}. {_property_local_rate_text(rate_info)}")
             else:
                 restored = ("" if not calc["pct_restored"] else
                             f" with {calc['pct_restored']:.0%} of the repair/rebuild complete on the lien date")
@@ -9244,13 +9285,13 @@ def _property_prop8_damage_destruction_answer(question: str, base: dict):
                     f"${calc['roll_value']:,.2f} roll value (the lower of your factored base year value and "
                     f"pre-damage value) gives a damaged assessed value of ${calc['damaged_value']:,.2f}. "
                     f"Compounded at up to 2% a year until restored, your {year} taxable value is about "
-                    f"${calc['taxable_value']:,.2f}{restored}, so estimated 1% property tax is about "
+                    f"${calc['taxable_value']:,.2f}{restored}, so estimated property tax is about "
                     f"${calc['tax']:,.2f} versus ${calc['undamaged_tax']:,.2f} undamaged ({calc['citation']}). "
                     "This is an estimate: your assessor determines the actual before/after values (separately "
                     "for land and improvements), prorates the year of the damage, and on completion of "
                     "rebuilding makes an additional assessment back up to your factored base year value; the "
-                    "2% factor is the cap, not the actual CPI factor; and local voter-approved rates above 1% "
-                    "are not included.")
+                    "2% factor is the cap, not the actual CPI factor. "
+                    f"{_property_local_rate_text(rate_info)}")
             return result
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (
@@ -9284,11 +9325,17 @@ def _property_prop8_decline_composed_answer(question: str, base: dict):
         return None
     q = question.lower()
     homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
+    rate_info = _property_local_rate(question)
     calc = property_tax.compute_property_tax_prop8_decline(
         purchase_price, purchase_year, current_market_value, current_tax_year,
-        homeowners_exemption=homeowners_exemption)
+        homeowners_exemption=homeowners_exemption,
+        total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
     if not calc:
         return None
+    if rate_info:
+        result_rate_note = " " + _property_local_rate_text(rate_info)
+    else:
+        result_rate_note = " " + _property_local_rate_text(None)
     result = {**base, "status": "answered", "category": "property_tax_prop8_decline",
               "taxable": calc["prop8_active"], "amount": calc["assessed_value"], "tax": calc["tax"],
               "citation": calc["citation"], "source_url": calc["source_url"]}
@@ -9304,6 +9351,7 @@ def _property_prop8_decline_composed_answer(question: str, base: dict):
             "against your (still-compounding) factored base year value every year, and normal Prop 13 "
             "taxation automatically resumes once market value recovers past it. This does not apply to "
             "property damaged or destroyed by disaster, which follows a different rule."
+            + result_rate_note
         )
     else:
         result["answer_text"] = (
@@ -9312,7 +9360,7 @@ def _property_prop8_decline_composed_answer(question: str, base: dict):
             f"below your factored base year value of ${calc['factored_base_year_value']:,.2f}, so normal "
             f"Proposition 13 taxation applies (no Prop 8 reduction) -- your estimated "
             f"{calc['current_tax_year']} assessed value is ${calc['assessed_value']:,.2f} and estimated "
-            f"property tax is about ${calc['tax']:,.2f} ({calc['citation']})."
+            f"property tax is about ${calc['tax']:,.2f} ({calc['citation']})." + result_rate_note
         )
     return result
 

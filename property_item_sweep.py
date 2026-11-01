@@ -374,6 +374,20 @@ ITEMS = [
     ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Marin County, TRA 94-023?",
      {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate"}),
 
+    # Prop 8 / Sec. 170 composed with local rates: assessed value x exact-TRA or county-average rate
+    # Santa Clara 017-030: 450,000 x 1.2614% = 5,676.30
+    ("I bought my house for $500,000 in 2015 in Santa Clara County TRA 017-030 and it's currently only worth $450,000 due to a decline in value. What is my assessed value under Prop 8?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop8_decline",
+      "taxable": True, "tax": 5676.30}),
+    # no TRA -> county average (Alameda 1.2294%): 450,000 x 1.2294% = 5,532.30
+    ("I bought my house for $500,000 in 2015 in Alameda County and it's currently only worth $450,000 due to a decline in value. What is my assessed value under Prop 8?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop8_decline",
+      "taxable": True, "tax": 5532.30}),
+    # Sec. 170, Sacramento 07-090 (1.0457%): taxable 233,132.68 -> 2,437.87
+    ("I bought my house for $500,000 in 2015 in Sacramento County TRA 07-090. It was damaged in January 2025 -- worth $800,000 before the fire and $300,000 after. What is my assessed value and tax?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief",
+      "tax": 2437.87}),
+
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)
     ("can I use the parent-child exclusion to avoid reassessment",
