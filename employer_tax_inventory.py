@@ -20,8 +20,11 @@ ITEMS = [
      "Shown as the employee's cost the employer remits."),
     ("core", "ui-rate-assignment", "Experience-rating (reserve account) formula / Schedule F+ table", "deferred", None,
      "DE 231Z not fetched; the user supplies their rate."),
-    ("core", "futa", "Federal FUTA and California credit reduction", "deferred", None,
-     "IRS, not EDD; not in DE 44. Disclosed as not included."),
+    ("core", "futa", "Federal FUTA 6.0% less 5.4% credit on first $7,000", "built", "employer_futa",
+     "2025 and 2026; assumes state UI paid on time (late payments reduce the credit)."),
+    ("core", "futa-credit-reduction", "California FUTA credit reduction", "partial", "employer_futa",
+     "2022-2025 final (DOL). 2026 is preliminary (1.5%, up to 5.3% with BCR add-on) until DOL sets it Nov 10, 2026: "
+     "REFRESH ca_futa_credit_reductions after that date."),
     ("deposits", "deposit-schedule", "California PIT/SDI deposit schedule from federal schedule + accumulated PIT",
      "built", "employer_deposit_schedule", "Includes next-day, semi-weekly, monthly, quarterly due dates."),
     ("deposits", "holidays", "Legal-holiday due-date extensions", "deferred", None,

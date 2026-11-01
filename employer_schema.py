@@ -79,6 +79,22 @@ CREATE TABLE IF NOT EXISTS ca_edd_interest_rates (
     UNIQUE (period_start)
 );
 
+-- FUTA credit reduction for California (DOL/ETA). status 'final' = the rate
+-- DOL set for that calendar year; 'potential' = preliminary, not set until
+-- November 10 of the year (potential_max_rate includes the BCR add-on, which
+-- can be waived and replaced).
+CREATE TABLE IF NOT EXISTS ca_futa_credit_reductions (
+    id                SERIAL PRIMARY KEY,
+    tax_year          INTEGER NOT NULL,
+    reduction_rate    NUMERIC NOT NULL,
+    potential_max_rate NUMERIC,
+    status            TEXT NOT NULL,
+    notes             TEXT,
+    source_url        TEXT,
+    as_of             DATE,
+    UNIQUE (tax_year)
+);
+
 CREATE TABLE IF NOT EXISTS employer_rule_embeddings (
     topic_key TEXT PRIMARY KEY,
     kind      TEXT NOT NULL,
@@ -106,6 +122,34 @@ CREATE TABLE IF NOT EXISTS employer_tax_inventory (
 DE44 = "EDD DE 44 Employer's Guide, Rev. 52 (4-26)"
 DE44_URL = "https://edd.ca.gov/pdf_pub_ctr/de44.pdf"
 INTEREST_URL = "https://edd.ca.gov/en/payroll_taxes/interest_rate"
+
+IRS940 = "IRS Instructions for Form 940 (2025); FUTA Sec. 3301-3302"
+IRS940_URL = "https://www.irs.gov/instructions/i940"
+DOL_URL = "https://oui.doleta.gov/unemploy/futa_credit.asp"
+
+# FUTA rates (tax_year, rate_key, rate, wage_limit, description). 2025 is
+# verified against the 2025 Form 940 instructions; 2026 assumes the statutory
+# 6.0% / 5.4% / $7,000 is unchanged, which DOL's page (updated 2026-09-11)
+# supports for the 0.6% net rate.
+FUTA_ROWS = [
+    (2025, "futa_gross", 0.06, 7000, "FUTA tax rate on first $7,000 per employee"),
+    (2025, "futa_max_credit", 0.054, 7000, "Maximum credit for state unemployment tax paid on time"),
+    (2026, "futa_gross", 0.06, 7000, "FUTA tax rate on first $7,000 per employee"),
+    (2026, "futa_max_credit", 0.054, 7000, "Maximum credit for state unemployment tax paid on time"),
+]
+
+# California credit reduction by calendar year, from DOL's historical table
+# (reduced_credit_states_2010-2025.xlsx) and potential-2026 file (2026-01-15).
+# (tax_year, reduction_rate, potential_max_rate, status, notes)
+FUTA_REDUCTION_ROWS = [
+    (2022, 0.003, None, "final", "DOL historical table"),
+    (2023, 0.006, None, "final", "DOL historical table"),
+    (2024, 0.009, None, "final", "DOL historical table"),
+    (2025, 0.012, None, "final", "DOL historical table; add-on relief received"),
+    (2026, 0.015, 0.053, "potential",
+     "Preliminary (DOL 2026-01-15): 1.5% for outstanding advance; estimated 3.8% BCR add-on could raise the total to "
+     "5.3%. Final rate set Nov 10, 2026."),
+]
 
 # (rate_key, rate, wage_limit, paid_by, description)
 RATE_ROWS_2026 = [
@@ -172,6 +216,21 @@ def seed():
                 "ON CONFLICT (tax_year, rate_key) DO UPDATE SET rate=EXCLUDED.rate, "
                 "wage_limit=EXCLUDED.wage_limit, paid_by=EXCLUDED.paid_by, description=EXCLUDED.description",
                 (key, rate, limit, paid_by, desc, DE44, DE44_URL))
+        for ty, key, rate, limit, desc in FUTA_ROWS:
+            conn.execute(
+                "INSERT INTO ca_employer_payroll_rates (tax_year, rate_key, rate, wage_limit, paid_by, "
+                "description, citation, source_url) VALUES (%s, %s, %s, %s, 'employer', %s, %s, %s) "
+                "ON CONFLICT (tax_year, rate_key) DO UPDATE SET rate=EXCLUDED.rate, "
+                "wage_limit=EXCLUDED.wage_limit, description=EXCLUDED.description, citation=EXCLUDED.citation, "
+                "source_url=EXCLUDED.source_url",
+                (ty, key, rate, limit, desc, IRS940, IRS940_URL))
+        for ty, rate, pmax, st, notes in FUTA_REDUCTION_ROWS:
+            conn.execute(
+                "INSERT INTO ca_futa_credit_reductions (tax_year, reduction_rate, potential_max_rate, status, "
+                "notes, source_url, as_of) VALUES (%s, %s, %s, %s, %s, %s, '2026-10-31') "
+                "ON CONFLICT (tax_year) DO UPDATE SET reduction_rate=EXCLUDED.reduction_rate, "
+                "potential_max_rate=EXCLUDED.potential_max_rate, status=EXCLUDED.status, notes=EXCLUDED.notes",
+                (ty, rate, pmax, st, notes, DOL_URL))
         for fed, lo, hi, ca, due in DEPOSIT_ROWS_2026:
             conn.execute(
                 "INSERT INTO ca_edd_deposit_rules (tax_year, federal_schedule, min_accumulated, "
@@ -200,7 +259,7 @@ def seed():
 def status():
     conn = db.get_conn()
     for tbl in ("ca_employer_payroll_rates", "ca_edd_deposit_rules", "ca_edd_due_dates",
-                "ca_edd_interest_rates", "employer_rule_embeddings", "employer_tax_inventory"):
+                "ca_edd_interest_rates", "ca_futa_credit_reductions", "employer_rule_embeddings", "employer_tax_inventory"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:30} {n} rows")
     conn.close()

@@ -121,8 +121,14 @@ def detect_late_signal(q):
     return late and pay and _has(q, "penalty", "interest", "owe", "how much")
 
 
+def detect_futa_signal(q):
+    q = q.lower()
+    return _has(q, "futa", "federal unemployment tax", "form 940") or (
+        "credit reduction" in q and _has(q, "unemployment", "employer", "940"))
+
+
 def has_any_signal(question):
-    for check in (detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
+    for check in (detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
         try:
             if check(question):
                 return True
@@ -136,6 +142,31 @@ def _result(base, text, calc, category, amount=None, tax=None, status="answered"
     return {**base, "status": status, "category": category, "amount": amount, "tax": tax,
             "citation": calc.get("citation") if calc else ep.CITATION,
             "source_url": calc.get("source_url") if calc else ep.SOURCE_URL, "answer_text": text}
+
+
+def _futa_text(f, include_intro=True):
+    """FUTA sentence(s) shared by the cost answer and the standalone answer.
+    A non-final (preliminary) credit reduction is shown as a range."""
+    year = f["tax_year"]
+    if f["reduction_status"] == "final":
+        text = (f"Federal unemployment tax (FUTA) for {year}: {f['gross_rate']:.1%} on the first "
+                f"${f['wage_limit']:,.0f} per employee, less the {f['max_credit']:.1%} credit for state UI paid on time, "
+                f"is {f['net_rate']:.1%} = ${f['base_each']:,.2f} per employee. California is a credit-reduction state: "
+                f"the {year} reduction was {f['reduction_rate']:.1%}, adding ${f['reduction_each']:,.2f}, so FUTA is "
+                f"${f['total_each']:,.2f} per employee (${f['total']:,.2f} total).")
+    else:
+        text = (f"Federal unemployment tax (FUTA) for {year}: {f['gross_rate']:.1%} on the first "
+                f"${f['wage_limit']:,.0f} per employee, less the {f['max_credit']:.1%} credit for state UI paid on time, "
+                f"is {f['net_rate']:.1%} = ${f['base_each']:,.2f} per employee before any credit reduction. California "
+                f"is a credit-reduction state and the {year} rate is NOT final -- DOL sets it on November 10, {year}. "
+                f"Its preliminary figure is {f['reduction_rate']:.1%} (+${f['reduction_each']:,.2f}, for "
+                f"${f['total_each']:,.2f} per employee, ${f['total']:,.2f} total), and it could be as high as "
+                f"{f['reduction_rate_max']:.1%} if a benefit-cost-rate add-on applies (+${f['reduction_each_max']:,.2f}, "
+                f"${f['total_each_max']:,.2f} per employee, ${f['total_max']:,.2f} total).")
+    text += (" The credit reduction is reported on Schedule A of Form 940 and paid with your fourth-quarter FUTA "
+             "deposit; FUTA is deposited quarterly once you owe more than $500. The full credit assumes you pay "
+             "your state UI on time -- late state payments reduce it.")
+    return text
 
 
 def _cost_answer(question, base):
@@ -192,10 +223,42 @@ def _cost_answer(question, base):
                  f"(shown in e-Services for Business), tell me and I'll use it.")
     if total_payroll and n > 1:
         text += " I treated the dollar figure as total payroll and split it evenly across employees."
-    text += (" Not included: federal FUTA (and its California credit reduction), and the ETT exemption cases "
-             f"under CUIC 977(c). ({calc['citation']})")
+    text += (f" Not included above: the ETT exemption cases under CUIC 977(c). ({calc['citation']})")
+    with employer_db.get_conn() as conn:
+        futa = ep.compute_futa(conn, wages, n)
+    if futa:
+        text += " " + _futa_text(futa) + " FUTA is on top of the UI and ETT above."
     return _result(base, text, calc, "employer_payroll_cost", amount=calc["annual_wages"],
                    tax=calc["employer_cost_total"])
+
+
+def _futa_answer(question, base):
+    if not detect_futa_signal(question):
+        return None
+    q = question.lower()
+    year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
+    year = int(year_match.group(1)) if year_match else ep.PAYROLL_TAX_YEAR
+    n_match = re.search(r"\b(\d+)\s+(?:full[- ]time\s+|part[- ]time\s+)?(?:employees|workers|staff|people)\b", q)
+    n = int(n_match.group(1)) if n_match else 1
+    amounts = [a for a in _amounts(question)
+               if not (n_match and abs(a[1] - n_match.start()) < 3)
+               and not (year_match and a[1] <= year_match.start() < a[2])]
+    wages = amounts[0][0] if amounts else 7000.0
+    if amounts and n > 1 and _has(q, "total payroll", "in total", "combined", "altogether", "total wages"):
+        wages = wages / n
+    with employer_db.get_conn() as conn:
+        f = ep.compute_futa(conn, wages, n, year)
+    if not f:
+        return _result(base, f"I only have FUTA and California credit-reduction figures for 2025 and 2026, not {year}; "
+                             "check the IRS Form 940 instructions and DOL's credit reduction page for that year.",
+                       None, "employer_futa_unsupported_year", status="needs_review")
+    text = _futa_text(f)
+    if not amounts:
+        text += (" That is for an employee earning $7,000 or more; give me the wages and number of employees for "
+                 "your exact figure.")
+    elif wages < 7000:
+        text += f" FUTA applies to the ${f['taxable_wages_each']:,.2f} of wages paid, below the $7,000 limit."
+    return _result(base, text, f, "employer_futa", amount=wages, tax=f["total"])
 
 
 _FED_SCHEDULE_TERMS = (
@@ -315,7 +378,7 @@ def _late_answer(question, base):
 
 def answer_employer(question):
     base = _base()
-    for fn in (_late_answer, _supplemental_answer, _deposit_answer, _cost_answer):
+    for fn in (_late_answer, _supplemental_answer, _deposit_answer, _cost_answer, _futa_answer):
         result = fn(question, base)
         if result:
             return result

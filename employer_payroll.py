@@ -6,8 +6,7 @@ rate page. Nothing here is guessed: the one input the guide cannot supply --
 an employer's experience-rated UI rate -- is taken from the caller, else the
 new-employer rate is used and that is disclosed by the caller.
 
-NOT modeled (disclose): federal FUTA and its California credit reduction,
-legal-holiday due-date extensions, UI rate assignment from the reserve-
+NOT modeled (disclose): legal-holiday due-date extensions, UI rate assignment from the reserve-
 account formula, the 977(c) ETT exemption/penalty cases.
 """
 import datetime
@@ -64,6 +63,45 @@ def compute_employer_costs(conn, annual_wages, num_employees=1, ui_rate=None, ta
         "sdi_withheld_total": round(sdi_amt * num_employees, 2),
         "max_ui_each": round(limit * ui_hi[0], 2),
         "citation": CITATION, "source_url": SOURCE_URL,
+    }
+
+
+def compute_futa(conn, annual_wages, num_employees=1, tax_year=PAYROLL_TAX_YEAR):
+    """Federal unemployment tax (FUTA) per the Form 940 rules: 6.0% on the
+    first $7,000 per employee, less up to a 5.4% credit for state
+    unemployment tax paid on time (net 0.6%), plus California's FUTA credit
+    reduction. The reduction is final for 2022-2025; for 2026 it is only
+    PRELIMINARY (DOL sets it Nov 10, 2026), so the result carries a
+    low (outstanding-advance reduction only) and a high (with the BCR
+    add-on) figure instead of one number. Assumes the full 5.4% credit,
+    i.e. state UI paid on time; late state payments reduce it. Returns None
+    for a year without seeded rates."""
+    if annual_wages is None or annual_wages < 0 or num_employees is None or num_employees < 1:
+        return None
+    gross = get_rate(conn, "futa_gross", tax_year)
+    credit = get_rate(conn, "futa_max_credit", tax_year)
+    red = conn.execute("SELECT reduction_rate, potential_max_rate, status, notes, source_url "
+                       "FROM ca_futa_credit_reductions WHERE tax_year=%s", (tax_year,)).fetchone()
+    if not (gross and credit and red):
+        return None
+    limit = gross[1]
+    taxable = min(annual_wages, limit)
+    net = gross[0] - credit[0]
+    base = taxable * net
+    low_rate = float(red[0])
+    high_rate = float(red[1]) if red[1] is not None else low_rate
+    return {
+        "tax_year": tax_year, "taxable_wages_each": round(taxable, 2), "num_employees": num_employees,
+        "wage_limit": limit, "gross_rate": gross[0], "max_credit": credit[0], "net_rate": round(net, 6),
+        "base_each": round(base, 2),
+        "reduction_status": red[2], "reduction_rate": low_rate, "reduction_rate_max": high_rate,
+        "reduction_each": round(taxable * low_rate, 2), "reduction_each_max": round(taxable * high_rate, 2),
+        "total_each": round(base + taxable * low_rate, 2), "total_each_max": round(base + taxable * high_rate, 2),
+        "total": round((base + taxable * low_rate) * num_employees, 2),
+        "total_max": round((base + taxable * high_rate) * num_employees, 2),
+        "reduction_notes": red[3],
+        "citation": "IRS Instructions for Form 940; DOL FUTA credit reduction tables",
+        "source_url": "https://oui.doleta.gov/unemploy/futa_credit.asp",
     }
 
 

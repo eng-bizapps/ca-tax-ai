@@ -34,6 +34,20 @@ POSITIVE = [
     # Sat 11/7 payday -> following Friday 11/13
     ("Semi-weekly depositor, $900 of PIT withholding accumulated, payday 11/07/2026: when is the EDD payroll deposit due?",
      "employer_deposit_schedule", "Friday, November 13, 2026"),
+    # 3 x ($42 + 7,000 x 1.5% = 105) = 441 ; high 3 x (42 + 371) = 1,239
+    ("I'm an employer with 3 employees each paid $50,000 a year. What UI and ETT tax do I owe?",
+     "employer_payroll_cost", "$147.00 per employee, $441.00 total"),
+    ("I'm an employer with 3 employees each paid $50,000 a year. What UI and ETT tax do I owe?",
+     "employer_payroll_cost", "$1,239.00 total"),
+    # 2025 final: 7,000 x 0.6% = 42 + 7,000 x 1.2% = 84 -> 126
+    ("What FUTA do I owe for one employee paid $50,000 in 2025?", "employer_futa", "$126.00 per employee"),
+    # $4,000 wages in 2025: 24 + 48 = 72
+    ("FUTA for an employee paid $4,000 in 2025 with the California credit reduction?", "employer_futa", "$72.00 per employee"),
+    # 2026 preliminary range, 3 employees
+    ("How much FUTA for 3 employees at $50,000 each?", "employer_futa", "November 10, 2026"),
+    ("How much FUTA for 3 employees at $50,000 each?", "employer_futa", "$413.00 per employee"),
+    ("What is the FUTA credit reduction for California in 2021?", "employer_futa_unsupported_year", "only have FUTA"),
+    # exactly $400
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
@@ -57,6 +71,7 @@ POSITIVE = [
 ]
 
 NEGATIVE = [
+    "Are federal unemployment benefits taxable in California?",
     "What is the sales tax on a $500 couch in Fresno?",
     "Is bonus depreciation allowed in California?",
     "my employer withheld SDI from my paycheck, is that right?",
