@@ -21,8 +21,10 @@ ITEMS = [
     ("core", "ui-rate-assignment", "Experience-rated UI rate from reserve ratio (Schedules AA-F+)", "built",
      "employer_ui_rate", "DE 231Z table (38 bands x 8 schedules, F+ = F x 1.15 verified); F+ for 2026 and 2027. "
      "Reserve transfers/cancellations and EDD's ratio rounding not modeled."),
-    ("core", "ui-schedule-selection", "Which schedule EDD puts in effect (UI Fund balance ratio)", "deferred", None,
-     "Schedule per year is stored (F+ 2026-2027); the Sept 30 fund-balance test is not computed."),
+    ("core", "ui-schedule-selection", "Which schedule EDD puts in effect (UI Fund balance ratio)", "built",
+     "employer_schedule",
+     "DE 231Z thresholds (AA >= 1.8 down to F+ < 0.6 percent); schedule per year stored (F+ 2026-2027). The "
+     "Sept 30 fund balance itself is not fetched: the user supplies the ratio, or EDD's published schedule governs."),
     ("core", "futa", "Federal FUTA 6.0% less 5.4% credit on first $7,000", "built", "employer_futa",
      "2025 and 2026; assumes state UI paid on time (late payments reduce the credit)."),
     ("core", "futa-credit-reduction", "California FUTA credit reduction", "partial", "employer_futa",
@@ -47,12 +49,21 @@ ITEMS = [
      "33 curated payment types from the Rev. 1 (6-16) sheet, cross-checked with DE 44 (4-26). Rows whose law changed "
      "(moving expenses, HSA, domestic-partner taxes, adult-child coverage) are omitted; gift cards answered as a "
      "hedged needs_review."),
-    ("core", "vui", "Voluntary UI contributions to lower the UI rate", "deferred", None, "Mentioned in DE 231Z; not researched."),
-    ("core", "reimbursable", "Reimbursable method for nonprofits and public entities", "deferred", None,
-     "DE 44 describes it; not modeled."),
-    ("core", "household", "Household employers (Schedule H / DE 3HW)", "deferred", None, "Not researched."),
-    ("benefits", "edd-benefits", "Worker-side UI / disability / paid-family-leave benefit amounts", "deferred", None,
-     "Different audience from employers; could be its own area."),
+    ("core", "vui", "Voluntary UI contributions to lower the UI rate", "built", "employer_vui",
+     "DE 231Z / CUIC 976.5: allowed only under schedules AA-D, so NOT available in 2026 or 2027 (F+). Eligibility "
+     "rules and March deadline stated; the DE 2088VU savings worksheet is not computed."),
+    ("core", "reimbursable", "Reimbursable method for nonprofits and public entities", "built", "employer_reimbursable",
+     "Informational from DE 44 and DE 231NP (Rev. 5, 9-19): eligibility, election, 2/5-year minimums, quarterly "
+     "billing, 3-year tail. Reimbursement amounts are not computed."),
+    ("core", "household", "Household employers (DE 3HW / DE 3BHW)", "partial", "employer_household",
+     "EDD household page: $750/quarter cash wages to register and withhold SDI, $1,000 for UI and ETT, annual "
+     "filing option at $20,000 or less, PIT optional. Household UI/ETT/SDI rates and due dates not stated on the "
+     "page, so no cost calculation."),
+    ("benefits", "edd-benefits", "Worker-side UI / disability / paid-family-leave benefit amounts", "partial",
+     "employer_benefit",
+     "UI: official DE 1101BT5 table (411 bands, $40-$450). DI: EDD's 2026 tiers ($50 min, 90%, $1,127 flat, 70%, "
+     "$1,765 max; weekly wages = highest quarter / 13, verified by arithmetic). PFL assumed to use the DI tiers "
+     "(same maximum), hedged in the answer. Eligibility rules are not evaluated."),
     ("info", "registration", "Registering as an employer (DE 1), >$100 wages in a quarter", "built",
      "employer_registration",
      "Subject-employer test (over $100), 15-day deadline from the payment date, forms by employer type, first-"

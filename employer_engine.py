@@ -13,6 +13,7 @@ import datetime
 import re
 
 import employer_db
+import employer_extras as ep_x
 import employer_payment_types as ept
 import employer_payroll as ep
 
@@ -31,7 +32,7 @@ _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent)")
 _AMOUNT_RE = re.compile(r"\$\s*([0-9][0-9,]*(?:\.\d+)?)\s*(k\b)?|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)")
 
 
-_ACRONYMS = frozenset({"edd", "ett", "sdi", "pit", "ui", "sui"})
+_ACRONYMS = frozenset({"edd", "ett", "sdi", "pit", "ui", "sui", "vui", "wba", "pfl", "di"})
 
 
 def _has(q, *terms):
@@ -186,8 +187,53 @@ def detect_registration_signal(q):
             and _has(q, "employer", "edd", "employee", "payroll", "hire", "hiring", "wages"))
 
 
+_HOUSEHOLD_WORKERS = ("nanny", "housekeeper", "babysitter", "baby-sitter", "caregiver", "gardener", "maid",
+                     "home health aide", "domestic worker", "cook at home")
+
+
+def detect_household_signal(q):
+    q = q.lower()
+    if _has(q, "household employer", "household employee", "de 3hw", "de 1hw", "de 3bhw", "de 8829", "de 89 "):
+        return True
+    if _has(q, "credit", "deduct", "dependent care", "taxable income", "tax return", "w-2 box"):
+        return False
+    return _has(q, *_HOUSEHOLD_WORKERS) and _has(q, "edd", "sdi", "ett", "ui", "payroll tax", "register",
+                                                   "unemployment insurance", "withhold")
+
+
+def detect_vui_signal(q):
+    q = q.lower()
+    return (_has(q, "vui", "de 2088a", "de 2088vu")
+            or (_has(q, "voluntary") and _has(q, "contribution", "payment") and _has(q, "ui", "unemployment", "rate")))
+
+
+def detect_schedule_signal(q):
+    q = q.lower()
+    return (_has(q, "ui fund", "unemployment fund", "fund balance", "fund ratio")
+            and _has(q, "ratio", "schedule", "rate schedule", "percent", "%"))
+
+
+def detect_benefit_signal(q):
+    q = q.lower()
+    benefit = (re.search(r"weekly.{0,30}benefit|benefit.{0,30}weekly|benefit amount|per week|a week"
+                         r"|how much (?:will|would|do|can) i (?:get|receive|collect)", q) is not None
+               or _has(q, "wba"))
+    kind = _has(q, "unemployment", "disability", "sdi", "pfl", "paid family leave", "di benefit", "ui benefit")
+    return benefit and kind and not _has(q, "taxable", "tax return", "1099-g")
+
+
+def detect_reimbursable_signal(q):
+    q = q.lower()
+    if _has(q, "reimbursable method", "reimbursable employer", "cost of benefits", "cost-of-benefits",
+            "reimburse the state", "reimburse edd", "de 1snp"):
+        return True
+    return (_has(q, "nonprofit", "501(c)(3)", "public entity", "school district")
+            and _has(q, "unemployment insurance", "ui") and _has(q, "reimburs", "elect"))
+
+
 def has_any_signal(question):
-    for check in (detect_wages_signal, detect_registration_signal, detect_filing_penalty_signal, detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
+    for check in (detect_household_signal, detect_vui_signal, detect_schedule_signal, detect_benefit_signal,
+                  detect_reimbursable_signal, detect_wages_signal, detect_registration_signal, detect_filing_penalty_signal, detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
         try:
             if check(question):
                 return True
@@ -503,6 +549,195 @@ _TREATMENT_WORDS = {"subject": "subject", "not subject": "not subject", "reporta
                     "not reportable": "not reportable", "conditional": "depends on the facts (see below)"}
 
 
+def _year_in(q, default=ep.PAYROLL_TAX_YEAR):
+    m = re.search(r"\b((?:19|20)\d{2})\b", q)
+    return int(m.group(1)) if m else default
+
+
+def _household_answer(question, base):
+    if not detect_household_signal(question):
+        return None
+    q = question.lower()
+    amounts = _amounts(question)
+    quarter = amounts[0][0] if amounts else None
+    annual = amounts[1][0] if len(amounts) > 1 else None
+    text = ("A household employer is a private household (or a college club or sorority/fraternity chapter) paying "
+            "workers such as baby-sitters, caretakers, cooks, gardeners, housekeepers and maids. Different thresholds "
+            "from other employers apply: once you pay cash wages of $750 or more in a calendar quarter (checks and "
+            "cash count; meals and lodging do not) you must register with EDD within 15 days and report; from $750 to "
+            "$999.99 you withhold State Disability Insurance (SDI) from the employee; from $1,000 a quarter you also "
+            "pay Unemployment Insurance (UI) and Employment Training Tax (ETT). Withholding personal income tax is "
+            "optional (you must still report PIT wages, and if you and the employee agree to withhold you must send it "
+            "in). If annual wages are $20,000 or less you may elect annual filing (DE 89): file the DE 3BHW wage "
+            "report each quarter and the DE 3HW return with payment once a year; above $20,000 file quarterly (DE 9 "
+            "and DE 9C with electronic deposits). Register online or on the DE 1HW, and file even in a quarter with "
+            "no payroll. Workers supplied by an independent business or leased from an agency are not your "
+            "household employees; carpenters, electricians and tutors are not household workers.")
+    calc = None
+    if quarter is not None:
+        with employer_db.get_conn() as conn:
+            calc = ep_x.compute_household(conn, quarter, annual)
+    if calc:
+        parts = []
+        if not calc["must_register"]:
+            parts.append(f"At ${quarter:,.2f} of cash wages in a quarter you are under the $750 threshold, so you are "
+                         "not yet required to register or withhold.")
+        else:
+            parts.append(f"At ${quarter:,.2f} of cash wages in a quarter you must register and report and withhold "
+                         "SDI" + (", and you also owe UI and ETT." if calc["pay_ui_ett"] else
+                                  "; UI and ETT start at $1,000 a quarter, so not yet."))
+        if calc["annual_filing_eligible"] is not None:
+            parts.append("Your annual wages " + ("are within" if calc["annual_filing_eligible"] else "exceed")
+                         + " the $20,000 limit for electing annual filing.")
+        text = " ".join(parts) + " " + text
+    text += f" ({ep_x.HOUSEHOLD})"
+    return _result(base, text, calc or {"citation": ep_x.HOUSEHOLD, "source_url": ep_x.HOUSEHOLD_URL},
+                   "employer_household", amount=quarter)
+
+
+def _vui_answer(question, base):
+    if not detect_vui_signal(question):
+        return None
+    q = question.lower()
+    year = _year_in(q)
+    rate = None
+    for m in _PERCENT_RE.finditer(q):
+        rate = float(m.group(1)) / 100
+        break
+    negative = _has(q, "negative reserve", "negative balance", "negative account")
+    with employer_db.get_conn() as conn:
+        calc = ep_x.voluntary_ui_availability(conn, year, -1.0 if negative else None, rate)
+    if not calc:
+        return _result(base, f"I only have the UI rate schedule for 2026 and 2027, not {year}. In general a "
+                             "voluntary UI contribution is possible only in years when schedules AA through D are in "
+                             "effect (DE 231Z).", None, "employer_vui_unsupported_year", status="needs_review")
+    if calc["available"]:
+        head = (f"Schedule {calc['schedule']} is in effect for {year}, so a voluntary UI contribution is allowed if you "
+                "are eligible.")
+    else:
+        head = (f"No: a voluntary UI contribution is not available to you for {year}. " + "; ".join(calc["reasons"])
+                + ".")
+    text = (head + " How it works when it is available: eligible employers get a Voluntary UI Contribution Notice "
+            "(DE 2088A) showing what to pay for a lower rate, and must pay by the last working day of March -- "
+            "there is no late payment for good cause and no extension. You are not eligible if your required rate "
+            "is 3.4%, your reserve account balance is negative, you already have the lowest possible rate, or EDD "
+            "notified you before September 1 of an unpaid amount that is not under a timely petition. The payment "
+            "is not a prepayment of tax, is not deductible, is not refundable, and the lower rate applies for the "
+            "full calendar year; a lower rate may not reduce your annual UI cost, so use the DE 2088VU worksheet "
+            f"before paying. ({calc['citation']})")
+    return _result(base, text, calc, "employer_vui", status="answered")
+
+
+def _schedule_answer(question, base):
+    if not detect_schedule_signal(question):
+        return None
+    q = question.lower()
+    m = _PERCENT_RE.search(q)
+    ratio = None
+    if m:
+        ratio = float(m.group(1))
+    else:
+        r = re.search(r"ratio[^0-9]{0,20}(\d+(?:\.\d+)?)", q)
+        ratio = float(r.group(1)) if r else None
+    if ratio is None:
+        text = ("EDD sets the UI rate schedule each year from the UI Fund balance on September 30 divided by the gross "
+                "wages all employers reported in the fiscal year ending June 30, as a percent: 1.8 or more is "
+                "Schedule AA; 1.6 up to 1.8 is A; 1.4 up to 1.6 is B; 1.2 up to 1.4 is C; 1.0 up to 1.2 is D; 0.8 up "
+                "to 1.0 is E; 0.6 up to 0.8 is F; under 0.6 puts the emergency solvency surcharge in effect "
+                "(Schedule F+, 1.15 times the Schedule F rate). EDD has Schedule F+ in effect for 2026 and 2027, with "
+                "rates from 1.5% to 6.2%. Give me a fund ratio and I'll tell you the schedule. "
+                f"({ep_x.DE231Z})")
+        return _result(base, text, None, "employer_schedule_info", status="needs_review")
+    with employer_db.get_conn() as conn:
+        calc = ep_x.schedule_from_fund_ratio(conn, ratio)
+    if not calc:
+        return None
+    text = f"A UI Fund ratio of {ratio}% puts Schedule {calc['schedule']} in effect."
+    if calc["schedule"] == "F+":
+        text += (" Under 0.6% the emergency solvency surcharge applies: 1.15 times the Schedule F rate, rounded to the "
+                 "nearest tenth.")
+    text += (" Voluntary UI contributions are " + ("allowed" if calc["voluntary_contributions_allowed"] else "not allowed")
+             + " under this schedule. EDD publishes the schedule actually in effect (Schedule F+ for 2026 and 2027), "
+             f"and that is what governs. ({calc['citation']})")
+    return _result(base, text, calc, "employer_schedule", amount=ratio)
+
+
+def _benefit_answer(question, base):
+    if not detect_benefit_signal(question):
+        return None
+    q = question.lower()
+    amounts = _amounts(question)
+    di = _has(q, "disability", "sdi", "pfl", "paid family leave", "di benefit")
+    ui = _has(q, "unemployment", "ui benefit")
+    if not amounts:
+        text = ("Both benefits are based on your highest quarter of wages in the base period (the wages paid 5 to 18 "
+                "months before the claim start date). Unemployment (UI) weekly benefits run from $40 up to a "
+                "$450 maximum, found on EDD's benefit table. Disability insurance (DI) and paid family leave (PFL) "
+                "pay an estimated 70% to 90% of weekly wages, from a $50 minimum up to a $1,765 maximum for 2026. "
+                "Give me your highest-quarter wages and I'll estimate the weekly amount. EDD confirms your actual "
+                "amount when your claim is approved. (EDD DE 44 Rev. 52 (4-26); EDD Quick Statistics)")
+        return _result(base, text, None, "employer_benefit_info", status="needs_review")
+    hq = amounts[0][0]
+    if not _has(q, "quarter") and _has(q, "year", "annual", "salary", "per month", "a month", "monthly"):
+        text = ("Benefits are figured from your highest single quarter of wages in the base period, not from annual "
+                "pay, so I need that quarter's total (for level pay it is roughly a quarter of the year's wages, but "
+                "overtime or a bonus in one quarter changes it). Tell me your highest-quarter wages and I'll "
+                "estimate the weekly benefit.")
+        return _result(base, text, None, "employer_benefit_need_quarter", status="needs_review")
+    parts, calc_all = [], None
+    with employer_db.get_conn() as conn:
+        if ui or not di:
+            u = ep_x.compute_ui_benefit(conn, hq)
+            if u:
+                parts.append(f"Unemployment insurance: highest-quarter wages of ${hq:,.2f} fall at a weekly benefit of "
+                             f"${u['weekly_benefit']:,.0f} on EDD's benefit table (maximum ${u['maximum']:,.0f})"
+                             + (", the cap" if u["at_maximum"] else "") + ". Whether you qualify depends on EDD's "
+                             "base-period earnings and other eligibility rules, which I haven't evaluated.")
+                calc_all = u
+            else:
+                parts.append(f"Unemployment insurance: ${hq:,.2f} in your highest quarter is below the $900 where EDD's "
+                             "benefit table begins, so the table lists no weekly benefit.")
+        if di or not ui:
+            d = ep_x.compute_di_benefit(conn, hq)
+            if d:
+                if not d["eligible"]:
+                    parts.append(f"Disability insurance: ${hq:,.2f} in your highest quarter is under the $300 "
+                                 "minimum, so EDD lists you as not eligible.")
+                else:
+                    how = {"flat": "the flat tier amount",
+                           "pct_of_weekly": f"{(d['rate'] or 0):.0%} of weekly wages (${d['weekly_wages']:,.2f})"}[d["kind"]]
+                    parts.append(f"Disability insurance: about ${d['weekly_benefit']:,.2f} a week -- {how}, "
+                                 f"within the 2026 range of $50 to ${d['maximum']:,.0f}. This is an estimate; EDD "
+                                 "confirms the amount when your claim is approved."
+                                 + (" EDD's page describes disability insurance; paid family leave has the same "
+                                    "$1,765 maximum, and I applied the same tiers to it." if _has(q, "pfl", "paid family leave")
+                                    else ""))
+                calc_all = calc_all or d
+    if not parts:
+        return None
+    text = " ".join(parts) + " (" + (calc_all["citation"] if calc_all else "EDD") + ")"
+    return _result(base, text, calc_all, "employer_benefit", amount=hq)
+
+
+def _reimbursable_answer(question, base):
+    if not detect_reimbursable_signal(question):
+        return None
+    text = ("Most employers pay UI tax under the experience rating method. Two groups may instead choose the "
+            "reimbursable (cost-of-benefits) method, paying the UI Fund dollar for dollar for the benefits paid to "
+            "their former employees and charged to their account, with no UI tax rate: nonprofit organizations with "
+            "an IRC 501(c)(3) exemption, and public entities (the State, counties, cities, districts, public "
+            "agencies and authorities, school and community college districts). A nonprofit elects it on the DE 1SNP "
+            "when it registers (a later election takes effect the first day of the quarter in which it is filed). "
+            "Reimbursable employers are billed quarterly and payment is due within 30 days of the statement date. "
+            "The election must stay in effect for two complete calendar years for a public entity and five for a "
+            "nonprofit, and after you end it you remain liable for benefits paid to former employees for three "
+            "calendar years. California school districts, community colleges and charter schools can alternatively "
+            "join the School Employees Fund. A nonprofit still withholds SDI and PIT, and a public entity must "
+            "withhold PIT (SDI is optional for a public entity). Employers who elect the reimbursable method are "
+            "not required to pay ETT. (EDD DE 44 Rev. 52 (4-26); EDD DE 231NP Rev. 5 (9-19))")
+    return _result(base, text, None, "employer_reimbursable", status="answered")
+
+
 def _wages_answer(question, base):
     if not detect_wages_signal(question):
         return None
@@ -582,7 +817,7 @@ def _registration_answer(question, base):
             text = (f"Not yet: ${calc['quarterly_wages']:,.2f} of wages in a quarter does not exceed the $100 threshold, "
                     "so you are not a subject employer for that quarter. " + text)
     text += (" If you are buying an existing business, you may be a successor employer. A household employer "
-             "(someone paying workers in their home) follows the same $100 rule with the household forms. "
+             "(someone paying workers in their own home) has different thresholds -- ask me about household employers. "
              f"({ep.CITATION})")
     return _result(base, text, calc, "employer_registration", amount=wages)
 
@@ -695,7 +930,8 @@ def _late_answer(question, base):
 
 def answer_employer(question):
     base = _base()
-    for fn in (_wages_answer, _registration_answer, _filing_penalty_answer, _late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
+    for fn in (_wages_answer, _household_answer, _reimbursable_answer, _vui_answer, _schedule_answer, _benefit_answer,
+               _registration_answer, _filing_penalty_answer, _late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
         result = fn(question, base)
         if result:
             return result

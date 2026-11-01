@@ -118,6 +118,35 @@ POSITIVE = [
     ("Do I need to register as an employer with EDD if I paid $101 in wages this quarter?", "employer_registration",
      "Yes: $101.00"),
     ("When do I have to register as an employer with EDD?", "employer_registration", "within 15 days"),
+    # household: register at $750 cash/quarter, UI+ETT at $1,000
+    ("I hired a nanny and paid her $800 cash this quarter. Do I need to register with EDD?", "employer_household",
+     "UI and ETT start at $1,000"),
+    ("I pay my housekeeper $1,200 a quarter, do I owe UI and ETT as a household employer?", "employer_household",
+     "you also owe UI and ETT"),
+    ("I pay my nanny $700 a quarter, do I need to register with EDD as a household employer?", "employer_household",
+     "under the $750 threshold"),
+    # voluntary UI contributions are barred under F+ (in effect 2026 and 2027)
+    ("Can I make a voluntary UI contribution to lower my rate in 2026?", "employer_vui",
+     "prohibited under schedules E, F and F+"),
+    ("Can I make a voluntary UI contribution to lower my rate in 2025?", "employer_vui_unsupported_year", "2026 and 2027"),
+    # UI Fund ratio -> schedule (DE 231Z): 0.9 -> E ; 0.5 -> F+ ; 1.8 -> AA
+    ("What rate schedule applies if the UI fund ratio is 0.9 percent?", "employer_schedule", "Schedule E"),
+    ("What rate schedule applies if the UI fund ratio is 0.5 percent?", "employer_schedule", "Schedule F+"),
+    ("What rate schedule applies if the UI fund ratio is 1.8 percent?", "employer_schedule", "Schedule AA"),
+    # DI: 10,000/13 x 90% = 692.31 ; 20,000 -> flat 1,127 ; 40,000/13 x 70% = 2,153.85 -> capped 1,765 ; under 300 not eligible
+    ("How much weekly disability benefit if my highest quarter wages were $10,000?", "employer_benefit", "$692.31"),
+    ("How much weekly disability benefit if my highest quarter wages were $20,000?", "employer_benefit", "$1,127.00"),
+    ("How much weekly disability benefit if my highest quarter wages were $40,000?", "employer_benefit", "$1,765.00"),
+    ("How much weekly disability benefit if my highest quarter wages were $250?", "employer_benefit", "not eligible"),
+    # UI table: 9,000 -> $347 ; 12,000 -> $450 cap ; 700 below the $900 floor
+    ("How much is my weekly unemployment benefit if my highest quarter wages were $9,000?", "employer_benefit", "$347"),
+    ("How much is my weekly unemployment benefit if my highest quarter wages were $12,000?", "employer_benefit", "the cap"),
+    ("How much is my weekly unemployment benefit if my highest quarter wages were $700?", "employer_benefit",
+     "below the $900"),
+    ("I earn $60,000 a year, how much unemployment per week will I get?", "employer_benefit_need_quarter",
+     "highest single quarter"),
+    ("Can a nonprofit use the reimbursable method for unemployment insurance?", "employer_reimbursable",
+     "two complete calendar years"),
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
@@ -141,6 +170,10 @@ POSITIVE = [
 ]
 
 NEGATIVE = [
+    "Are unemployment benefits taxable?",
+    "Can I claim the child care credit for my nanny?",
+    "How much will I get for trading in my car?",
+    "Is my disability insurance premium deductible?",
     "Is a wedding video taxable in California?",
     "Are typesetting and typography services taxable?",
     "Is my bonus taxable?",
