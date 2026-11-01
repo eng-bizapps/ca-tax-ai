@@ -3,6 +3,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import employer_db
+import employer_payroll as ep
 import income_db
 import payroll_withholding as pw
 from engine import answer, _children_label
@@ -73,12 +75,12 @@ with st.sidebar:
     st.subheader("Options")
     tax_type_choice = st.radio(
         "Tax type",
-        ["Auto-detect", "Sales & Use Tax", "Income Tax", "Property Tax"],
+        ["Auto-detect", "Sales & Use Tax", "Income Tax", "Property Tax", "Employer Payroll Tax"],
         help="A hint, not a hard filter -- if the domain you pick can't "
              "answer, another domain is still tried.",
     )
     tax_type = {"Auto-detect": None, "Sales & Use Tax": "sales", "Income Tax": "income",
-                "Property Tax": "property"}[tax_type_choice]
+                "Property Tax": "property", "Employer Payroll Tax": "employer"}[tax_type_choice]
 
     st.divider()
     st.subheader("Try an example")
@@ -135,7 +137,7 @@ with st.sidebar:
     else:
         st.caption("Not stated yet this session.")
 
-tab_chat, tab_paycheck = st.tabs(["Chat", "Paycheck Calculator"])
+tab_chat, tab_paycheck, tab_employer = st.tabs(["Chat", "Paycheck Calculator", "Employer Payroll Taxes"])
 
 with tab_chat:
     for msg in st.session_state.messages:
@@ -462,3 +464,36 @@ with tab_paycheck:
 
         with st.expander("Details from the withholding engine"):
             st.json(result)
+
+
+with tab_employer:
+    st.subheader("Employer Payroll Tax Calculator")
+    st.caption(
+        f"California employer costs for {ep.PAYROLL_TAX_YEAR} from EDD's Employer's Guide (DE 44 Rev. 52): "
+        "UI and ETT on the first $7,000 of each employee's wages, plus the SDI you withhold from employees.")
+    with st.form("employer_form"):
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            emp_wages = st.number_input("Annual wages per employee ($)", min_value=0.0, value=50000.0, step=1000.0, format="%.2f")
+        with e2:
+            emp_count = st.number_input("Number of employees", min_value=1, value=1, step=1)
+        with e3:
+            emp_ui = st.number_input(
+                "Your UI rate (%) -- 0 = new employer", min_value=0.0, max_value=6.2, value=0.0, step=0.1, format="%.1f",
+                help="Experience-rated 1.5%-6.2% in 2026; shown in e-Services for Business. New employers pay 3.4%.")
+        emp_submit = st.form_submit_button("Calculate")
+    if emp_submit:
+        with employer_db.get_conn() as econn:
+            ecalc = ep.compute_employer_costs(econn, emp_wages, int(emp_count), (emp_ui / 100) if emp_ui else None)
+        if not ecalc:
+            st.error("A UI rate must be between 1.5% and 6.2% (or 0 for a new employer).")
+        else:
+            st.metric("Your cost (UI + ETT)", f"${ecalc['employer_cost_total']:,.2f}")
+            st.metric("SDI withheld from employees", f"${ecalc['sdi_withheld_total']:,.2f}")
+            st.caption(md_safe(
+                f"Per employee: UI ${ecalc['ui_each']:,.2f} at {ecalc['ui_rate']:.2%} + ETT ${ecalc['ett_each']:,.2f} "
+                f"on ${ecalc['taxable_wages_each']:,.2f} taxable wages. SDI {ecalc['sdi_rate']:.1%} has no wage limit."))
+            if ecalc["ui_rate_is_default_new_employer"]:
+                st.caption("Used the 3.4% new-employer UI rate.")
+            st.caption("Not included: federal FUTA and its California credit reduction. "
+                       f"Source: {ecalc['citation']}.")

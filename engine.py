@@ -25,6 +25,7 @@ import income_eligibility
 import income_nonresident
 import income_db
 import property_db
+import employer_engine
 import property_eligibility
 import property_tax
 import district_rates
@@ -10028,6 +10029,16 @@ def _answer(question: str, compose: bool = True, location: str = None,
             if cross_result:
                 return cross_result
 
+        # Ring 5 employer payroll-tax (EDD) intercept -- checked BEFORE
+        # income: income's signal set fires on employer wording ('$50,000 a year',
+        # 'tax') and would answer an EDD question wrongly. employer_engine's
+        # detectors each require employer context AND a payroll-tax term, so
+        # they are narrow enough to run first. See employer_engine.py.
+        if employer_engine.has_any_signal(question):
+            employer_signal_result = employer_engine.answer_employer(question)
+            if employer_signal_result:
+                return employer_signal_result
+
         # Generalized income-signal intercept (Income Coverage Blueprint,
         # Phase 2b) -- see _income_has_any_signal's module note above for
         # the full rationale. This ONE check replaces what used to be
@@ -10080,6 +10091,11 @@ def _answer(question: str, compose: bool = True, location: str = None,
             income_tried = True
             if income_first:
                 return income_first
+
+        if tax_type == "employer":
+            employer_first = employer_engine.answer_employer(question)
+            if employer_first:
+                return employer_first
 
         if tax_type == "property":
             # user-hinted: try property FIRST, still fall back to sales
