@@ -275,7 +275,7 @@ ITEMS = [
     ("I bought my house for $500,000 in 2015. Damaged in a flood in January 2025, worth $800,000 before the flood and $795,000 after. Assessed value?",
      {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 6216.87}),
 
-    # --- H: exact-per-TRA rate, 10 counties with a published, machine-extractable rate book ---
+    # --- H: exact-per-TRA rate, 37 counties with a published, machine-extractable rate book ---
     # real extracted TRA 001-001 (BAKERSFIELD INSIDE), total_rate
     # 0.01163785 (1.163785%) -- same $400,000/2015 scenario as case A
     # (FBYV $497,349.72) -> tax = round(0.01163785*497349.72, 2) = $5,788.08
@@ -304,6 +304,75 @@ ITEMS = [
     # Solano's 6-digit TRA (007000 = 1.119373% per the county's fund-by-fund sheet)
     ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Solano County, TRA 007000?",
      {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5567.2}),
+
+    # second wave of counties (each rate = the PDF's own printed total for that TRA;
+    # same $400,000/2015 scenario, FBYV $497,349.72)
+    # San Mateo 001-021 (Atherton): Composite Rate 1.0935 -> 5,438.52
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in San Mateo County, TRA 001-021?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5438.52}),
+    # Santa Cruz 01-009: printed total 1.126032 -> 5,600.32
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Santa Cruz County, TRA 01-009?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5600.32}),
+    # Tehama 001-000 (City of Corning): 1.0560 -> 5,252.01
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Tehama County, TRA 001-000?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5252.01}),
+    # Mono 010-000: layered 1% + 0.021565 + 0.092615 + 0.016072 = 1.130252 -> 5,621.31
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Mono County, TRA 010-000?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5621.31}),
+    # a unitary (state-assessed) TRA is never treated as ordinary property -> county average
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Colusa County, TRA 000-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate"}),
+
+    # third wave: 17 more counties (37 total). Each rate = the county file's own printed
+    # total for that TRA; same $400,000/2015 scenario, FBYV $497,349.72
+    # Santa Clara 017-030: San Jose; 1.2575 net-value + 0.0039 L&I State Water Project = 1.2614
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Santa Clara County, TRA 017-030?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 6273.57}),
+    # Sacramento 07-090: Elk Grove area; TOTAL RATE ON NET VALUE 1.0457
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Sacramento County, TRA 07-090?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5200.79}),
+    # Santa Barbara 001-007: City of Lompoc; Total Taxable Value 1.13950
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Santa Barbara County, TRA 001-007?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5667.3}),
+    # Contra Costa 01001: Antioch; summary and detail both 1.0492
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Contra Costa County, TRA 01001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5218.19}),
+    # Marin 5-000: Tamalpais UHSD; TOTAL for TRA 1.1214 (printed without the leading zero)
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Marin County, TRA 5-000?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5577.28}),
+    # Kings 066-003: inside Westlands: net of the -0.268873 tax reduction = 0.773072 (below 1%)
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Kings County, TRA 066-003?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 3844.87}),
+    # Lake 001-011: 1.117821
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Lake County, TRA 001-011?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5559.48}),
+    # Sutter 51-001: range-listed 51-001:170, total 1.098364
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Sutter County, TRA 51-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5462.71}),
+    # Fresno 001-022: 1.175384
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Fresno County, TRA 001-022?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5845.77}),
+    # Riverside 003-001: 1% + Palo Verde bonds = 1.07721
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Riverside County, TRA 003-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5357.5}),
+    # Alameda 17-001: Oakland; 1.2779 (city line printed as '.12  ***')
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Alameda County, TRA 17-001?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 6355.63}),
+    # Placer 056-179: Auburn Elem 1.024754
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Placer County, TRA 056-179?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 5096.61}),
+    # Shasta 061-000: FY2026-27 book, plain 1.000000
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Shasta County, TRA 061-000?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_tra_rate", "tax": 4973.5}),
+    # Riverside 013-004: Temecula; carries a land-only levy, so the TRA is left out rather than understated -> county-average fallback
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Riverside County, TRA 013-004?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate"}),
+    # Sacramento 54-188: printed total (1.1873) disagrees with its listed funds (1.1665) -- skipped -> county-average fallback
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Sacramento County, TRA 54-188?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate"}),
+    # Marin 94-023: printed total (1.0853) disagrees with basic + voter-approved (1.0653) -- skipped -> county-average fallback
+    ("How much California property tax will I owe on a house I bought for $400,000 in 2015 in Marin County, TRA 94-023?",
+     {"status": "answered", "domain": "property", "category": "property_tax_estimate_with_county_rate"}),
 
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)
