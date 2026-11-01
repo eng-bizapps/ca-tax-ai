@@ -113,6 +113,28 @@ CREATE TABLE IF NOT EXISTS ca_ui_schedule_years (
     source_url TEXT
 );
 
+-- Flat-dollar and percentage filing penalties. basis: per_failure, per_wage_item,
+-- per_return, percent_of_late_amount. amount is dollars, or a fraction for percent.
+CREATE TABLE IF NOT EXISTS ca_edd_penalties (
+    penalty_key TEXT PRIMARY KEY,
+    amount      NUMERIC NOT NULL,
+    basis       TEXT NOT NULL,
+    description TEXT,
+    citation    TEXT,
+    source_url  TEXT
+);
+
+-- Holidays that can move a deposit/filing due date. kind: 'state' (California
+-- Secretary of State list) or 'federal' (OPM; bank holidays that can delay
+-- electronic settlement). EDD does not publish its own list of "legal holidays".
+CREATE TABLE IF NOT EXISTS ca_holidays (
+    holiday_date DATE NOT NULL,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    source_url   TEXT,
+    PRIMARY KEY (holiday_date, kind)
+);
+
 CREATE TABLE IF NOT EXISTS employer_rule_embeddings (
     topic_key TEXT PRIMARY KEY,
     kind      TEXT NOT NULL,
@@ -246,6 +268,48 @@ RATE_ROWS_2027 = [
 ]
 RATES_2027_URL = "https://edd.ca.gov/en/payroll_taxes/rates_and_withholding/"
 
+DE34_FORM = "EDD Report of New Employee(s) (DE 34), Penalties"
+DE542_GUIDE = "EDD Report New Employees and Independent Contractors (DE 542B), Non-reporting penalties"
+DE34_URL = "https://edd.ca.gov/siteassets/files/pdf_pub_ctr/de34.pdf"
+DE542_URL = "https://edd.ca.gov/siteassets/files/pdf_pub_ctr/de542b.pdf"
+# (key, amount, basis, description, citation, url)
+PENALTY_ROWS = [
+    ("de34_late", 24, "per_failure", "Failure to report a new or rehired employee on time", DE34_FORM, DE34_URL),
+    ("de34_intentional", 490, "per_failure", "Failure to report a new or rehired employee that is intentional", DE34_FORM, DE34_URL),
+    ("de542_late", 24, "per_failure", "Failure to report an independent contractor on time", DE542_GUIDE, DE542_URL),
+    ("de542_intentional", 490, "per_failure", "Failure to report an independent contractor that is intentional", DE542_GUIDE, DE542_URL),
+    ("de9c_wage_item", 20, "per_wage_item", "Late reporting or unreported employee wages on the DE 9C", DE44, DE44_URL),
+    ("paper_de9", 50, "per_return", "Paper DE 9 filed instead of electronically (also a paper no-wages return)", DE44, DE44_URL),
+    ("paper_de9c_wage_item", 20, "per_wage_item", "Paper DE 9C filed instead of electronically", DE44, DE44_URL),
+    ("paper_de88", 0.15, "percent_of_late_amount", "Paper payroll tax deposit (DE 88) instead of electronic", DE44, DE44_URL),
+    ("w2_failure", 50, "per_failure", "Failure to provide a Form W-2 to an employee, or a fraudulent statement (CUIC 13052)", DE44, DE44_URL),
+]
+
+SOS_HOLIDAYS_URL = "https://www.sos.ca.gov/state-holidays"
+OPM_URL = "https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/"
+# California state holidays, 2026, from the Secretary of State's list.
+STATE_HOLIDAYS = [
+    ("2026-01-01", "New Year's Day"), ("2026-01-19", "Martin Luther King Jr. Day"),
+    ("2026-02-16", "Presidents' Day"), ("2026-03-31", "Farmworkers Day"),
+    ("2026-05-25", "Memorial Day"), ("2026-07-04", "Independence Day"),
+    ("2026-09-07", "Labor Day"), ("2026-11-11", "Veterans Day"),
+    ("2026-11-26", "Thanksgiving Day"), ("2026-11-27", "Day after Thanksgiving"),
+    ("2026-12-25", "Christmas Day"),
+]
+# Federal holidays (OPM), 2026 and 2027, with observed dates.
+FEDERAL_HOLIDAYS = [
+    ("2026-01-01", "New Year's Day"), ("2026-01-19", "Martin Luther King Jr. Day"),
+    ("2026-02-16", "Washington's Birthday"), ("2026-05-25", "Memorial Day"),
+    ("2026-06-19", "Juneteenth"), ("2026-07-03", "Independence Day (observed)"),
+    ("2026-09-07", "Labor Day"), ("2026-10-12", "Columbus Day"), ("2026-11-11", "Veterans Day"),
+    ("2026-11-26", "Thanksgiving Day"), ("2026-12-25", "Christmas Day"),
+    ("2027-01-01", "New Year's Day"), ("2027-01-18", "Martin Luther King Jr. Day"),
+    ("2027-02-15", "Washington's Birthday"), ("2027-05-31", "Memorial Day"),
+    ("2027-06-18", "Juneteenth (observed)"), ("2027-07-05", "Independence Day (observed)"),
+    ("2027-09-06", "Labor Day"), ("2027-10-11", "Columbus Day"), ("2027-11-11", "Veterans Day"),
+    ("2027-11-25", "Thanksgiving Day"), ("2027-12-24", "Christmas Day (observed)"),
+]
+
 DEPOSIT_ROWS_2026 = [
     ("next_day", 0, 350, "quarterly", "quarterly"),
     ("next_day", 350, 400.005, "monthly", "15th_following_month"),
@@ -329,6 +393,18 @@ def seed():
                 "INSERT INTO ca_ui_schedule_years (tax_year, schedule, source_url) VALUES (%s, %s, %s) "
                 "ON CONFLICT (tax_year) DO UPDATE SET schedule=EXCLUDED.schedule",
                 (ty, sched, "https://edd.ca.gov/en/payroll_taxes/rates_and_withholding/"))
+        for key, amount, basis, desc, cite, url in PENALTY_ROWS:
+            conn.execute(
+                "INSERT INTO ca_edd_penalties (penalty_key, amount, basis, description, citation, source_url) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (penalty_key) DO UPDATE SET amount=EXCLUDED.amount, "
+                "basis=EXCLUDED.basis, description=EXCLUDED.description, citation=EXCLUDED.citation, "
+                "source_url=EXCLUDED.source_url", (key, amount, basis, desc, cite, url))
+        for kind, rows, url in (("state", STATE_HOLIDAYS, SOS_HOLIDAYS_URL), ("federal", FEDERAL_HOLIDAYS, OPM_URL)):
+            for d, name in rows:
+                conn.execute(
+                    "INSERT INTO ca_holidays (holiday_date, kind, name, source_url) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (holiday_date, kind) DO UPDATE SET name=EXCLUDED.name",
+                    (d, kind, name, url))
         for fed, lo, hi, ca, due in DEPOSIT_ROWS_2026:
             conn.execute(
                 "INSERT INTO ca_edd_deposit_rules (tax_year, federal_schedule, min_accumulated, "
@@ -357,7 +433,7 @@ def seed():
 def status():
     conn = db.get_conn()
     for tbl in ("ca_employer_payroll_rates", "ca_edd_deposit_rules", "ca_edd_due_dates",
-                "ca_edd_interest_rates", "ca_futa_credit_reductions", "ca_ui_rate_schedule", "ca_ui_schedule_years", "employer_rule_embeddings", "employer_tax_inventory"):
+                "ca_edd_interest_rates", "ca_futa_credit_reductions", "ca_ui_rate_schedule", "ca_ui_schedule_years", "ca_edd_penalties", "ca_holidays", "employer_rule_embeddings", "employer_tax_inventory"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:30} {n} rows")
     conn.close()

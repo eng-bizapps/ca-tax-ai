@@ -145,11 +145,48 @@ def _next_business_day(d):
     return d
 
 
+def _state_holiday(conn, d):
+    row = conn.execute("SELECT name FROM ca_holidays WHERE holiday_date=%s AND kind='state'", (d,)).fetchone()
+    return row[0] if row else None
+
+
+def _federal_holiday(conn, d):
+    row = conn.execute("SELECT name FROM ca_holidays WHERE holiday_date=%s AND kind='federal'", (d,)).fetchone()
+    return row[0] if row else None
+
+
+def next_business_day(conn, d):
+    """Roll d forward past weekends and California state holidays (the
+    Secretary of State list; EDD does not publish its own definition of
+    'legal holiday'). Returns {"date", "holiday_shift" (name of the first
+    state holiday skipped, or None), "holidays_modeled" (False when there is
+    no state-holiday list for the year of the date the roll ended on),
+    "federal_holiday_note" (a federal-only bank holiday the final date
+    lands on -- not a state holiday so not skipped, but electronic payments
+    may not settle that day)}."""
+    shift = None
+    while True:
+        if d.weekday() >= 5:
+            d += datetime.timedelta(days=1)
+            continue
+        name = _state_holiday(conn, d)
+        if name:
+            shift = shift or name
+            d += datetime.timedelta(days=1)
+            continue
+        break
+    modeled = conn.execute("SELECT 1 FROM ca_holidays WHERE kind='state' AND "
+                           "EXTRACT(YEAR FROM holiday_date)=%s LIMIT 1", (d.year,)).fetchone() is not None
+    return {"date": d, "holiday_shift": shift, "holidays_modeled": modeled,
+            "federal_holiday_note": _federal_holiday(conn, d)}
+
+
 def compute_deposit_schedule(conn, federal_schedule, accumulated_pit, payday=None, tax_year=PAYROLL_TAX_YEAR):
     """California deposit schedule for PIT withholding + SDI, per the DE 44
     deposit table: federal deposit schedule x accumulated PIT withholding.
     With payday (datetime.date) also returns the due date for that payday's
-    deposit (weekend -> next business day; legal holidays NOT modeled)."""
+    deposit (weekend or California state holiday -> next business day; see
+    next_business_day for what is and is not modeled)."""
     if federal_schedule not in FEDERAL_SCHEDULES or accumulated_pit is None or accumulated_pit < 0:
         return None
     row = conn.execute(
@@ -166,8 +203,9 @@ def compute_deposit_schedule(conn, federal_schedule, accumulated_pit, payday=Non
            "citation": CITATION, "source_url": SOURCE_URL}
     if payday is None:
         return out
+    roll = None
     if due_rule == "next_day":
-        due = _next_business_day(payday + datetime.timedelta(days=1))
+        roll = next_business_day(conn, payday + datetime.timedelta(days=1))
     elif due_rule == "semi_weekly":
         # Wed-Fri payday -> following Wednesday; Sat-Tue payday -> following Friday
         wd = payday.weekday()
@@ -175,17 +213,46 @@ def compute_deposit_schedule(conn, federal_schedule, accumulated_pit, payday=Non
             due = payday + datetime.timedelta(days=(2 - wd) % 7 or 7)
         else:
             due = payday + datetime.timedelta(days=(4 - wd) % 7 or 7)
-        due = _next_business_day(due)
+        roll = next_business_day(conn, due)
     elif due_rule == "15th_following_month":
         y, m = (payday.year + 1, 1) if payday.month == 12 else (payday.year, payday.month + 1)
-        due = _next_business_day(datetime.date(y, m, 15))
+        roll = next_business_day(conn, datetime.date(y, m, 15))
     else:  # quarterly: delinquent date of the quarter containing the payday
         q = (payday.month - 1) // 3 + 1
         r = conn.execute("SELECT delinquent_date FROM ca_edd_due_dates WHERE tax_year=%s AND quarter=%s",
                          (payday.year if payday.year == tax_year else tax_year, q)).fetchone()
         due = r[0] if r else None
+        out["holidays_modeled"] = True   # published delinquent date, already adjusted by EDD
+    if roll:
+        due = roll["date"]
+        out.update(holiday_shift=roll["holiday_shift"], holidays_modeled=roll["holidays_modeled"],
+                   federal_holiday_note=roll["federal_holiday_note"])
     out["due_date"] = due
     return out
+
+
+def compute_filing_penalty(conn, kind, count=1, intentional=False):
+    """Flat-dollar filing penalties from the Ring 5 penalty table.
+    kind: 'de34' (new-hire report), 'de542' (independent-contractor report),
+    'de9c' (late/unreported wage items), 'paper_de9' (paper return),
+    'paper_de9c' (paper wage items), 'w2' (no W-2). count = number of
+    failures / wage items / returns. intentional switches DE 34 / DE 542 to
+    the $490 rate. These are the maximum EDD MAY assess ('may be assessed'),
+    and a waiver for good cause can be requested, so the result is an upper
+    bound. Returns None for an unknown kind or count < 1."""
+    keys = {"de34": ("de34_intentional" if intentional else "de34_late"),
+            "de542": ("de542_intentional" if intentional else "de542_late"),
+            "de9c": "de9c_wage_item", "paper_de9": "paper_de9",
+            "paper_de9c": "paper_de9c_wage_item", "w2": "w2_failure"}
+    if kind not in keys or count is None or count < 1:
+        return None
+    row = conn.execute("SELECT amount, basis, description, citation, source_url FROM ca_edd_penalties "
+                       "WHERE penalty_key=%s", (keys[kind],)).fetchone()
+    if not row:
+        return None
+    amount = float(row[0])
+    return {"kind": kind, "count": count, "intentional": intentional, "per_unit": amount, "basis": row[1],
+            "description": row[2], "total": round(amount * count, 2), "citation": row[3], "source_url": row[4]}
 
 
 def compute_supplemental_withholding(conn, amount, wage_type="other", tax_year=PAYROLL_TAX_YEAR):

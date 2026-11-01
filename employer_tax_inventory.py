@@ -33,13 +33,23 @@ ITEMS = [
      "rules and due dates are not published yet: add with the new DE 44 edition (expected January)."),
     ("deposits", "deposit-schedule", "California PIT/SDI deposit schedule from federal schedule + accumulated PIT",
      "built", "employer_deposit_schedule", "Includes next-day, semi-weekly, monthly, quarterly due dates."),
-    ("deposits", "holidays", "Legal-holiday due-date extensions", "deferred", None,
-     "Weekend roll is modeled; legal holidays are disclosed as not modeled."),
+    ("deposits", "holidays", "Legal-holiday due-date extensions", "partial", "employer_deposit_schedule",
+     "2026: California state holidays (Secretary of State list) shift due dates; federal-only bank holidays are "
+     "flagged, not skipped (EDD publishes no list of its own). 2027 state list not published: weekends only."),
     ("withholding", "supplemental", "Supplemental-wage PIT flat rates 10.23% / 6.6%", "built",
      "employer_supplemental_withholding", "Separate-payment flat-rate method only."),
     ("penalties", "late-penalty", "15% late-payment penalty plus daily-compounded interest", "built",
      "employer_late_payment", "Interest on tax+penalty is an approximation, disclosed."),
-    ("penalties", "other-penalties", "DE 9 / DE 34 / DE 542 late-filing penalties", "deferred", None, "Not researched."),
+    ("penalties", "filing-penalties", "DE 34 / DE 542 ($24, $490 intentional), DE 9C ($20 per wage item), paper filing, W-2",
+     "built", "employer_filing_penalty",
+     "From EDD's DE 34 form, DE 542B guide and DE 44. Maximums EDD may assess; waiver for good cause noted."),
+    ("info", "wages-subject", "Which payments are subject wages (DE 231TP)", "deferred", None, "Not researched."),
+    ("core", "vui", "Voluntary UI contributions to lower the UI rate", "deferred", None, "Mentioned in DE 231Z; not researched."),
+    ("core", "reimbursable", "Reimbursable method for nonprofits and public entities", "deferred", None,
+     "DE 44 describes it; not modeled."),
+    ("core", "household", "Household employers (Schedule H / DE 3HW)", "deferred", None, "Not researched."),
+    ("benefits", "edd-benefits", "Worker-side UI / disability / paid-family-leave benefit amounts", "deferred", None,
+     "Different audience from employers; could be its own area."),
     ("info", "registration", "Registering as an employer (DE 1), >$100 wages in a quarter", "deferred", None,
      "Informational redirect only."),
     ("info", "worker-class", "ABC test / worker classification", "out_of_scope", None, "Fact-specific legal question."),
@@ -48,6 +58,12 @@ ITEMS = [
 
 def load():
     with db.get_conn() as conn:
+        # drop rows for items that were renamed or removed, so the ledger never keeps a stale status
+        keep = {(ref, label) for _, ref, label, *_ in ITEMS}
+        for rid, ref, label in conn.execute(
+                "SELECT id, line_ref, item_label FROM employer_tax_inventory WHERE tax_year=%s", (TAX_YEAR,)).fetchall():
+            if (ref, label) not in keep:
+                conn.execute("DELETE FROM employer_tax_inventory WHERE id=%s", (rid,))
         for part, ref, label, status, topic, notes in ITEMS:
             conn.execute(
                 "INSERT INTO employer_tax_inventory (tax_year, part, line_ref, item_label, citation, status, "

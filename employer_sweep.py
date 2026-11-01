@@ -28,9 +28,9 @@ POSITIVE = [
     # no wages -> max per employee 7,000 x 3.4% + 7 = 245
     ("How much does an employee cost me in UI tax and ETT as an employer?",
      "employer_payroll_cost_info", "$245.00"),
-    # Wed 11/4/2026 semi-weekly, > $400 -> following Wednesday 11/11
+    # Wed 11/4/2026 semi-weekly, > $400 -> following Wednesday 11/11 = Veterans Day (state holiday) -> Thu 11/12
     ("I'm a semi-weekly depositor with $1,200 of PIT withholding accumulated, payday November 4, 2026. When is my EDD deposit due?",
-     "employer_deposit_schedule", "Wednesday, November 11, 2026"),
+     "employer_deposit_schedule", "Thursday, November 12, 2026"),
     # Sat 11/7 payday -> following Friday 11/13
     ("Semi-weekly depositor, $900 of PIT withholding accumulated, payday 11/07/2026: when is the EDD payroll deposit due?",
      "employer_deposit_schedule", "Friday, November 13, 2026"),
@@ -73,6 +73,27 @@ POSITIVE = [
      "employer_payroll_cost", "I don't have 2027 federal unemployment tax"),
     ("I'm an employer with 3 employees each paid $50,000 in 2025. What UI and ETT tax do I owe?",
      "employer_payroll_cost_unsupported_year", "2026 and 2027"),
+    ("I'm a semi-weekly depositor with $1,200 of PIT withholding accumulated, payday November 4, 2026. When is my EDD deposit due?",
+     "employer_deposit_schedule", "after skipping Veterans Day"),
+    # next-day payday Wed 11/25: Thu 11/26 Thanksgiving, Fri 11/27 day after, weekend -> Mon 11/30
+    ("Next-day depositor with $50,000 of PIT withholding accumulated, payday November 25, 2026: when is my EDD payroll deposit due?",
+     "employer_deposit_schedule", "Monday, November 30, 2026"),
+    # next-day payday Fri 10/9: Sat/Sun -> Mon 10/12 = Columbus Day, federal bank holiday only -> not skipped, but flagged
+    ("Next-day depositor with $50,000 of PIT withholding accumulated, payday October 9, 2026: when is my EDD payroll deposit due?",
+     "employer_deposit_schedule", "Monday, October 12, 2026"),
+    ("Next-day depositor with $50,000 of PIT withholding accumulated, payday October 9, 2026: when is my EDD payroll deposit due?",
+     "employer_deposit_schedule", "federal bank holiday"),
+    # December monthly payday -> Fri 1/15/2027; no 2027 state holiday list yet -> says so
+    ("Monthly federal depositor with $500 of PIT withholding accumulated, payday December 10, 2026: EDD payroll deposit due?",
+     "employer_deposit_schedule", "state holiday list for 2027"),
+    # DE 34: 3 x $24 = 72 ; intentional DE 542: 2 x $490 = 980 ; DE 9C: 15 x $20 = 300 ; paper DE 9 $50 ; paper DE 88 15% x 2,000 = 300
+    ("What is the penalty if I report 3 new employees late on the DE 34?", "employer_filing_penalty", "$72.00"),
+    ("I intentionally didn't report 2 independent contractors on the DE 542, what's the penalty?",
+     "employer_filing_penalty", "$980.00"),
+    ("My DE 9C was late for 15 employees, what penalty applies?", "employer_filing_penalty", "$300.00"),
+    ("What's the penalty for filing my DE 9 on paper?", "employer_filing_penalty", "$50.00"),
+    ("What is the penalty for a paper DE 88 deposit of $2,000?", "employer_filing_penalty", "$300.00"),
+    ("What is the penalty for a late DE 9 return?", "employer_filing_penalty_info", "15% of the tax"),
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
@@ -96,6 +117,8 @@ POSITIVE = [
 ]
 
 NEGATIVE = [
+    "My new employee is always late to work, is there a penalty?",
+    "The new employee form W-4 is late, what do I do?",
     "How are unemployment benefits calculated for a laid-off worker?",
     "How much should a landlord keep in a reserve account for repairs?",
     "Are federal unemployment benefits taxable in California?",

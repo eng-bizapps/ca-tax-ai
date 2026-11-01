@@ -134,8 +134,25 @@ def detect_ui_rate_signal(q):
                         "experience-rated", "de 2088", "rate schedule", "schedule f"))
 
 
+_INTENT_WORDS = ("intentional", "willful", "wilful", "conspir", "collu", "on purpose", "knowingly")
+
+
+def detect_filing_penalty_signal(q):
+    q = q.lower()
+    strong = _has(q, "de 34", "de34", "de 542", "de542", "de 9c", "de9c", "wage item", "unreported wages")
+    # generic worker/hire words only count alongside reporting or EDD wording, so "my new
+    # employee is always late" is not a payroll-penalty question
+    weak = (_has(q, "new hire", "new employee", "rehire", "independent contractor")
+            and _has(q, "report", "edd")) or (_has(q, "w-2") and _has(q, "edd", "provide"))
+    topic = (strong or weak
+             or (_has(q, "paper") and _has(q, "de 9", "de 88", "return", "deposit", "filing"))
+             or re.search(r"\bde 9\b", q) is not None)
+    return bool(topic and _has(q, "penalty", "penalties", "late", "fail", "miss", "forgot", "didn't report",
+                               "did not report", "never reported", "not reported", "how much"))
+
+
 def has_any_signal(question):
-    for check in (detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
+    for check in (detect_filing_penalty_signal, detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
         try:
             if check(question):
                 return True
@@ -397,9 +414,23 @@ def _deposit_answer(question, base):
     text = (f"As a {_SCHEDULE_LABELS[fed]} federal depositor with ${accumulated:,.2f} of accumulated PIT "
             f"withholding, your California deposit schedule is {_CA_SCHEDULE_TEXT[calc['ca_schedule']]}.")
     if calc["due_date"]:
-        text += (f" For a payday of {payday:%B %d, %Y}, the deposit is due {calc['due_date']:%A, %B %d, %Y}.")
-        text += (" This moves a due date that lands on a weekend to the next business day but does not account for "
-                 "legal holidays, which also extend it; electronic deposits must settle by the due date.")
+        text += (f" For a payday of {payday:%B %d, %Y}, the deposit is due {calc['due_date']:%A, %B %d, %Y}")
+        if calc.get("holiday_shift"):
+            text += f" (after skipping {calc['holiday_shift']}, a California state holiday)"
+        text += "."
+        if calc["ca_schedule"] == "quarterly":
+            text += " That is the delinquency date EDD publishes for the quarter."
+        elif calc.get("holidays_modeled"):
+            text += (" Due dates move past weekends and California state holidays (the Secretary of State's list; "
+                     "EDD does not publish its own definition of 'legal holiday').")
+        else:
+            text += (" This moves a weekend due date to the next business day, but I don't have the California "
+                     f"state holiday list for {calc['due_date'].year} yet, so a holiday could extend it further.")
+        if calc.get("federal_holiday_note"):
+            text += (f" Note that date is {calc['federal_holiday_note']}, a federal bank holiday: it is not a "
+                     "California state holiday, but an electronic payment may not settle that day, so pay earlier "
+                     "to be safe.")
+        text += " Electronic deposits must settle by the due date."
     elif payday is None:
         text += " Give me the payday and I can compute the due date."
     text += f" Deposits cover PIT withholding and SDI together; SDI is deposited on the same schedule. ({calc['citation']})"
@@ -431,6 +462,74 @@ def _supplemental_answer(question, base):
             "withheld from the regular pay). Federal supplemental withholding and SDI (1.3%, no wage limit) are "
             f"separate. ({calc['citation']})")
     return _result(base, text, calc, "employer_supplemental_withholding", amount=amount, tax=calc["withholding"])
+
+
+def _filing_penalty_answer(question, base):
+    if not detect_filing_penalty_signal(question):
+        return None
+    q = question.lower()
+    amounts = _amounts(question)
+    count_match = re.search(r"\b(\d+)\s+(?:new\s+|late\s+|unreported\s+|missed\s+)?(?:employees|hires|workers|wage items|"
+                            r"wage lines|contractors|independent contractors|reports|returns|w-2s|failures)\b", q)
+    count = int(count_match.group(1)) if count_match else 1
+    intentional = _has(q, *_INTENT_WORDS)
+    paper = _has(q, "paper")
+    if paper and _has(q, "de 88", "deposit") and amounts:
+        with employer_db.get_conn() as conn:
+            row = conn.execute("SELECT amount, citation, source_url FROM ca_edd_penalties "
+                               "WHERE penalty_key='paper_de88'").fetchone()
+        pct = float(row[0])
+        text = (f"A payroll tax deposit sent on paper (DE 88) instead of electronically carries a {pct:.0%} penalty: "
+                f"${amounts[0][0] * pct:,.2f} on ${amounts[0][0]:,.2f}, unless you have an approved e-file/e-pay mandate "
+                f"waiver. ({row[1]})")
+        return _result(base, text, {"citation": row[1], "source_url": row[2]}, "employer_filing_penalty",
+                       amount=amounts[0][0], tax=round(amounts[0][0] * pct, 2))
+    if paper and _has(q, "de 9c", "de9c", "wage"):
+        kind = "paper_de9c"
+    elif paper:
+        kind = "paper_de9"
+    elif _has(q, "de 542", "de542", "independent contractor"):
+        kind = "de542"
+    elif _has(q, "de 34", "de34", "new hire", "new employee", "rehire"):
+        kind = "de34"
+    elif _has(q, "de 9c", "de9c", "wage item", "unreported wages"):
+        kind = "de9c"
+    elif _has(q, "w-2") and _has(q, "fail", "not provide", "didn't provide", "did not provide"):
+        kind = "w2"
+    elif re.search(r"\bde 9\b", q) and not amounts:
+        text = ("A late DE 9 quarterly return carries a penalty of 15% of the tax that is paid late plus interest "
+                "(ask me with the tax amount and the due and paid dates for the figure), and a $20 penalty per "
+                "employee wage item for wages reported late or not at all on the DE 9C. Filing the DE 9 on paper "
+                "instead of electronically adds $50 per return, and even a no-wages return must be filed. You can "
+                "request a waiver of penalty for good cause, and EDD may grant an extension of up to two months "
+                f"when the governor declares an emergency that directly affects you. ({ep.CITATION})")
+        return _result(base, text, None, "employer_filing_penalty_info", status="needs_review")
+    else:
+        return None
+    with employer_db.get_conn() as conn:
+        calc = ep.compute_filing_penalty(conn, kind, count, intentional)
+    if not calc:
+        return None
+    unit, units = {"per_failure": ("failure to report", "failures to report"), "per_wage_item": ("wage item", "wage items"),
+                   "per_return": ("return", "returns")}[calc["basis"]]
+    n = f"{count} {units if count > 1 else unit}"
+    text = (f"EDD may assess ${calc['per_unit']:,.0f} for each {unit}: {n} = ${calc['total']:,.2f}. "
+            f"({calc['description']}.)")
+    if kind in ("de34", "de542"):
+        if intentional:
+            text += " I used the $490 intentional rate."
+        else:
+            text += (" The penalty is $490 per failure instead if the failure is intentional (an agreement between "
+                     "you and the worker not to report, or a false or incomplete report).")
+        deadline = ("within 20 calendar days of the employee's start-of-work date" if kind == "de34" else
+                    "within 20 calendar days of paying or contracting for $600 or more")
+        text += f" The report is due {deadline}."
+    if kind == "de9c":
+        text += " That is on top of the 15% penalty and interest on any tax that was also paid late."
+    text += (" These are the most EDD may charge, not a guaranteed assessment, and you can ask EDD to waive a penalty "
+             "by showing good cause (Waiver of Penalty Policy, DE 231J). Interest and the 15% late-tax penalty are "
+             f"separate. ({calc['citation']})")
+    return _result(base, text, calc, "employer_filing_penalty", amount=float(count), tax=calc["total"])
 
 
 def _late_answer(question, base):
@@ -473,7 +572,7 @@ def _late_answer(question, base):
 
 def answer_employer(question):
     base = _base()
-    for fn in (_late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
+    for fn in (_filing_penalty_answer, _late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
         result = fn(question, base)
         if result:
             return result
