@@ -62,7 +62,8 @@ def compute_employer_costs(conn, annual_wages, num_employees=1, ui_rate=None, ta
         "sdi_withheld_each": round(sdi_amt, 2),
         "sdi_withheld_total": round(sdi_amt * num_employees, 2),
         "max_ui_each": round(limit * ui_hi[0], 2),
-        "citation": CITATION, "source_url": SOURCE_URL,
+        "citation": CITATION if tax_year == 2026 else "EDD Rates and Withholding (2027 rates)",
+        "source_url": SOURCE_URL if tax_year == 2026 else "https://edd.ca.gov/en/payroll_taxes/rates_and_withholding/",
     }
 
 

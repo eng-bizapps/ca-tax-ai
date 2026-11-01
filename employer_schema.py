@@ -233,6 +233,19 @@ RATE_ROWS_2026 = [
 # (federal_schedule, min, max, ca_schedule, due_rule). Bands are half-open
 # [min, max). "$350 to $400" includes $400 and "more than $400" excludes it, so
 # that boundary is 400.005 (amounts are in cents).
+# 2027 figures EDD has published (edd.ca.gov Rates and Withholding, seen 2026-11-01):
+# SDI 1.4%, UI schedule F+ (1.5%-6.2%), new employer 3.4%, $7,000 limit, ETT 0.1%.
+# Supplemental-wage rates, penalty, deposit and due-date tables for 2027 are NOT
+# published yet (new DE 44 edition expected in January), so they are not seeded.
+RATE_ROWS_2027 = [
+    ("ui_new_employer", 0.034, 7000, "employer", "UI rate for new employers, for two to three years"),
+    ("ui_min", 0.015, 7000, "employer", "Lowest experience-rated UI rate (Schedule F+, 2027)"),
+    ("ui_max", 0.062, 7000, "employer", "Highest experience-rated UI rate (Schedule F+, 2027)"),
+    ("ett", 0.001, 7000, "employer", "Employment Training Tax"),
+    ("sdi", 0.014, None, "employee", "SDI incl. Paid Family Leave, withheld from employee wages; no wage limit"),
+]
+RATES_2027_URL = "https://edd.ca.gov/en/payroll_taxes/rates_and_withholding/"
+
 DEPOSIT_ROWS_2026 = [
     ("next_day", 0, 350, "quarterly", "quarterly"),
     ("next_day", 350, 400.005, "monthly", "15th_following_month"),
@@ -283,6 +296,13 @@ def seed():
                 "ON CONFLICT (tax_year, rate_key) DO UPDATE SET rate=EXCLUDED.rate, "
                 "wage_limit=EXCLUDED.wage_limit, paid_by=EXCLUDED.paid_by, description=EXCLUDED.description",
                 (key, rate, limit, paid_by, desc, DE44, DE44_URL))
+        for key, rate, limit, paid_by, desc in RATE_ROWS_2027:
+            conn.execute(
+                "INSERT INTO ca_employer_payroll_rates (tax_year, rate_key, rate, wage_limit, paid_by, "
+                "description, citation, source_url) VALUES (2027, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (tax_year, rate_key) DO UPDATE SET rate=EXCLUDED.rate, "
+                "wage_limit=EXCLUDED.wage_limit, paid_by=EXCLUDED.paid_by, description=EXCLUDED.description",
+                (key, rate, limit, paid_by, desc, "EDD Rates and Withholding (2027 rates)", RATES_2027_URL))
         for ty, key, rate, limit, desc in FUTA_ROWS:
             conn.execute(
                 "INSERT INTO ca_employer_payroll_rates (tax_year, rate_key, rate, wage_limit, paid_by, "

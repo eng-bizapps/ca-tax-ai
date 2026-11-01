@@ -267,16 +267,22 @@ def _cost_answer(question, base):
             rate = float(m.group(1)) / 100
             break
     total_payroll = _has(q, "total payroll", "in total", "combined", "altogether", "total wages")
+    year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
+    year = int(year_match.group(1)) if year_match else ep.PAYROLL_TAX_YEAR
+    if year not in (2026, 2027):
+        return _result(base, f"I only have California employer payroll tax rates for 2026 and 2027, not {year}; "
+                             "check EDD's Rates and Withholding page or the DE 44 for that year.",
+                       None, "employer_payroll_cost_unsupported_year", status="needs_review")
     with employer_db.get_conn() as conn:
         if not amounts:
-            calc = ep.compute_employer_costs(conn, 7000, 1, rate)
+            calc = ep.compute_employer_costs(conn, 7000, 1, rate, year)
             if not calc:
                 return None
             text = (f"California charges employers Unemployment Insurance (UI) and Employment Training Tax (ETT) "
                     f"on only the first ${calc['taxable_wage_limit']:,.0f} of each employee's wages per year. "
-                    f"A new employer's UI rate is {ep.get_rate(conn, 'ui_new_employer')[0]:.1%} for two to three "
-                    f"years (experience-rated {ep.get_rate(conn, 'ui_min')[0]:.1%}-"
-                    f"{ep.get_rate(conn, 'ui_max')[0]:.1%} after) and ETT is {calc['ett_rate']:.1%}, so the most "
+                    f"A new employer's UI rate is {ep.get_rate(conn, 'ui_new_employer', year)[0]:.1%} for two to three "
+                    f"years (experience-rated {ep.get_rate(conn, 'ui_min', year)[0]:.1%}-"
+                    f"{ep.get_rate(conn, 'ui_max', year)[0]:.1%} after) and ETT is {calc['ett_rate']:.1%}, so the most "
                     f"an employee can cost you at the new-employer rate is ${calc['employer_cost_each']:,.2f} a "
                     f"year (${calc['ui_each']:,.2f} UI + ${calc['ett_each']:,.2f} ETT). SDI "
                     f"({calc['sdi_rate']:.1%}) is withheld from the employee's pay, not an employer cost, and has "
@@ -286,7 +292,7 @@ def _cost_answer(question, base):
         wages = amounts[0][0]
         if total_payroll and n > 1:
             wages = wages / n
-        calc = ep.compute_employer_costs(conn, wages, n, rate)
+        calc = ep.compute_employer_costs(conn, wages, n, rate, year)
         if not calc:
             if rate is not None:
                 lo, hi = ep.get_rate(conn, "ui_min")[0], ep.get_rate(conn, "ui_max")[0]
@@ -309,9 +315,14 @@ def _cost_answer(question, base):
         text += " I treated the dollar figure as total payroll and split it evenly across employees."
     text += (f" Not included above: the ETT exemption cases under CUIC 977(c). ({calc['citation']})")
     with employer_db.get_conn() as conn:
-        futa = ep.compute_futa(conn, wages, n)
+        futa = ep.compute_futa(conn, wages, n, year)
     if futa:
         text += " " + _futa_text(futa) + " FUTA is on top of the UI and ETT above."
+    else:
+        text += (f" I don't have {year} federal unemployment tax (FUTA) figures yet: DOL hasn't published a "
+                 f"{year} California credit reduction. The base FUTA rate is 0.6% on the first $7,000 "
+                 "($42 per employee) before any reduction.")
+    text += f" These are {year} rates."
     return _result(base, text, calc, "employer_payroll_cost", amount=calc["annual_wages"],
                    tax=calc["employer_cost_total"])
 

@@ -28,6 +28,9 @@ ITEMS = [
     ("core", "futa-credit-reduction", "California FUTA credit reduction", "partial", "employer_futa",
      "2022-2025 final (DOL). 2026 is preliminary (1.5%, up to 5.3% with BCR add-on) until DOL sets it Nov 10, 2026: "
      "REFRESH ca_futa_credit_reductions after that date."),
+    ("core", "rates-2027", "2027 UI/ETT/SDI rates (SDI 1.4%, F+, $7,000)", "partial", "employer_payroll_cost",
+     "Loaded from EDD's rates page 2026-11-01. 2027 FUTA reduction, supplemental rates, penalty, deposit "
+     "rules and due dates are not published yet: add with the new DE 44 edition (expected January)."),
     ("deposits", "deposit-schedule", "California PIT/SDI deposit schedule from federal schedule + accumulated PIT",
      "built", "employer_deposit_schedule", "Includes next-day, semi-weekly, monthly, quarterly due dates."),
     ("deposits", "holidays", "Legal-holiday due-date extensions", "deferred", None,

@@ -66,6 +66,13 @@ POSITIVE = [
     ("How is my UI rate determined by experience rating?", "employer_ui_rate_info", "Schedule F+"),
     ("My UI reserve account balance is $60,000 and average base payroll is $200,000 in 2021, UI rate?",
      "employer_ui_rate_unsupported", "2026 and 2027"),
+    # 2027: same UI/ETT ($245 each, 3 -> $735), SDI 1.4% x 50,000 = $700 each ; no FUTA figure yet
+    ("I'm an employer with 3 employees each paid $50,000 a year. What UI and ETT tax do I owe in 2027?",
+     "employer_payroll_cost", "$700.00 per employee"),
+    ("I'm an employer with 3 employees each paid $50,000 a year. What UI and ETT tax do I owe in 2027?",
+     "employer_payroll_cost", "I don't have 2027 federal unemployment tax"),
+    ("I'm an employer with 3 employees each paid $50,000 in 2025. What UI and ETT tax do I owe?",
+     "employer_payroll_cost_unsupported_year", "2026 and 2027"),
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
