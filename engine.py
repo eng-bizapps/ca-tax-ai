@@ -9270,6 +9270,24 @@ def _property_disaster_extract(question: str):
     return purchase[0], purchase_year, value_before, value_after, damage_month, damage_year, pct_restored
 
 
+_DISASTER_COMPLETION_CUE_RE = re.compile(
+    r"(?:complet|finish|rebuil|restor|reconstruct|repair|done)", re.IGNORECASE)
+
+
+def _property_disaster_completion(question: str):
+    """(month, year) of a stated rebuild/repair COMPLETION date -- the second
+    'Month YYYY' in the question, when a completion cue word sits in the 70
+    characters before it (the first 'Month YYYY' is the damage date). None
+    when absent."""
+    matches = list(_SUPPLEMENTAL_MONTH_YEAR_RE.finditer(question))
+    if len(matches) < 2:
+        return None
+    m = matches[1]
+    if not _DISASTER_COMPLETION_CUE_RE.search(question[max(matches[0].end(), m.start() - 70):m.start()]):
+        return None
+    return _MONTH_NAMES[m.group(1).lower()], int(m.group(2))
+
+
 def _property_prop8_damage_destruction_answer(question: str, base: dict):
     """Property damaged/destroyed by disaster. With every needed fact stated
     (purchase price/year, damage month+year, value before and after the
@@ -9288,10 +9306,12 @@ def _property_prop8_damage_destruction_answer(question: str, base: dict):
         q = question.lower()
         homeowners_exemption = "homeowners exemption" in q or "homeowner's exemption" in q or "homeowner exemption" in q
         rate_info = _property_local_rate(question)
+        rate = rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE
+        completion = _property_disaster_completion(question)
         calc = property_tax.compute_disaster_relief_reassessment(
             purchase_price, purchase_year, value_before, value_after, damage_lien_year,
             property_tax.DEFAULT_LIEN_YEAR, pct_restored, homeowners_exemption,
-            total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
+            total_rate=rate, damage_month=damage_month)
         if calc:
             result = {**base, "status": "answered", "category": "property_tax_disaster_relief",
                       "taxable": calc["eligible"], "amount": calc["assessed_value"], "tax": calc["tax"],
@@ -9316,10 +9336,53 @@ def _property_prop8_damage_destruction_answer(question: str, base: dict):
                     f"${calc['taxable_value']:,.2f}{restored}, so estimated property tax is about "
                     f"${calc['tax']:,.2f} versus ${calc['undamaged_tax']:,.2f} undamaged ({calc['citation']}). "
                     "This is an estimate: your assessor determines the actual before/after values (separately "
-                    "for land and improvements), prorates the year of the damage, and on completion of "
-                    "rebuilding makes an additional assessment back up to your factored base year value; the "
+                    "for land and improvements), and on completion of rebuilding makes additional "
+                    "assessments back up to your factored base year value (give a completion month to "
+                    "see them); the "
                     "2% factor is the cap, not the actual CPI factor. "
                     f"{_property_local_rate_text(rate_info)}")
+                dy = calc.get("damage_year")
+                if dy and not calc["year_of_calamity"]:
+                    result["answer_text"] += (
+                        f" For the fiscal year of the damage itself (FY{dy['fiscal_year_label']}), R&TC "
+                        f"Sec. 170(e) prorates the tax by month -- {dy['months_before']} month(s) before the "
+                        f"damage month on the old value, {dy['months_after']} month(s) from the damage month "
+                        f"on the reduced value -- about ${dy['tax']:,.2f} instead of ${dy['undamaged_tax']:,.2f}, "
+                        f"i.e. relief of about ${dy['relief']:,.2f} for that year.")
+                elif dy:
+                    result["answer_text"] = (
+                        f"Assuming your county's Sec. 170 disaster-relief ordinance covers this event and you "
+                        f"timely applied: the damage falls in FY{dy['fiscal_year_label']}, so R&TC Sec. 170(e) "
+                        f"prorates that year's tax by month: {dy['months_before']} month(s) before the damage "
+                        f"month on your ${calc['roll_value']:,.2f} roll value, and {dy['months_after']} "
+                        f"month(s) from the damage month through June on the reduced value of "
+                        f"${calc['damaged_value']:,.2f} ({calc['pct_reduction']:.2%} reduction). Estimated "
+                        f"tax for the year is about ${calc['tax']:,.2f} versus ${calc['undamaged_tax']:,.2f} "
+                        f"undamaged ({calc['citation']}). This is an estimate: your assessor sets the actual "
+                        "before/after values (separately for land and improvements), the 2% factor is the "
+                        f"cap, not the actual CPI factor. {_property_local_rate_text(rate_info)} If the "
+                        "property is fully restored within the same fiscal year the tax is prorated around the "
+                        "completion date instead, which is not modeled.")
+                if completion:
+                    comp = property_tax.compute_disaster_completion_assessments(
+                        purchase_price, purchase_year, value_before, value_after, damage_lien_year,
+                        completion[0], completion[1], total_rate=rate)
+                    if comp and comp["eligible"] and comp["assessments"]:
+                        parts = "; ".join(
+                            f"#{a['number']} (against the {a['against']}, lien date {a['lien_year']}): "
+                            f"${a['new_taxable_value']:,.2f} - ${a['taxable_on_roll']:,.2f} = "
+                            f"${a['added_value']:,.2f} added value, about ${a['annual_tax_equivalent']:,.2f} "
+                            "of tax for a full fiscal year" for a in comp["assessments"])
+                        n = len(comp["assessments"])
+                        result["answer_text"] += (
+                            f" On completion in {_MONTH_LABELS[completion[0]]} {completion[1]}, R&TC Sec. "
+                            f"170(h) has the assessor make {'two additional assessments' if n == 2 else 'one additional assessment'}"
+                            f" ({'completed January-May: one against the current roll, one against the roll being prepared' if n == 2 else 'completed June-December: against the current roll'}): "
+                            f"{parts}. This assumes the restored property's value is at least your factored base "
+                            "year value (the new taxable value is the lesser of the two) and no partial-repair "
+                            "step-ups before completion. I could not confirm from the statute text whether the "
+                            "additional assessments are billed prorated by month, so the tax figures are full-"
+                            "year equivalents -- the actual bill may be a prorated part of them.")
             return result
     result = {**base, "status": "needs_review"}
     result["answer_text"] = (

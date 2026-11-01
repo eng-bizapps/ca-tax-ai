@@ -286,7 +286,8 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
                                           target_lien_year: int = DEFAULT_LIEN_YEAR,
                                           pct_restored: float = 0.0,
                                           homeowners_exemption: bool = False,
-                                          total_rate: float = PROP13_BASE_RATE):
+                                          total_rate: float = PROP13_BASE_RATE,
+                                          damage_month: int = None):
     """R&TC Sec. 170 disaster-relief reassessment (read directly from
     leginfo, not a secondary source), for a county whose board of
     supervisors has adopted a Sec. 170 ordinance (BOE's disaster-relief page
@@ -313,12 +314,25 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
     undamaged taxable value; the caller passes the exact-TRA or county-
     average combined rate from compute_local_rate when it has one.
 
-    NOT modeled: the damage-year proration of Sec. 170(e) (so target_lien_year
-    must be after damage_lien_year, else None), land/improvement/personal
-    property separate percentages (one blended percentage is used), the
-    additional assessments on completion (170(h)), the Sec. 70(c) new-
-    construction exclusion, the 5-year (8 for LA/Ventura 2025 fires)
-    rebuild-window.
+    damage_month (1-12, optional) enables the Sec. 170(e) damage-year
+    proration. The fiscal year is July-June. The tax for the fiscal year of
+    the calamity (the one whose lien year is damage_lien_year) is the sum of
+    (1) the tax on the roll value prorated by the months of that fiscal year
+    BEFORE the month of the calamity and (2) the tax on the reduced value
+    prorated by the months FROM the month of the calamity through June
+    (the calamity month counts on the reduced side -- BOE: "from the first
+    of the month in which the damage occurred"). Both sides use the rate in
+    effect (total_rate), per 170(e). The result's "damage_year" holds that
+    figure; and with damage_month, target_lien_year == damage_lien_year is
+    allowed and returns that prorated tax as "tax" (the year-of-calamity
+    case). A restoration percentage in the year of calamity is refused (None):
+    the statute prorates that year around the completion date, which this
+    function is not given. For completion in a LATER year, see
+    compute_disaster_completion_assessments (170(h)).
+
+    NOT modeled: land/improvement/personal property separate percentages
+    (one blended percentage is used), the Sec. 70(c) new-construction
+    exclusion, and the 5-year (8 for LA/Ventura 2025 fires) rebuild-window.
 
     Returns {"eligible": False, ...} when the loss is under $10,000; None for
     unusable inputs."""
@@ -328,9 +342,16 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
         return None
     if damage_lien_year is None or damage_lien_year < purchase_year:
         return None
-    if target_lien_year is None or target_lien_year <= damage_lien_year:
+    if target_lien_year is None:
+        return None
+    year_of_calamity = (damage_month is not None and target_lien_year == damage_lien_year)
+    if target_lien_year <= damage_lien_year and not year_of_calamity:
+        return None
+    if damage_month is not None and not 1 <= damage_month <= 12:
         return None
     if not 0.0 <= pct_restored <= 1.0:
+        return None
+    if year_of_calamity and pct_restored > 0:
         return None
     loss = value_before - value_after
     out = {"purchase_price": purchase_price, "purchase_year": purchase_year,
@@ -362,6 +383,102 @@ def compute_disaster_relief_reassessment(purchase_price: float, purchase_year: i
     out["total_rate"] = total_rate
     out["tax"] = round(total_rate * assessed, 2)
     out["undamaged_tax"] = round(total_rate * max(0.0, fbyv_at_target - exemption_applied), 2)
+    out["year_of_calamity"] = year_of_calamity
+    out["damage_year"] = None
+    if damage_month is not None and out["eligible"]:
+        months_before = damage_month - 7 if damage_month >= 7 else damage_month + 5
+        months_after = 12 - months_before
+        v_before = max(0.0, out["roll_value"] - exemption_applied)
+        v_after = max(0.0, out["damaged_value"] - exemption_applied)
+        dy_tax = total_rate * (v_before * months_before / 12 + v_after * months_after / 12)
+        dy_undamaged = total_rate * v_before
+        out["damage_year"] = {
+            "lien_year": damage_lien_year,
+            "fiscal_year_label": f"{damage_lien_year}-{str(damage_lien_year + 1)[-2:]}",
+            "months_before": months_before, "months_after": months_after,
+            "tax": round(dy_tax, 2), "undamaged_tax": round(dy_undamaged, 2),
+            "relief": round(dy_undamaged - dy_tax, 2),
+        }
+        if year_of_calamity:
+            out["taxable_value"] = out["damaged_value"]
+            out["assessed_value"] = round(v_after, 2)
+            out["tax"] = out["damage_year"]["tax"]
+            out["undamaged_tax"] = out["damage_year"]["undamaged_tax"]
+    return out
+
+
+def compute_disaster_completion_assessments(purchase_price: float, purchase_year: int,
+                                             value_before: float, value_after: float,
+                                             damage_lien_year: int,
+                                             completion_month: int, completion_year: int,
+                                             total_rate: float = PROP13_BASE_RATE):
+    """R&TC Sec. 170(h) additional assessments when damaged property is
+    fully restored, repaired or reconstructed (read from a statute summary
+    cross-checked against BOE's page, NOT the verbatim leginfo text, which
+    this environment could not fetch):
+
+      new_taxable_value(L) = the lesser of full cash value or factored base
+                             year value on the lien date L -- the model uses
+                             the factored base year value (purchase_price *
+                             1.02**(L - purchase_year)), i.e. it assumes the
+                             restored full cash value is not below it
+      taxable_on_roll(L)   = damaged value compounded at 2%/year to L
+                             ((g)); NO partial-restoration step-ups before
+                             completion are assumed
+      completed Jan 1 - May 31 (month 1-5) -> TWO additional assessments:
+          #1 = new_taxable_value(Lc)   - taxable_on_roll(Lc)    [current roll]
+          #2 = new_taxable_value(Lc+1) - taxable_on_roll(Lc+1)  [roll being prepared]
+      completed Jun 1 - Dec 31 (month 6-12) -> ONE:  #1 only
+      where Lc is the lien year of the roll in effect at completion (month
+      7-12 = completion_year, month 1-6 = completion_year - 1).
+
+    Returns the VALUE added by each assessment and the tax on it for a FULL
+    fiscal year ("annual_tax_equivalent" = total_rate * value). The statute
+    summary does not state that the additional assessments are prorated by
+    months (R&TC 75.41 appears only in 170(e)) and I could not verify how the
+    assessor bills them, so no proration is applied: the caller must
+    disclose that the actual bill may be a prorated part of that figure.
+    The Homeowners' Exemption nets out of both sides of each difference and
+    is not modeled here.
+
+    Returns {"eligible": False, ...} when the loss is under $10,000 (no
+    relief was ever granted, so nothing to add back); None for unusable
+    inputs or a completion before the damage."""
+    if not purchase_price or purchase_price <= 0 or purchase_year is None:
+        return None
+    if value_before is None or value_before <= 0 or value_after is None or not 0 <= value_after <= value_before:
+        return None
+    if damage_lien_year is None or damage_lien_year < purchase_year:
+        return None
+    if completion_month is None or not 1 <= completion_month <= 12 or completion_year is None:
+        return None
+    lc = completion_year if completion_month >= 7 else completion_year - 1
+    if lc < damage_lien_year:
+        return None
+    loss = value_before - value_after
+    out = {"loss": round(loss, 2), "completion_month": completion_month,
+           "completion_year": completion_year, "current_roll_lien_year": lc,
+           "total_rate": total_rate, "citation": DISASTER_RELIEF_CITATION,
+           "source_url": DISASTER_RELIEF_SOURCE_URL}
+    if loss < DISASTER_RELIEF_MIN_LOSS:
+        out.update(eligible=False, assessments=[])
+        return out
+    fbyv_at_damage = purchase_price * (1 + PROP13_INFLATION_CAP_RATE) ** (damage_lien_year - purchase_year)
+    roll_value = min(fbyv_at_damage, value_before)
+    damaged_value = roll_value * (1 - loss / value_before)
+    rolls = [lc] + ([lc + 1] if completion_month <= 5 else [])
+    assessments = []
+    for i, lien in enumerate(rolls):
+        new_taxable = purchase_price * (1 + PROP13_INFLATION_CAP_RATE) ** (lien - purchase_year)
+        on_roll = damaged_value * (1 + PROP13_INFLATION_CAP_RATE) ** (lien - damage_lien_year)
+        added = max(0.0, new_taxable - on_roll)
+        assessments.append({
+            "number": i + 1, "against": "current roll" if i == 0 else "roll being prepared",
+            "lien_year": lien, "new_taxable_value": round(new_taxable, 2),
+            "taxable_on_roll": round(on_roll, 2), "added_value": round(added, 2),
+            "annual_tax_equivalent": round(total_rate * added, 2)})
+    out.update(eligible=True, assessments=assessments,
+               enrolled_next_lien_value=assessments[-1]["new_taxable_value"])
     return out
 
 

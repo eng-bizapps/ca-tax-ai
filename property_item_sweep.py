@@ -408,6 +408,15 @@ ITEMS = [
     ("In March 2026, there was a change of ownership in Santa Clara County TRA 017-030. The new base year value is $500,000 and the prior taxable value was $200,000. What's my supplemental assessment?",
      {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 946.05}),
 
+    # Sec. 170(e) year-of-calamity proration: damaged Aug 2026 (FY2026-27 roll) -> 1 month on
+    # the old 621,687.15 roll value + 11 months on the reduced 233,132.68 at 1%:
+    # 6,216.87/12 + 2,331.33 x 11/12 = 518.07 + 2,137.05 = 2,655.12
+    ("I bought my house for $500,000 in 2015. It was damaged in August 2026 -- worth $800,000 before the fire and $300,000 after. What is my assessed value and tax?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 2655.12}),
+    # Sec. 170(h) completion stated (Mar 2027): primary tax unchanged, answer adds the two additional assessments
+    ("I bought my house for $500,000 in 2015 in Sacramento County TRA 07-090. It was damaged in January 2025 -- worth $800,000 before the fire and $300,000 after. Rebuilding will be completed in March 2027. What is my assessed value and tax?",
+     {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief", "tax": 2437.87}),
+
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)
     ("can I use the parent-child exclusion to avoid reassessment",
