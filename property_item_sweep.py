@@ -388,6 +388,26 @@ ITEMS = [
      {"status": "answered", "domain": "property", "category": "property_tax_disaster_relief",
       "tax": 2437.87}),
 
+    # DV exemption / Prop 19 / parent-child / supplemental composed with local rates
+    # DV, Santa Clara 017-030: assessed 289,090.40 x 1.2614% = 3,646.59
+    ("I am a disabled veteran. I bought my house for $500,000 in 2020 in Santa Clara County TRA 017-030, and my household income is $50,000. What is my 2025 California property tax?",
+     {"status": "answered", "domain": "property", "category": "property_tax_dv_composed", "tax": 3646.59}),
+    # DV, no TRA -> Alameda county average 1.2294%: 376,742.40 x 1.2294% = 4,631.67
+    ("I am a disabled veteran. I bought my house for $500,000 in 2020 in Alameda County. What is my 2025 California property tax?",
+     {"status": "answered", "domain": "property", "category": "property_tax_dv_composed", "tax": 4631.67}),
+    # Prop 19, Sacramento 07-090: taxable 100,000 + (600,000 - 420,000) = 280,000 x 1.0457% = 2,927.96
+    ("I am 55 years old. My original adjusted base year value is $100,000, my original full cash value is $400,000, and I am buying a replacement home in Sacramento County TRA 07-090 within 1 year at a full cash value of $600,000. What is my new taxable value under Prop 19?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop19_transfer", "tax": 2927.96}),
+    # Prop 19 naming two counties -> ambiguous, stays at the 1% base: 280,000 x 1% = 2,800.00
+    ("I am 55 years old. I am selling in Alameda County. My original adjusted base year value is $100,000, my original full cash value is $400,000, and I am buying a replacement home in Marin County within 1 year at a full cash value of $600,000. What is my new taxable value under Prop 19?",
+     {"status": "answered", "domain": "property", "category": "property_tax_prop19_transfer", "tax": 2800.00}),
+    # parent-child, Santa Clara 017-030: 355,414 x 1.2614% = 4,483.19
+    ("My daughter moved into the family home in Santa Clara County TRA 017-030 within a year of the transfer and filed for the homeowners exemption within a year. The old base year value is $200,000 and the full cash value is $1,400,000. Do I qualify for the parent-child exclusion?",
+     {"status": "answered", "domain": "property", "category": "property_tax_parent_child_exclusion", "tax": 4483.19}),
+    # supplemental, Santa Clara 017-030, March 2026: 300,000 x 0.25 = 75,000 x 1.2614% = 946.05
+    ("In March 2026, there was a change of ownership in Santa Clara County TRA 017-030. The new base year value is $500,000 and the prior taxable value was $200,000. What's my supplemental assessment?",
+     {"status": "answered", "domain": "property", "category": "property_tax_supplemental_assessment", "tax": 946.05}),
+
     # zero-personal-fact parent-child question -> informational fallback
     # (preserves this exact case's pre-existing needs_review outcome)
     ("can I use the parent-child exclusion to avoid reassessment",

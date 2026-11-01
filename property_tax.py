@@ -173,7 +173,8 @@ def compute_disabled_veterans_exemption_ca(conn, household_income: float = None,
 
 def compute_property_tax_with_dv_exemption(conn, purchase_price: float, purchase_year: int,
                                             household_income: float = None,
-                                            current_tax_year: int = DEFAULT_LIEN_YEAR):
+                                            current_tax_year: int = DEFAULT_LIEN_YEAR,
+                                            total_rate: float = PROP13_BASE_RATE):
     """Composes compute_property_tax_estimate with
     compute_disabled_veterans_exemption_ca: the factored base year value is
     computed identically to the core estimate, then the DV exemption
@@ -184,7 +185,11 @@ def compute_property_tax_with_dv_exemption(conn, purchase_price: float, purchase
     property") that these are mutually exclusive and DV always wins when
     eligible -- there is no case where a DV-eligible caller would want the
     smaller Homeowners' Exemption instead, so this function does not accept
-    a homeowners_exemption parameter at all."""
+    a homeowners_exemption parameter at all.
+
+    total_rate (default the 1% base) is the combined rate applied to the
+    post-exemption assessed value; the caller passes the exact-TRA or
+    county-average rate from compute_local_rate when it has one."""
     base = compute_property_tax_estimate(purchase_price, purchase_year, current_tax_year,
                                           homeowners_exemption=False)
     if not base:
@@ -193,8 +198,8 @@ def compute_property_tax_with_dv_exemption(conn, purchase_price: float, purchase
     if not dv:
         return None
     assessed_value = max(0.0, base["factored_base_year_value"] - dv["exemption"])
-    tax = round(PROP13_BASE_RATE * assessed_value, 2)
-    return {**base, "dv_exemption": dv["exemption"], "dv_tier": dv["tier"],
+    tax = round(total_rate * assessed_value, 2)
+    return {**base, "total_rate": total_rate, "dv_exemption": dv["exemption"], "dv_tier": dv["tier"],
             "income_unconfirmed": dv["income_unconfirmed"],
             "income_limit": dv["income_limit"], "low_income_exemption": dv["low_income_exemption"],
             "assessed_value": round(assessed_value, 2), "tax": tax,
@@ -379,7 +384,8 @@ def compute_prop19_base_year_transfer(original_byv: float, original_fcv: float,
                                        replacement_fcv: float,
                                        claimant_type: str = "age_55",
                                        transfer_number: int = 1,
-                                       replacement_timing: str = "within_1_year"):
+                                       replacement_timing: str = "within_1_year",
+                                       total_rate: float = PROP13_BASE_RATE):
     """BOE's own worked-example formula (R&TC 69.6), CONFIRMED via BOE's
     exact worked example (original FCV $400,000, FBYV $100,000,
     replacement purchased within 1 year at FCV $600,000 -> adjusted
@@ -430,8 +436,8 @@ def compute_prop19_base_year_transfer(original_byv: float, original_fcv: float,
     comparison_fcv = original_fcv * comparison_pct
     value_add = max(0.0, replacement_fcv - comparison_fcv)
     new_taxable_value = original_byv + value_add
-    tax = round(PROP13_BASE_RATE * new_taxable_value, 2)
-    return {"eligible": True, "claimant_type": claimant_type, "transfer_number": transfer_number,
+    tax = round(total_rate * new_taxable_value, 2)
+    return {"eligible": True, "total_rate": total_rate, "claimant_type": claimant_type, "transfer_number": transfer_number,
             "replacement_timing": replacement_timing, "comparison_pct": comparison_pct,
             "original_byv": original_byv, "original_fcv": original_fcv,
             "comparison_fcv": round(comparison_fcv, 2), "replacement_fcv": replacement_fcv,
@@ -453,7 +459,8 @@ PARENT_CHILD_EXCLUSION_CITATION = ("Rev. & Tax. Code Sec. 63.2; Cal. Const. Art.
 PARENT_CHILD_EXCLUSION_SOURCE_URL = "https://www.boe.ca.gov/prop19/"
 
 
-def compute_parent_child_exclusion_value(old_fbyv: float, fmv: float, pct_interest: float = 1.0):
+def compute_parent_child_exclusion_value(old_fbyv: float, fmv: float, pct_interest: float = 1.0,
+                                         total_rate: float = PROP13_BASE_RATE):
     """R&TC 63.2(d) value-cap formula for a Prop 19 parent-child (or
     grandparent-grandchild) transfer that has ALREADY been confirmed
     eligible -- see property_eligibility.detect_parent_child_exclusion_
@@ -499,9 +506,9 @@ def compute_parent_child_exclusion_value(old_fbyv: float, fmv: float, pct_intere
     excess = max(0.0, fmv - value_cap)
     new_taxable_value = old_fbyv + excess
     transferred_share_value = round(new_taxable_value * pct_interest, 2)
-    tax = round(PROP13_BASE_RATE * transferred_share_value, 2)
+    tax = round(total_rate * transferred_share_value, 2)
     return {
-        "old_fbyv": old_fbyv, "fmv": fmv, "pct_interest": pct_interest,
+        "total_rate": total_rate, "old_fbyv": old_fbyv, "fmv": fmv, "pct_interest": pct_interest,
         "value_cap": round(value_cap, 2), "reassessed": reassessed,
         "excess": round(excess, 2), "new_taxable_value": round(new_taxable_value, 2),
         "transferred_share_value": transferred_share_value, "tax": tax,
@@ -547,7 +554,8 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
                                      new_base_year_value: float,
                                      prior_taxable_value: float = None,
                                      event_type: str = "change_of_ownership",
-                                     ownership_pct: float = 1.0):
+                                     ownership_pct: float = 1.0,
+                                     total_rate: float = PROP13_BASE_RATE):
     """R&TC 75.11/75.41 bimodal supplemental-assessment proration.
 
     added_value = new_base_year_value - prior_taxable_value  (change of
@@ -581,11 +589,12 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
         Jan 1 lien date hasn't happened yet, so the following regular roll
         will already capture the new value on its own).
 
-    Tax rate is PROP13_BASE_RATE for both supplementals -- R&TC 75.41(a):
-    the SAME total ad valorem rate that would otherwise apply, no special
-    supplemental rate exists. (Same local-TRA-rate-gap disclosure as the
-    core Prop 13 estimate applies -- this only models the 1% constitutional
-    base; the caller's answer text must disclose that, not this function.)
+    Tax rate is total_rate for both supplementals -- R&TC 75.41(a): the SAME
+    total ad valorem rate that would otherwise apply, no special
+    supplemental rate exists. It defaults to the 1% constitutional base; the
+    caller passes the exact-TRA or county-average rate from
+    compute_local_rate when it has one, and its answer text must disclose
+    which rate was used.
 
     Returns None if event_month not in 1..12, new_base_year_value <= 0,
     event_type not recognized, ownership_pct outside (0, 1], or
@@ -612,7 +621,7 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
     bimodal = 1 <= event_month <= 5
 
     supplemental_1 = round(added_value * factor * ownership_pct, 2)
-    supplemental_1_tax = round(PROP13_BASE_RATE * supplemental_1, 2)
+    supplemental_1_tax = round(total_rate * supplemental_1, 2)
 
     supplemental_2 = None
     supplemental_2_tax = None
@@ -621,7 +630,7 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
     if bimodal:
         if ownership_pct == 1.0:
             supplemental_2 = round(added_value, 2)
-            supplemental_2_tax = round(PROP13_BASE_RATE * supplemental_2, 2)
+            supplemental_2_tax = round(total_rate * supplemental_2, 2)
             supplemental_count = 2
         else:
             partial_interest_second_supplemental_note = (
@@ -633,7 +642,7 @@ def compute_supplemental_assessment(event_month: int, event_year: int,
             )
 
     return {
-        "event_month": event_month, "event_year": event_year,
+        "total_rate": total_rate, "event_month": event_month, "event_year": event_year,
         "presumed_effective_month": presumed_month, "presumed_effective_year": presumed_year,
         "fiscal_year_start": fiscal_year_start,
         "fiscal_year_label": f"{fiscal_year_start}-{str(fiscal_year_start + 1)[-2:]}",

@@ -8346,11 +8346,28 @@ def _tra_coverage_note() -> str:
             "counties; every other county uses a county-wide average.")
 
 
+def _property_distinct_counties(question: str) -> set:
+    return {m.group(1).lower() for m in _CA_COUNTY_RE.finditer(question)}
+
+
+def _property_drop_tra_amounts(question: str, amounts: list) -> list:
+    """Remove a stated TRA number's phantom dollar amounts from an
+    (amount, start, end) list -- see _property_tra_span."""
+    tra_span = _property_tra_span(question)
+    if tra_span is None:
+        return amounts
+    return [(a, s, e) for a, s, e in amounts if e <= tra_span[1] or s >= tra_span[2]]
+
+
 def _property_local_rate(question: str):
-    """Local combined rate for a Prop 8 / Sec. 170 question that names a
+    """Local combined rate for a property-tax question that names a
     county (and optionally a TRA): exact-TRA rate if covered, else the
     county average, else None (the 1% base stays, as before). Returns the
-    property_tax.compute_local_rate dict or None."""
+    property_tax.compute_local_rate dict or None. Two or more different
+    counties named (e.g. a Prop 19 move between counties) is ambiguous
+    about which one's rate applies, so it returns None rather than guess."""
+    if len(_property_distinct_counties(question)) > 1:
+        return None
     county_match = _property_county_match(question)
     if county_match is None:
         return None
@@ -8363,8 +8380,12 @@ def _property_local_rate(question: str):
         return property_tax.compute_local_rate(conn, county, tra_number)
 
 
-def _property_local_rate_text(rate_info, calc_rate_applied: bool = True) -> str:
+def _property_local_rate_text(rate_info, question: str = None) -> str:
     """Answer-text sentence describing which rate was applied."""
+    if rate_info is None and question is not None and len(_property_distinct_counties(question)) > 1:
+        return ("Tax is shown at the 1% constitutional base rate only, because more than one county is "
+                "named; ask again naming just the county (and TRA) where the property is taxed to "
+                "include voter-approved local rates.")
     if rate_info is None:
         return ("Tax is shown at the 1% constitutional base rate only; name your county (and TRA) to "
                 "include voter-approved local rates.")
@@ -8579,7 +8600,7 @@ def _property_supplemental_extract(question: str):
     if pct_match is not None:
         ownership_pct, (pct_s, pct_e) = pct_match
         amounts = [(a, s, e) for a, s, e in amounts if e <= pct_s or s >= pct_e]
-    return month, year, event_type, ownership_pct, amounts
+    return month, year, event_type, ownership_pct, _property_drop_tra_amounts(question, amounts)
 
 
 def detect_supplemental_assessment_missing_fact(question: str) -> bool:
@@ -8836,8 +8857,9 @@ def _property_dv_composed_answer(question: str, base: dict):
     if not year_matches:
         return None
     year_spans = [m.span() for m in year_matches]
-    amounts = [(a, s, e) for a, s, e in _amounts(question)
-               if all(e <= ys or s >= ye for ys, ye in year_spans)]
+    amounts = _property_drop_tra_amounts(question, [
+        (a, s, e) for a, s, e in _amounts(question)
+        if all(e <= ys or s >= ye for ys, ye in year_spans)])
     purchase_match = _amount_near_anchor_edge(question, PROPERTY_PURCHASE_PRICE_ANCHOR_TERMS, amounts)
     if purchase_match is None:
         return None
@@ -8853,6 +8875,10 @@ def _property_dv_composed_answer(question: str, base: dict):
             conn, purchase_price, purchase_year, household_income, current_tax_year)
     if not calc:
         return None
+    rate_info = _property_local_rate(question)
+    if rate_info:
+        calc["total_rate"] = rate_info["total_rate"]
+        calc["tax"] = round(calc["total_rate"] * calc["assessed_value"], 2)
     result = {**base, "status": "answered", "category": "property_tax_dv_composed",
               "amount": calc["assessed_value"], "tax": calc["tax"],
               "citation": calc["citation"], "source_url": calc["source_url"]}
@@ -8868,7 +8894,7 @@ def _property_dv_composed_answer(question: str, base: dict):
         f"assessed value of ${calc['assessed_value']:,.2f} and an estimated property tax of about "
         f"${calc['tax']:,.2f} ({calc['citation']}). This compounds your purchase price at the FULL "
         "2%/year cap Proposition 13 allows -- a deliberate overestimate -- and is mutually exclusive "
-        "with the Homeowners' Exemption."
+        f"with the Homeowners' Exemption. {_property_local_rate_text(rate_info, question)}"
     )
     return result
 
@@ -9029,14 +9055,16 @@ def _property_prop19_transfer_answer(question: str, base: dict):
     # not hypothetical: without this strip, a genuine 3-figure question
     # produces a phantom 4th amount and silently fails the len(amounts)
     # check below.
-    amounts = [(a, s, e) for a, s, e in _amounts(question) if a != 19.0]
+    amounts = _property_drop_tra_amounts(question, [(a, s, e) for a, s, e in _amounts(question) if a != 19.0])
     amounts = _property_prop19_strip_age_phantoms(question, amounts)
     if len(amounts) != 3:
         return None
     original_byv, original_fcv, replacement_fcv = (a for a, _, _ in amounts)
+    rate_info = _property_local_rate(question)
     calc = property_tax.compute_prop19_base_year_transfer(
         original_byv, original_fcv, replacement_fcv, claimant_type=claimant_type,
-        transfer_number=transfer_number, replacement_timing=replacement_timing)
+        transfer_number=transfer_number, replacement_timing=replacement_timing,
+        total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
     if not calc:
         return None
     if not calc["eligible"]:
@@ -9078,7 +9106,7 @@ def _property_prop19_transfer_answer(question: str, base: dict):
         f"property tax of about ${calc['tax']:,.2f}. This assumes the replacement was purchased "
         f"{timing_label} -- a different timing bucket (before the sale = 100% comparison, within "
         "1 year = 105%, within 2 years = 110%) changes this figure; state the exact timing if "
-        "different."
+        f"different. {_property_local_rate_text(rate_info, question)}"
     )
     return result
 
@@ -9394,7 +9422,7 @@ def _property_parent_child_composed_answer(question: str, base: dict):
     composed_answer's own composed-before-narrower ordering requirement."""
     if property_eligibility.detect_parent_child_exclusion_qualifies(question) is not True:
         return None
-    amounts = _amounts(question)
+    amounts = _property_drop_tra_amounts(question, _amounts(question))
     year_spans = [m.span() for m in re.finditer(r"\b(19|20)\d{2}\b", question)]
     amounts = [(a, s, e) for a, s, e in amounts if all(e <= ys or s >= ye for ys, ye in year_spans)]
     pct_interest = 1.0
@@ -9410,7 +9438,10 @@ def _property_parent_child_composed_answer(question: str, base: dict):
     if fbyv_match is None:
         return None
     fmv, old_fbyv = fmv_match[0], fbyv_match[0]
-    calc = property_tax.compute_parent_child_exclusion_value(old_fbyv, fmv, pct_interest)
+    rate_info = _property_local_rate(question)
+    calc = property_tax.compute_parent_child_exclusion_value(
+        old_fbyv, fmv, pct_interest,
+        total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
     if not calc:
         return None
     result = {**base, "status": "answered", "category": "property_tax_parent_child_exclusion",
@@ -9427,7 +9458,7 @@ def _property_parent_child_composed_answer(question: str, base: dict):
             f"a new taxable value of ${calc['new_taxable_value']:,.2f} and an estimated property tax of "
             f"about ${calc['tax']:,.2f} ({calc['citation']}). The value cap is adjusted every 2 years -- "
             "confirm the current figure with your county assessor if this transfer is near a Feb 16 "
-            "adjustment date."
+            "adjustment date. " + _property_local_rate_text(rate_info, question)
         )
     else:
         result["answer_text"] = (
@@ -9436,7 +9467,8 @@ def _property_parent_child_composed_answer(question: str, base: dict):
             f"the value cap of ${calc['value_cap']:,.2f} (your old factored base year value of "
             f"${old_fbyv:,.2f} plus the current ${property_tax.PARENT_CHILD_EXCLUSION_VALUE_CAP:,.2f} "
             f"addition) -- so NO reassessment occurs at all; your base year value carries over "
-            f"unchanged at ${calc['new_taxable_value']:,.2f} ({calc['citation']})."
+            f"unchanged at ${calc['new_taxable_value']:,.2f} ({calc['citation']}). "
+            f"Estimated property tax is about ${calc['tax']:,.2f}. {_property_local_rate_text(rate_info, question)}"
         )
     return result
 
@@ -9586,8 +9618,10 @@ def _property_supplemental_assessment_answer(question: str, base: dict):
             return None
         new_base_year_value = new_value_match[0]
         prior_taxable_value = prior_match[0]
+    rate_info = _property_local_rate(question)
     calc = property_tax.compute_supplemental_assessment(
-        month, year, new_base_year_value, prior_taxable_value, event_type, ownership_pct)
+        month, year, new_base_year_value, prior_taxable_value, event_type, ownership_pct,
+        total_rate=rate_info["total_rate"] if rate_info else property_tax.PROP13_BASE_RATE)
     if not calc:
         return None
     presumed_label = f"{_MONTH_LABELS[calc['presumed_effective_month']]} {calc['presumed_effective_year']}"
@@ -9611,10 +9645,16 @@ def _property_supplemental_assessment_answer(question: str, base: dict):
         )
     if calc["partial_interest_second_supplemental_note"]:
         text += " " + calc["partial_interest_second_supplemental_note"]
+    if rate_info:
+        rate_sentence = (" " + _property_local_rate_text(rate_info, question)
+                         + " Supplemental bills use the same total rate as a regular bill (R&TC 75.41(a)).")
+    else:
+        rate_sentence = (" This uses the same 1% constitutional base rate as a regular bill and does NOT include "
+                         "any voter-approved local bonds or other add-ons specific to your tax rate area, which can "
+                         "add roughly 0.1% more on average statewide; name your county (and TRA) to include them.")
     text += (
-        " This uses the same 1% constitutional base rate as a regular bill and does NOT include "
-        "any voter-approved local bonds or other add-ons specific to your tax rate area, which can "
-        "add roughly 0.1% more on average statewide. Interspousal transfers, and transfers that "
+        rate_sentence +
+        " Interspousal transfers, and transfers that "
         "qualify for the Proposition 19 parent-child exclusion, never trigger a supplemental "
         "assessment at all."
     )
