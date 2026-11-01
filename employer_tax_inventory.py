@@ -43,15 +43,20 @@ ITEMS = [
     ("penalties", "filing-penalties", "DE 34 / DE 542 ($24, $490 intentional), DE 9C ($20 per wage item), paper filing, W-2",
      "built", "employer_filing_penalty",
      "From EDD's DE 34 form, DE 542B guide and DE 44. Maximums EDD may assess; waiver for good cause noted."),
-    ("info", "wages-subject", "Which payments are subject wages (DE 231TP)", "deferred", None, "Not researched."),
+    ("info", "wages-subject", "Which payments are subject wages (DE 231TP)", "partial", "employer_wages_subject",
+     "33 curated payment types from the Rev. 1 (6-16) sheet, cross-checked with DE 44 (4-26). Rows whose law changed "
+     "(moving expenses, HSA, domestic-partner taxes, adult-child coverage) are omitted; gift cards answered as a "
+     "hedged needs_review."),
     ("core", "vui", "Voluntary UI contributions to lower the UI rate", "deferred", None, "Mentioned in DE 231Z; not researched."),
     ("core", "reimbursable", "Reimbursable method for nonprofits and public entities", "deferred", None,
      "DE 44 describes it; not modeled."),
     ("core", "household", "Household employers (Schedule H / DE 3HW)", "deferred", None, "Not researched."),
     ("benefits", "edd-benefits", "Worker-side UI / disability / paid-family-leave benefit amounts", "deferred", None,
      "Different audience from employers; could be its own area."),
-    ("info", "registration", "Registering as an employer (DE 1), >$100 wages in a quarter", "deferred", None,
-     "Informational redirect only."),
+    ("info", "registration", "Registering as an employer (DE 1), >$100 wages in a quarter", "built",
+     "employer_registration",
+     "Subject-employer test (over $100), 15-day deadline from the payment date, forms by employer type, first-"
+     "steps list (DE 34, DE 542, DE 4, DE 88, DE 9/9C). Successor-employer and household specifics not detailed."),
     ("info", "worker-class", "ABC test / worker classification", "out_of_scope", None, "Fact-specific legal question."),
 ]
 

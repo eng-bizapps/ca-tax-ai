@@ -145,6 +145,31 @@ def _next_business_day(d):
     return d
 
 
+def get_rule(conn, rule_key):
+    row = conn.execute("SELECT value FROM ca_employer_rules WHERE rule_key=%s", (rule_key,)).fetchone()
+    return float(row[0]) if row else None
+
+
+def compute_subject_employer(conn, quarterly_wages, wage_date=None):
+    """Subject-employer test and registration deadline (DE 44): you become a
+    subject employer when you pay wages OVER $100 in any calendar quarter, and
+    must register within 15 days of paying them. wage_date (datetime.date) is
+    the date those wages were paid; the deadline is simply that date plus 15
+    days -- weekend/holiday extension is NOT applied because DE 44 does not say
+    one applies to registration. Returns None for a negative amount or missing
+    rules."""
+    threshold = get_rule(conn, "subject_employer_quarterly_wages")
+    days = get_rule(conn, "register_within_days")
+    if quarterly_wages is None or quarterly_wages < 0 or threshold is None or days is None:
+        return None
+    subject = quarterly_wages > threshold
+    out = {"quarterly_wages": quarterly_wages, "threshold": threshold, "subject_employer": subject,
+           "register_within_days": int(days), "register_by": None, "citation": CITATION, "source_url": SOURCE_URL}
+    if subject and wage_date is not None:
+        out["register_by"] = wage_date + datetime.timedelta(days=int(days))
+    return out
+
+
 def _state_holiday(conn, d):
     row = conn.execute("SELECT name FROM ca_holidays WHERE holiday_date=%s AND kind='state'", (d,)).fetchone()
     return row[0] if row else None

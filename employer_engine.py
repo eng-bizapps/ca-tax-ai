@@ -13,6 +13,7 @@ import datetime
 import re
 
 import employer_db
+import employer_payment_types as ept
 import employer_payroll as ep
 
 _MONTHS = {
@@ -30,8 +31,20 @@ _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent)")
 _AMOUNT_RE = re.compile(r"\$\s*([0-9][0-9,]*(?:\.\d+)?)\s*(k\b)?|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)")
 
 
+_ACRONYMS = frozenset({"edd", "ett", "sdi", "pit", "ui", "sui"})
+
+
 def _has(q, *terms):
-    return any(t in q for t in terms)
+    """Any term appears in q. Acronyms (edd, ett, sdi, pit, ...) must match as whole words: as
+    substrings they hide inside ordinary words ('wedding' contains 'edd', 'typesetting' contains
+    'ett'). Other terms stay substring matches so stems like 'fail' still catch 'failed'."""
+    for t in terms:
+        if t in _ACRONYMS:
+            if re.search(r"\b" + t + r"\b", q):
+                return True
+        elif t in q:
+            return True
+    return False
 
 
 def _word(q, *words):
@@ -151,8 +164,30 @@ def detect_filing_penalty_signal(q):
                                "did not report", "never reported", "not reported", "how much"))
 
 
+_PAYROLL_CTX_TERMS = ("sdi", "ett", "unemployment insurance", "disability insurance", "payroll tax", "edd",
+                      "de 9c", "subject wage", "subject to withholding", "pit wage", "paid family leave")
+
+
+def detect_wages_signal(q):
+    """Which payments are subject wages. Needs payroll-tax wording so that an
+    employee asking 'is my bonus taxable?' (an income-tax question) is not
+    intercepted."""
+    q = q.lower()
+    payroll = _has(q, *_PAYROLL_CTX_TERMS) or _word(q, "ui")
+    return payroll and _has(q, "subject", "taxable", "withhold", "wages", "report", "count as", "include")
+
+
+def detect_registration_signal(q):
+    q = q.lower()
+    if _has(q, "seller", "permit", "cdtfa", "sales tax", "secretary of state", "business license", "dmv", "trademark"):
+        return False
+    return (_has(q, "register", "registration", "payroll tax account", "employer account", "subject employer",
+                 "employer payroll tax account number")
+            and _has(q, "employer", "edd", "employee", "payroll", "hire", "hiring", "wages"))
+
+
 def has_any_signal(question):
-    for check in (detect_filing_penalty_signal, detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
+    for check in (detect_wages_signal, detect_registration_signal, detect_filing_penalty_signal, detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
         try:
             if check(question):
                 return True
@@ -464,6 +499,94 @@ def _supplemental_answer(question, base):
     return _result(base, text, calc, "employer_supplemental_withholding", amount=amount, tax=calc["withholding"])
 
 
+_TREATMENT_WORDS = {"subject": "subject", "not subject": "not subject", "reportable": "reportable",
+                    "not reportable": "not reportable", "conditional": "depends on the facts (see below)"}
+
+
+def _wages_answer(question, base):
+    if not detect_wages_signal(question):
+        return None
+    with employer_db.get_conn() as conn:
+        rows = ept.find_payment_types(conn, question)
+    if not rows:
+        if _has(question.lower(), "gift card", "gift certificate", "gift cards"):
+            text = ("EDD's Types of Payments sheet (DE 231TP) excludes only gifts of nominal value given as an "
+                    "expression of goodwill, not based on pay or length or degree of service. It does not address gift "
+                    "cards. Because wages are all compensation for services, including the cash value of noncash "
+                    "payments, and a gift card is a cash equivalent, expect it to be treated as wages subject to UI, "
+                    "ETT, SDI and PIT withholding unless EDD says otherwise -- this is my reading, not an EDD "
+                    "statement, so confirm with the Taxpayer Assistance Center (1-888-745-3886) before relying on it. "
+                    "(EDD DE 231TP, Rev. 1, 6-16; DE 44 Rev. 52 (4-26))")
+            return _result(base, text, None, "employer_wages_gift_card", status="needs_review")
+        if _has(question.lower(), "what are wages", "what counts as wages", "which payments", "types of payments",
+                "what payments", "what is subject", "subject wages", "what is considered wages"):
+            text = ("Wages are all compensation for an employee's personal services, whether paid by check, cash, "
+                    "electronic payment or the reasonable cash value of noncash payments such as meals and lodging; "
+                    "bonuses, overtime, sales awards, commissions and vacation pay are included. Subject wages (the "
+                    "full amount, not just the first $7,000) are what you report on the DE 9C, and some payments are "
+                    "excluded by statute. Subject wages and PIT wages are usually the same, but differ for employee "
+                    "salary-reduction contributions to a qualified retirement plan (subject, not PIT wages), "
+                    "family-employee wages (PIT wages only) and church employees. Ask me about a specific payment "
+                    "(for example tips, severance, a 401(k) deferral, stock options or expense reimbursements) and "
+                    "I'll give the treatment for UI/ETT, SDI and PIT, or see EDD's Types of Payments sheet "
+                    "(DE 231TP). (EDD DE 44 Employer's Guide, Rev. 52 (4-26))")
+            return _result(base, text, None, "employer_wages_subject_info", status="needs_review")
+        return None
+    top = rows[:3]
+    parts = []
+    for r in top:
+        t = lambda v: _TREATMENT_WORDS.get(v, v)
+        parts.append(
+            f"{r['label']}: UI and ETT {t(r['ui_ett'])}; SDI {t(r['sdi'])}; PIT withholding {t(r['pit_withholding'])}; "
+            f"PIT wages {t(r['pit_wages'])} ({r['code_refs']})."
+            + (f" {r['conditions']}" if r['conditions'] else ""))
+    text = " ".join(parts)
+    text += (f" This follows EDD's Types of Payments sheet (DE 231TP, Rev. 1, June 2016) and agrees with the 2026 "
+             "Employer's Guide (DE 44). The sheet is an older edition and how a particular payment is treated can "
+             "turn on its facts, so for a large or unusual payment confirm with EDD's Taxpayer Assistance Center "
+             "(1-888-745-3886).")
+    return _result(base, text, {"citation": top[0]["citation"], "source_url": top[0]["source_url"]},
+                   "employer_wages_subject", status="answered")
+
+
+def _registration_answer(question, base):
+    if not detect_registration_signal(question):
+        return None
+    amounts = [a for a in _amounts(question)]
+    dates = _dates(question)
+    wages = amounts[0][0] if amounts else None
+    wage_date = dates[0][0] if dates else None
+    calc = None
+    if wages is not None:
+        with employer_db.get_conn() as conn:
+            calc = ep.compute_subject_employer(conn, wages, wage_date)
+    text = ("You become a subject employer when you pay wages of over $100 in any calendar quarter, and you must then "
+            "register with EDD within 15 days of paying those wages. Register online for an employer payroll tax "
+            "account number at e-Services for Business (or send the paper form for your type of employer: DE 1 "
+            "commercial, DE 1HW household, DE 1AG agriculture, DE 1GS government and schools, DE 1NP nonprofits, DE 1P "
+            "if you only withhold personal income tax). EDD assigns an eight-digit account number to put on every "
+            "deposit, return and letter. Once registered: report each new or rehired employee on a DE 34 within 20 "
+            "calendar days of the start-of-work date (a rehire after a separation of 60 consecutive days or more counts "
+            "as new), report an independent contractor on a DE 542 within 20 days of paying or contracting for $600 or "
+            "more, give employees the DE 4 and EDD's benefit pamphlets, post the employee notice (DE 1857A), deposit "
+            "with a DE 88, and file the DE 9 and DE 9C every quarter, even a quarter with no payroll.")
+    if calc:
+        if calc["subject_employer"]:
+            text = (f"Yes: ${calc['quarterly_wages']:,.2f} of wages in a quarter is over the $100 threshold, so you are "
+                    "a subject employer. " + text)
+            if calc["register_by"]:
+                text += (f" Counting 15 days from {wage_date:%B %d, %Y}, the registration deadline is "
+                         f"{calc['register_by']:%B %d, %Y}; I have not extended it for a weekend or holiday, so register "
+                         "before it.")
+        else:
+            text = (f"Not yet: ${calc['quarterly_wages']:,.2f} of wages in a quarter does not exceed the $100 threshold, "
+                    "so you are not a subject employer for that quarter. " + text)
+    text += (" If you are buying an existing business, you may be a successor employer. A household employer "
+             "(someone paying workers in their home) follows the same $100 rule with the household forms. "
+             f"({ep.CITATION})")
+    return _result(base, text, calc, "employer_registration", amount=wages)
+
+
 def _filing_penalty_answer(question, base):
     if not detect_filing_penalty_signal(question):
         return None
@@ -572,7 +695,7 @@ def _late_answer(question, base):
 
 def answer_employer(question):
     base = _base()
-    for fn in (_filing_penalty_answer, _late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
+    for fn in (_wages_answer, _registration_answer, _filing_penalty_answer, _late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
         result = fn(question, base)
         if result:
             return result

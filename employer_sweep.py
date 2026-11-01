@@ -94,6 +94,30 @@ POSITIVE = [
     ("What's the penalty for filing my DE 9 on paper?", "employer_filing_penalty", "$50.00"),
     ("What is the penalty for a paper DE 88 deposit of $2,000?", "employer_filing_penalty", "$300.00"),
     ("What is the penalty for a late DE 9 return?", "employer_filing_penalty_info", "15% of the tax"),
+    # DE 231TP rows (UI+ETT, SDI, PIT withholding, PIT wages)
+    ("As an employer, is a bonus subject to SDI and UI?", "employer_wages_subject",
+     "UI and ETT subject; SDI subject; PIT withholding subject; PIT wages reportable"),
+    ("Is severance pay subject to SDI?", "employer_wages_subject", "unless the conditions of CUIC 1265"),
+    ("Is accrued vacation paid out at termination subject to SDI?", "employer_wages_subject",
+     "UI and ETT not subject; SDI not subject; PIT withholding subject"),
+    ("Are 401(k) deferrals subject to UI and PIT wages on the DE 9C?", "employer_wages_subject",
+     "PIT withholding not subject; PIT wages not reportable"),
+    ("Are tips subject to payroll taxes for my restaurant employees? EDD", "employer_wages_subject",
+     "$20 or more in a month"),
+    ("Are wages I pay my spouse subject to UI and SDI under EDD rules?", "employer_wages_subject",
+     "Not subject to UI/ETT or SDI, but subject to PIT"),
+    ("Are meals I give employees subject to payroll tax? EDD", "employer_wages_subject", "$15.85"),
+    ("Is a small gift to employees subject to payroll tax for EDD?", "employer_wages_subject",
+     "UI and ETT not subject; SDI not subject; PIT withholding not subject"),
+    ("Is a gift card to employees subject to payroll tax?", "employer_wages_gift_card", "does not address gift cards"),
+    ("What payments are subject wages for EDD?", "employer_wages_subject_info", "Types of Payments sheet"),
+    # registration: over $100 (not $100 itself); deadline = payment date + 15 days
+    ("Do I need to register with EDD? I paid my first employee $150 on March 3, 2026.", "employer_registration",
+     "March 18, 2026"),
+    ("Do I need to register as an employer if I paid $100 in wages this quarter?", "employer_registration", "Not yet"),
+    ("Do I need to register as an employer with EDD if I paid $101 in wages this quarter?", "employer_registration",
+     "Yes: $101.00"),
+    ("When do I have to register as an employer with EDD?", "employer_registration", "within 15 days"),
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
@@ -117,6 +141,12 @@ POSITIVE = [
 ]
 
 NEGATIVE = [
+    "Is a wedding video taxable in California?",
+    "Are typesetting and typography services taxable?",
+    "Is my bonus taxable?",
+    "Are tips taxable income on my tax return?",
+    "How do I register for a seller's permit?",
+    "How do I register my car with the DMV?",
     "My new employee is always late to work, is there a penalty?",
     "The new employee form W-4 is late, what do I do?",
     "How are unemployment benefits calculated for a laid-off worker?",
