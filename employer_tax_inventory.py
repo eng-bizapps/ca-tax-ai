@@ -18,8 +18,11 @@ ITEMS = [
      "New-employer 3.4% default or a stated experience rate (1.5%-6.2%); ETT 0.1%."),
     ("core", "sdi", "SDI 1.3% withheld on all wages, no cap", "built", "employer_payroll_cost",
      "Shown as the employee's cost the employer remits."),
-    ("core", "ui-rate-assignment", "Experience-rating (reserve account) formula / Schedule F+ table", "deferred", None,
-     "DE 231Z not fetched; the user supplies their rate."),
+    ("core", "ui-rate-assignment", "Experience-rated UI rate from reserve ratio (Schedules AA-F+)", "built",
+     "employer_ui_rate", "DE 231Z table (38 bands x 8 schedules, F+ = F x 1.15 verified); F+ for 2026 and 2027. "
+     "Reserve transfers/cancellations and EDD's ratio rounding not modeled."),
+    ("core", "ui-schedule-selection", "Which schedule EDD puts in effect (UI Fund balance ratio)", "deferred", None,
+     "Schedule per year is stored (F+ 2026-2027); the Sept 30 fund-balance test is not computed."),
     ("core", "futa", "Federal FUTA 6.0% less 5.4% credit on first $7,000", "built", "employer_futa",
      "2025 and 2026; assumes state UI paid on time (late payments reduce the credit)."),
     ("core", "futa-credit-reduction", "California FUTA credit reduction", "partial", "employer_futa",

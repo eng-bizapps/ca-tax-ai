@@ -127,8 +127,15 @@ def detect_futa_signal(q):
         "credit reduction" in q and _has(q, "unemployment", "employer", "940"))
 
 
+def detect_ui_rate_signal(q):
+    q = q.lower()
+    ui = _has(q, "unemployment", "edd", "de 2088", "experience rat") or _word(q, "ui")
+    return ui and (_has(q, "reserve account", "reserve ratio", "reserve balance", "experience rating",
+                        "experience-rated", "de 2088", "rate schedule", "schedule f"))
+
+
 def has_any_signal(question):
-    for check in (detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
+    for check in (detect_ui_rate_signal, detect_futa_signal, detect_cost_signal, detect_deposit_signal, detect_supplemental_signal, detect_late_signal):
         try:
             if check(question):
                 return True
@@ -167,6 +174,83 @@ def _futa_text(f, include_intro=True):
              "deposit; FUTA is deposited quarterly once you owe more than $500. The full credit assumes you pay "
              "your state UI on time -- late state payments reduce it.")
     return text
+
+
+def _ui_rate_answer(question, base):
+    if not detect_ui_rate_signal(question):
+        return None
+    q = question.lower()
+    year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
+    year = int(year_match.group(1)) if year_match else ep.PAYROLL_TAX_YEAR
+    amounts = [a for a in _amounts(question) if not (year_match and a[1] <= year_match.start() < a[2])]
+
+    def near(words, window=60):
+        best = None
+        for m in re.finditer("|".join(words), q):
+            for a in amounts:
+                if 0 <= a[1] - m.end() <= window and (best is None or a[1] - m.end() < best[1] - m.end()):
+                    best = a
+        return best
+
+    balance_amt = near(("balance", "reserve account"))
+    payroll_amt = near(("payroll",))
+    ratio_match = re.search(r"reserve ratio[^0-9-]{0,25}(-?\d*\.?\d+)", q)
+    if balance_amt and payroll_amt and balance_amt[1] == payroll_amt[1]:
+        balance_amt = None
+    if payroll_amt and balance_amt is None:
+        rest = [a for a in amounts if a[1] != payroll_amt[1]]
+        balance_amt = rest[0] if len(rest) == 1 else None
+    if ratio_match:
+        balance, payroll = float(ratio_match.group(1)), 1.0
+    elif balance_amt and payroll_amt:
+        balance, payroll = balance_amt[0], payroll_amt[0]
+        pre = q[max(0, balance_amt[1] - 25):balance_amt[1] + 1]
+        if _has(pre, "negative", "deficit", "overdrawn") or re.search(r"[-−]\s*\$?\s*$", pre):
+            balance = -balance
+    else:
+        text = ("Your UI rate comes from your reserve ratio: your reserve account balance (credits minus benefit "
+                "charges, as of July 31) divided by your average base payroll (the average of your taxable "
+                "payroll for the three calendar years before June 30). EDD puts one of seven schedules in effect "
+                "each year -- Schedule F+ for both 2026 and 2027 -- and reads your rate off it: from 1.5% for a "
+                "strongly positive reserve (ratio 0.20 or more) up to 6.2% for a negative one. New employers "
+                "pay 3.4% for two to three years. Give me your reserve account balance and average base "
+                "payroll (both are on your Notice of Contribution Rates, DE 2088, mailed each December) and I'll "
+                "work out the rate, or look it up in e-Services for Business. (EDD DE 231Z; DE 44)")
+        return _result(base, text, None, "employer_ui_rate_info", status="needs_review")
+    with employer_db.get_conn() as conn:
+        calc = ep.compute_ui_rate(conn, balance, payroll, year)
+        ett = ep.get_rate(conn, "ett")
+    if not calc:
+        return _result(base, f"I can't work out a UI rate for {year} from those figures; I have EDD's rate "
+                             "schedule for 2026 and 2027, and need a positive average base payroll. Your DE 2088 "
+                             "shows your actual rate.", None, "employer_ui_rate_unsupported", status="needs_review")
+    lo, hi = calc["band_min"], calc["band_max"]
+    band = (f"below {hi:.2f}" if lo is None else f"{lo:.2f} or more" if hi is None else f"{lo:.2f} up to (not incl.) {hi:.2f}")
+    rate = calc["ui_rate"]
+    limit = 7000.0
+    ett_each = limit * ett[0] if calc["ett_applies"] else 0.0
+    if ratio_match:
+        basis = f"Your reserve ratio is {calc['reserve_ratio']:.4f}"
+    else:
+        bal = calc["reserve_balance"]
+        bal_text = f"-${-bal:,.2f}" if bal < 0 else f"${bal:,.2f}"
+        basis = (f"A reserve balance of {bal_text} against average base payroll of "
+                 f"${calc['avg_base_payroll']:,.2f} gives a reserve ratio of {calc['reserve_ratio']:.4f}")
+    text = (f"{basis}. On Schedule {calc['schedule']} (the schedule EDD has in effect for {year}), the band {band} "
+            f"pays a UI rate of {rate:.1%}. On the first ${limit:,.0f} of an employee's wages that is "
+            f"${limit * rate:,.2f} of UI")
+    if calc["ett_applies"]:
+        text += f" plus ${ett_each:,.2f} of ETT ({ett[0]:.1%}), or ${limit * rate + ett_each:,.2f} per employee."
+    else:
+        text += (" and, because the reserve balance is negative, ETT is 0.0%, so the cost is "
+                 f"${limit * rate:,.2f} per employee.")
+    if calc["near_boundary"]:
+        text += (" Your ratio sits within 0.0005 of a band edge, where how EDD rounds the ratio could move you "
+                 "one band, so check your DE 2088.")
+    text += (" Your actual rate is the one on your Notice of Contribution Rates (DE 2088), which can differ if "
+             "reserve transfers, cancellations or other adjustments apply; you can protest it within 60 days of "
+             f"the notice date. ({calc['citation']})")
+    return _result(base, text, calc, "employer_ui_rate", amount=calc["avg_base_payroll"], tax=round(limit * rate, 2))
 
 
 def _cost_answer(question, base):
@@ -378,7 +462,7 @@ def _late_answer(question, base):
 
 def answer_employer(question):
     base = _base()
-    for fn in (_late_answer, _supplemental_answer, _deposit_answer, _cost_answer, _futa_answer):
+    for fn in (_late_answer, _supplemental_answer, _deposit_answer, _ui_rate_answer, _cost_answer, _futa_answer):
         result = fn(question, base)
         if result:
             return result

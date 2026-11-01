@@ -471,6 +471,27 @@ with tab_employer:
     st.caption(
         f"California employer costs for {ep.PAYROLL_TAX_YEAR} from EDD's Employer's Guide (DE 44 Rev. 52): "
         "UI and ETT on the first $7,000 of each employee's wages, plus the SDI you withhold from employees.")
+    with st.expander("Don't know your UI rate? Work it out from your reserve account"):
+        st.caption("Both numbers are on your Notice of Contribution Rates (DE 2088), mailed each December. "
+                   "The rate comes from EDD's experience-rating schedule (Schedule F+ for 2026 and 2027).")
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            rr_balance = st.number_input("UI reserve account balance ($)", value=0.0, step=1000.0, format="%.2f")
+        with r2:
+            rr_payroll = st.number_input("Average base payroll ($)", min_value=0.0, value=0.0, step=10000.0, format="%.2f")
+        with r3:
+            rr_year = st.selectbox("Rate year", [2026, 2027])
+        if st.button("Work out my UI rate"):
+            with employer_db.get_conn() as rconn:
+                rcalc = ep.compute_ui_rate(rconn, rr_balance, rr_payroll, rr_year)
+            if not rcalc:
+                st.error("Enter an average base payroll above zero.")
+            else:
+                st.metric(f"UI rate ({rcalc['schedule']}, {rr_year})", f"{rcalc['ui_rate']:.1%}")
+                st.caption(f"Reserve ratio {rcalc['reserve_ratio']:.4f}. Enter this rate below. "
+                           + ("ETT is 0.0% because the reserve balance is negative. " if not rcalc["ett_applies"] else "")
+                           + ("Your ratio is within 0.0005 of a band edge; check your DE 2088. " if rcalc["near_boundary"] else "")
+                           + "Your DE 2088 rate governs.")
     with st.form("employer_form"):
         e1, e2, e3 = st.columns(3)
         with e1:

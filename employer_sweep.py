@@ -47,7 +47,25 @@ POSITIVE = [
     ("How much FUTA for 3 employees at $50,000 each?", "employer_futa", "November 10, 2026"),
     ("How much FUTA for 3 employees at $50,000 each?", "employer_futa", "$413.00 per employee"),
     ("What is the FUTA credit reduction for California in 2021?", "employer_futa_unsupported_year", "only have FUTA"),
-    # exactly $400
+    # ratio 22,000/400,000 = 0.055 -> F+ band [0.05, 0.06) = 4.7% ; 7,000 x 4.7% = 329 ; + ETT 7 = 336
+    ("My UI reserve account balance is $22,000 and my average base payroll is $400,000. What's my UI rate?",
+     "employer_ui_rate", "pays a UI rate of 4.7%"),
+    ("My UI reserve account balance is $22,000 and my average base payroll is $400,000. What's my UI rate?",
+     "employer_ui_rate", "$336.00 per employee"),
+    # ratio -0.05 -> [-0.05, -0.04) = 6.2% ; 7,000 x 6.2% = 434 ; negative balance -> ETT 0.0%
+    ("My UI reserve account balance is negative $10,000 with average taxable payroll of $200,000. What UI rate will I pay?",
+     "employer_ui_rate", "$434.00 per employee"),
+    ("My UI reserve account balance is negative $10,000 with average taxable payroll of $200,000. What UI rate will I pay?",
+     "employer_ui_rate", "ETT is 0.0%"),
+    # ratio 0.30 -> 0.20 or more = 1.5% in 2027 (F+ both years)
+    ("EDD says my reserve ratio is 0.30. What is my UI rate for 2027?", "employer_ui_rate", "in effect for 2027"),
+    # ratio 0 -> [0.00, 0.01) = 5.9% ; sits on a band edge -> flagged
+    ("My UI reserve account balance is $0 and average base payroll is $200,000. UI rate?", "employer_ui_rate", "5.9%"),
+    ("My UI reserve account balance is $20,000 and average base payroll is $400,000. UI rate?",
+     "employer_ui_rate", "within 0.0005 of a band edge"),
+    ("How is my UI rate determined by experience rating?", "employer_ui_rate_info", "Schedule F+"),
+    ("My UI reserve account balance is $60,000 and average base payroll is $200,000 in 2021, UI rate?",
+     "employer_ui_rate_unsupported", "2026 and 2027"),
     # exactly $400 is the monthly band for a semi-weekly depositor, due 12/15/2026 for a Nov payday
     ("Semi-weekly depositor with $400 of PIT withholding accumulated, payday November 4, 2026, EDD deposit due date?",
      "employer_deposit_schedule", "Tuesday, December 15, 2026"),
@@ -71,6 +89,8 @@ POSITIVE = [
 ]
 
 NEGATIVE = [
+    "How are unemployment benefits calculated for a laid-off worker?",
+    "How much should a landlord keep in a reserve account for repairs?",
     "Are federal unemployment benefits taxable in California?",
     "What is the sales tax on a $500 couch in Fresno?",
     "Is bonus depreciation allowed in California?",

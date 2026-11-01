@@ -95,6 +95,24 @@ CREATE TABLE IF NOT EXISTS ca_futa_credit_reductions (
     UNIQUE (tax_year)
 );
 
+-- UI contribution rate by schedule and reserve ratio (DE 231Z). Bands are
+-- [ratio_min, ratio_max): NULL ratio_min = no lower bound, NULL ratio_max = no
+-- upper bound. rate is stored as a fraction (0.047 = 4.7%).
+CREATE TABLE IF NOT EXISTS ca_ui_rate_schedule (
+    id        SERIAL PRIMARY KEY,
+    schedule  TEXT NOT NULL,
+    ratio_min NUMERIC,
+    ratio_max NUMERIC,
+    rate      NUMERIC NOT NULL,
+    citation  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ca_ui_schedule_years (
+    tax_year   INTEGER PRIMARY KEY,
+    schedule   TEXT NOT NULL,
+    source_url TEXT
+);
+
 CREATE TABLE IF NOT EXISTS employer_rule_embeddings (
     topic_key TEXT PRIMARY KEY,
     kind      TEXT NOT NULL,
@@ -150,6 +168,55 @@ FUTA_REDUCTION_ROWS = [
      "Preliminary (DOL 2026-01-15): 1.5% for outstanding advance; estimated 3.8% BCR add-on could raise the total to "
      "5.3%. Final rate set Nov 10, 2026."),
 ]
+
+UI_RATE_ROWS = [
+    # (ratio_min inclusive, ratio_max exclusive, [AA, A, B, C, D, E, F, F+] as percents)
+    (None, -0.2, [5.4, 5.4, 5.4, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.2, -0.18, [5.2, 5.3, 5.4, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.18, -0.16, [5.1, 5.2, 5.4, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.16, -0.14, [5.0, 5.1, 5.3, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.14, -0.12, [4.9, 5.0, 5.3, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.12, -0.11, [4.8, 4.9, 5.2, 5.4, 5.4, 5.4, 5.4, 6.2]),
+    (-0.11, -0.1, [4.7, 4.8, 5.1, 5.3, 5.4, 5.4, 5.4, 6.2]),
+    (-0.1, -0.09, [4.6, 4.7, 5.1, 5.3, 5.4, 5.4, 5.4, 6.2]),
+    (-0.09, -0.08, [4.5, 4.6, 4.9, 5.2, 5.4, 5.4, 5.4, 6.2]),
+    (-0.08, -0.07, [4.4, 4.5, 4.8, 5.1, 5.3, 5.4, 5.4, 6.2]),
+    (-0.07, -0.06, [4.3, 4.4, 4.7, 5.0, 5.3, 5.4, 5.4, 6.2]),
+    (-0.06, -0.05, [4.2, 4.3, 4.6, 4.9, 5.2, 5.4, 5.4, 6.2]),
+    (-0.05, -0.04, [4.1, 4.2, 4.5, 4.8, 5.1, 5.3, 5.4, 6.2]),
+    (-0.04, -0.03, [4.0, 4.1, 4.4, 4.7, 5.0, 5.3, 5.4, 6.2]),
+    (-0.03, -0.02, [3.9, 4.0, 4.3, 4.6, 4.9, 5.2, 5.4, 6.2]),
+    (-0.02, -0.01, [3.8, 3.9, 4.2, 4.5, 4.8, 5.1, 5.4, 6.2]),
+    (-0.01, 0.0, [3.7, 3.8, 4.1, 4.4, 4.7, 5.0, 5.4, 6.2]),
+    (0.0, 0.01, [3.4, 3.6, 3.9, 4.2, 4.5, 4.8, 5.1, 5.9]),
+    (0.01, 0.02, [3.2, 3.4, 3.7, 4.0, 4.3, 4.6, 4.9, 5.6]),
+    (0.02, 0.03, [3.0, 3.2, 3.5, 3.8, 4.1, 4.4, 4.7, 5.4]),
+    (0.03, 0.04, [2.8, 3.0, 3.3, 3.6, 3.9, 4.2, 4.5, 5.2]),
+    (0.04, 0.05, [2.6, 2.8, 3.1, 3.4, 3.7, 4.0, 4.3, 4.9]),
+    (0.05, 0.06, [2.4, 2.6, 2.9, 3.2, 3.5, 3.8, 4.1, 4.7]),
+    (0.06, 0.07, [2.2, 2.4, 2.7, 3.0, 3.3, 3.6, 3.9, 4.5]),
+    (0.07, 0.08, [2.0, 2.2, 2.5, 2.8, 3.1, 3.4, 3.7, 4.3]),
+    (0.08, 0.09, [1.8, 2.0, 2.3, 2.6, 2.9, 3.2, 3.5, 4.0]),
+    (0.09, 0.1, [1.6, 1.8, 2.1, 2.4, 2.7, 3.0, 3.3, 3.8]),
+    (0.1, 0.11, [1.4, 1.6, 1.9, 2.2, 2.5, 2.8, 3.1, 3.6]),
+    (0.11, 0.12, [1.2, 1.4, 1.7, 2.0, 2.3, 2.6, 2.9, 3.3]),
+    (0.12, 0.13, [1.0, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.1]),
+    (0.13, 0.14, [0.8, 1.0, 1.3, 1.6, 1.9, 2.2, 2.5, 2.9]),
+    (0.14, 0.15, [0.7, 0.9, 1.1, 1.4, 1.7, 2.0, 2.3, 2.6]),
+    (0.15, 0.16, [0.6, 0.8, 1.0, 1.2, 1.5, 1.8, 2.1, 2.4]),
+    (0.16, 0.17, [0.5, 0.7, 0.9, 1.1, 1.3, 1.6, 1.9, 2.2]),
+    (0.17, 0.18, [0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.7, 2.0]),
+    (0.18, 0.19, [0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7]),
+    (0.19, 0.2, [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6]),
+    (0.2, None, [0.1, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5]),
+]
+UI_SCHEDULES = ["AA", "A", "B", "C", "D", "E", "F", "F+"]
+
+# EDD (edd.ca.gov Rates and Withholding): "The UI rate schedule for 2026 is Schedule F+."
+# and "for 2027 is Schedule F+."
+UI_SCHEDULE_YEARS = [(2026, "F+"), (2027, "F+")]
+DE231Z = "EDD DE 231Z, California System of Experience Rating (Rev. 17, 6-22); CUIC Sec. 977"
+DE231Z_URL = "https://edd.ca.gov/pdf_pub_ctr/de231z.pdf"
 
 # (rate_key, rate, wage_limit, paid_by, description)
 RATE_ROWS_2026 = [
@@ -231,6 +298,17 @@ def seed():
                 "ON CONFLICT (tax_year) DO UPDATE SET reduction_rate=EXCLUDED.reduction_rate, "
                 "potential_max_rate=EXCLUDED.potential_max_rate, status=EXCLUDED.status, notes=EXCLUDED.notes",
                 (ty, rate, pmax, st, notes, DOL_URL))
+        conn.execute("DELETE FROM ca_ui_rate_schedule")
+        for lo, hi, rates in UI_RATE_ROWS:
+            for sched, pct in zip(UI_SCHEDULES, rates):
+                conn.execute(
+                    "INSERT INTO ca_ui_rate_schedule (schedule, ratio_min, ratio_max, rate, citation) "
+                    "VALUES (%s, %s, %s, %s, %s)", (sched, lo, hi, round(pct / 100, 4), DE231Z))
+        for ty, sched in UI_SCHEDULE_YEARS:
+            conn.execute(
+                "INSERT INTO ca_ui_schedule_years (tax_year, schedule, source_url) VALUES (%s, %s, %s) "
+                "ON CONFLICT (tax_year) DO UPDATE SET schedule=EXCLUDED.schedule",
+                (ty, sched, "https://edd.ca.gov/en/payroll_taxes/rates_and_withholding/"))
         for fed, lo, hi, ca, due in DEPOSIT_ROWS_2026:
             conn.execute(
                 "INSERT INTO ca_edd_deposit_rules (tax_year, federal_schedule, min_accumulated, "
@@ -259,7 +337,7 @@ def seed():
 def status():
     conn = db.get_conn()
     for tbl in ("ca_employer_payroll_rates", "ca_edd_deposit_rules", "ca_edd_due_dates",
-                "ca_edd_interest_rates", "ca_futa_credit_reductions", "employer_rule_embeddings", "employer_tax_inventory"):
+                "ca_edd_interest_rates", "ca_futa_credit_reductions", "ca_ui_rate_schedule", "ca_ui_schedule_years", "employer_rule_embeddings", "employer_tax_inventory"):
         n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:30} {n} rows")
     conn.close()

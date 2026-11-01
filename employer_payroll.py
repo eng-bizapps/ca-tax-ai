@@ -105,6 +105,39 @@ def compute_futa(conn, annual_wages, num_employees=1, tax_year=PAYROLL_TAX_YEAR)
     }
 
 
+def compute_ui_rate(conn, reserve_balance, avg_base_payroll, tax_year=PAYROLL_TAX_YEAR, schedule=None):
+    """Experience-rated UI contribution rate (DE 231Z): reserve ratio =
+    reserve account balance (as of July 31) / average base payroll (average
+    of taxable payroll for the three calendar years before June 30), read
+    off the rate schedule EDD put in effect for the year (F+ for 2026 and
+    2027). Bands are [min, max); the unrounded ratio is used because EDD's
+    rounding is not stated, so near_boundary flags ratios within 0.0005 of a
+    band edge. ETT is 0.0% for a negative reserve balance (EDD rates page).
+    Returns None without a payroll > 0, or for a year/schedule not stored."""
+    if reserve_balance is None or avg_base_payroll is None or avg_base_payroll <= 0:
+        return None
+    if schedule is None:
+        row = conn.execute("SELECT schedule FROM ca_ui_schedule_years WHERE tax_year=%s", (tax_year,)).fetchone()
+        if not row:
+            return None
+        schedule = row[0]
+    ratio = reserve_balance / avg_base_payroll
+    row = conn.execute(
+        "SELECT rate, ratio_min, ratio_max FROM ca_ui_rate_schedule WHERE schedule=%s "
+        "AND (ratio_min IS NULL OR ratio_min <= %s) AND (ratio_max IS NULL OR %s < ratio_max)",
+        (schedule, ratio, ratio)).fetchone()
+    if not row:
+        return None
+    lo = float(row[1]) if row[1] is not None else None
+    hi = float(row[2]) if row[2] is not None else None
+    near = any(edge is not None and abs(ratio - edge) < 0.0005 for edge in (lo, hi))
+    return {"tax_year": tax_year, "schedule": schedule, "reserve_balance": reserve_balance,
+            "avg_base_payroll": avg_base_payroll, "reserve_ratio": ratio, "ui_rate": float(row[0]),
+            "band_min": lo, "band_max": hi, "near_boundary": near, "ett_applies": reserve_balance >= 0,
+            "citation": "EDD DE 231Z, California System of Experience Rating; CUIC Sec. 977",
+            "source_url": "https://edd.ca.gov/pdf_pub_ctr/de231z.pdf"}
+
+
 def _next_business_day(d):
     while d.weekday() >= 5:
         d += datetime.timedelta(days=1)
