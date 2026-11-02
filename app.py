@@ -7,6 +7,7 @@ import employer_db
 import employer_payroll as ep
 import income_db
 import payroll_withholding as pw
+import states
 from engine import answer, _children_label
 
 EXAMPLES = [
@@ -48,9 +49,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🧾 California Tax Assistant")
-st.caption("CDTFA sales/use tax + FTB income tax + county-assessor/BOE property tax → "
-           "Postgres/pgvector (three separate databases) → Gemini + guard")
+# State selector first: it decides the title, the tax-type options and which tabs apply.
+state_code = st.sidebar.selectbox(
+    "State", list(states.STATES), format_func=states.state_name,
+    help="Rules for one state are applied at a time. A question that names a different "
+         "state asks you to switch instead of answering with the wrong state's law.")
+state_label = states.state_name(state_code)
+
+st.title(f"🧾 {state_label} Tax Assistant")
+if state_code == "CA":
+    st.caption("CDTFA sales/use tax + FTB income tax + county-assessor/BOE property tax + EDD employer payroll tax → "
+               "Postgres/pgvector (separate databases) → Gemini + guard")
+else:
+    st.caption(f"{state_label}: covered so far -- "
+               f"{', '.join(states.DOMAIN_LABELS[d] for d in sorted(states.STATES[state_code]['domains']))}.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -73,18 +85,21 @@ if "remembered_exemption_credit_dependent_count" not in st.session_state:
 # nested inside one.
 with st.sidebar:
     st.subheader("Options")
+    _tax_type_options = {"Auto-detect": None, "Sales & Use Tax": "sales", "Income Tax": "income",
+                         "Property Tax": "property", "Employer Payroll Tax": "employer"}
+    _tax_type_options = {k: v for k, v in _tax_type_options.items()
+                         if v is None or v in states.STATES[state_code]["domains"]}
     tax_type_choice = st.radio(
         "Tax type",
-        ["Auto-detect", "Sales & Use Tax", "Income Tax", "Property Tax", "Employer Payroll Tax"],
+        list(_tax_type_options),
         help="A hint, not a hard filter -- if the domain you pick can't "
              "answer, another domain is still tried.",
     )
-    tax_type = {"Auto-detect": None, "Sales & Use Tax": "sales", "Income Tax": "income",
-                "Property Tax": "property", "Employer Payroll Tax": "employer"}[tax_type_choice]
+    tax_type = _tax_type_options[tax_type_choice]
 
     st.divider()
     st.subheader("Try an example")
-    for ex in EXAMPLES:
+    for ex in (EXAMPLES if state_code == "CA" else []):
         if st.button(ex, use_container_width=True, key=f"ex_{ex}"):
             st.session_state.pending_question = ex
 
@@ -189,7 +204,7 @@ with tab_chat:
                               "citation", "source_url", "location", "branches", "fees"]})
 
     pending = st.session_state.pop("pending_question", None)
-    question = st.chat_input("Ask a California tax question") or pending
+    question = st.chat_input(f"Ask a {state_label} tax question") or pending
 
     if question and question.strip():
         st.session_state.messages.append({"role": "user", "content": question})
@@ -199,7 +214,7 @@ with tab_chat:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 res = answer(
-                    question, tax_type=tax_type,
+                    question, tax_type=tax_type, state=state_code,
                     remembered_filing_status=st.session_state.remembered_filing_status,
                     remembered_prior_year_agi=st.session_state.remembered_prior_year_agi,
                     remembered_qualifying_children_count=st.session_state.remembered_qualifying_children_count,
@@ -270,6 +285,12 @@ with tab_chat:
 
         st.session_state.messages.append(
             {"role": "assistant", "content": display_text, "result": res})
+
+if state_code != "CA":
+    for _tab in (tab_paycheck, tab_employer):
+        with _tab:
+            st.info(f"This calculator is California-only for now. {state_label} is not covered here yet.")
+    st.stop()
 
 with tab_paycheck:
     st.subheader("Per-Paycheck Withholding Calculator")

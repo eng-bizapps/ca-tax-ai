@@ -26,6 +26,7 @@ import income_nonresident
 import income_db
 import property_db
 import employer_engine
+import states
 import property_eligibility
 import property_tax
 import district_rates
@@ -10386,7 +10387,8 @@ def answer(question: str, compose: bool = True, location: str = None,
            remembered_filing_status: str = None,
            remembered_prior_year_agi: float = None,
            remembered_qualifying_children_count: int = None,
-           remembered_exemption_credit_dependent_count: int = None) -> dict:
+           remembered_exemption_credit_dependent_count: int = None,
+           state: str = None) -> dict:
     """Public entry point: runs _answer(), then logs the outcome to query_log
     (see db.py) for the usage-driven feedback loop -- mining real questions and
     low-confidence answers instead of guessing what to test next. `source`
@@ -10450,6 +10452,15 @@ def answer(question: str, compose: bool = True, location: str = None,
     as a fallback default, used only when the question itself states no
     count. See _income_exemption_credit_answer's own docstring for the
     amounts-removal bug this fallback deliberately avoids."""
+    state = state or states.DEFAULT_STATE
+    if state != states.DEFAULT_STATE:
+        if not states.is_supported(state):
+            raise ValueError(f"unknown state {state!r}")
+        return states.answer_other_state(question, state, tax_type)
+    mismatch = states.mismatch_answer(question, state)
+    if mismatch:
+        return mismatch
+
     detected_filing_status = income_brackets.detect_filing_status(question)
     detected_filing_status_label = (
         income_brackets.FILING_STATUS_LABELS[detected_filing_status]

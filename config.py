@@ -13,6 +13,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")            # sales/use tax (CD
 INCOME_DATABASE_URL = os.environ.get("INCOME_DATABASE_URL", "")  # income tax (FTB) DB -- Ring 2 database split
 PROPERTY_DATABASE_URL = os.environ.get("PROPERTY_DATABASE_URL", "")  # property tax (county assessor/BOE) DB -- Ring 4 database split
 EMPLOYER_DATABASE_URL = os.environ.get("EMPLOYER_DATABASE_URL", "")  # employer payroll taxes (EDD) DB -- Ring 5 database split
+IL_REVENUE_DATABASE_URL = os.environ.get("IL_REVENUE_DATABASE_URL", "")  # Illinois Dept. of Revenue (income tax) DB -- multi-state build
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "models/gemini-embedding-001")
 
