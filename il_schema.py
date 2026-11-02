@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS il_eitc_max (
     UNIQUE (tax_year, children)
 );
 
+CREATE TABLE IF NOT EXISTS il_reciprocal_states (
+    state_name TEXT PRIMARY KEY,
+    citation   TEXT,
+    source_url TEXT
+);
+
 CREATE TABLE IF NOT EXISTS il_income_inventory (
     id         SERIAL PRIMARY KEY,
     part       TEXT NOT NULL,
@@ -99,6 +105,12 @@ USE_TAX = [  # (agi_min, agi_max, use_tax)
     (40001, 50000, 23), (50001, 75000, 31), (75001, 100000, 44),
 ]
 
+CR_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-cr-instr.pdf"
+RECIPROCAL = [("iowa", "IDOR 2025 Schedule CR Instructions (reciprocal agreement)", CR_URL),
+              ("kentucky", "IDOR 2025 Schedule CR Instructions (reciprocal agreement)", CR_URL),
+              ("michigan", "IDOR 2025 Schedule CR Instructions (reciprocal agreement)", CR_URL),
+              ("wisconsin", "IDOR 2025 Schedule CR Instructions (reciprocal agreement)", CR_URL)]
+
 EITC_MAX = [(0, 130), (1, 866), (2, 1430), (3, 1609)]  # 3 means 3 or more
 
 LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
@@ -117,13 +129,20 @@ LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
      "Qualified-expense rules stated, not itemized."),
     ("credits", "volunteer-worker", "Volunteer Emergency Worker credit ($500)", "partial", "il_credits",
      "Amount stated; award is by IDOR certificate only."),
-    ("credits", "other-state-credit", "Credit for tax paid to other states (Schedule CR)", "deferred", None,
-     "Schedule CR (Pub. 111) not loaded."),
+    ("credits", "other-state-credit", "Credit for tax paid to other states (Schedule CR), full-year residents", "built",
+     "il_other_state_credit", "Decimal = non-Illinois income / base income (3 places); credit = lesser of tax paid and Illinois "
+     "tax x decimal. Iowa/Kentucky/Michigan/Wisconsin wages and foreign taxes refused. The user supplies the non-Illinois "
+     "portion; per-line sourcing (IAF worksheet, K-1s) is not computed."),
+    ("credits", "other-state-credit-part-year", "Schedule CR for part-year residents (Steps 5-6 proration)", "deferred", None,
+     "Not loaded."),
     ("credits", "eitc", "Illinois EITC (20% of federal EITC) and Child Tax Credit (40% of IL EITC)", "partial",
      "il_eitc", "User supplies the federal EITC; the federal EITC and the Illinois Expanded EITC Worksheet are not computed."),
     ("other", "use-tax", "Individual use tax (UT Table / worksheet)", "built", "il_use_tax", "AGI table and 6.25%/1% worksheet."),
     ("other", "estimated-tax-penalty", "Underpayment of estimated tax penalty (IL-2210)", "deferred", None, "Not loaded."),
-    ("residency", "schedule-nr", "Nonresident / part-year allocation (Schedule NR)", "deferred", None, "Not loaded."),
+    ("residency", "schedule-nr", "Nonresident / part-year computation (Schedule NR Steps 5)", "partial", "il_nonresident",
+     "Decimal = Illinois base income / total base income; exemption prorated by it; 4.95%. The user supplies the Illinois "
+     "portion of income; per-line sourcing, the IAF apportionment worksheet and K-1s are not computed. Reciprocal-state "
+     "residents (IA, KY, MI, WI) are told wages are exempt."),
     ("withholding", "il-w-4", "Employee withholding (IL-W-4)", "deferred", None, "Paycheck calculator is California-only for now."),
 ]
 
@@ -150,6 +169,11 @@ def seed():
         conn.execute(
             "INSERT INTO il_use_tax_table (tax_year, agi_min, pct_of_agi) VALUES (2025,100001,0.0005) "
             "ON CONFLICT (tax_year, agi_min) DO UPDATE SET pct_of_agi=EXCLUDED.pct_of_agi")
+        for name, cite, url in RECIPROCAL:
+            conn.execute(
+                "INSERT INTO il_reciprocal_states (state_name, citation, source_url) VALUES (%s,%s,%s) "
+                "ON CONFLICT (state_name) DO UPDATE SET citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
+                (name, cite, url))
         for kids, mx in EITC_MAX:
             conn.execute(
                 "INSERT INTO il_eitc_max (tax_year, children, max_credit) VALUES (2025,%s,%s) "
@@ -169,7 +193,7 @@ def seed():
 
 def status():
     with db.get_conn() as conn:
-        for t in ("il_income_params", "il_use_tax_table", "il_eitc_max", "il_income_inventory"):
+        for t in ("il_income_params", "il_use_tax_table", "il_eitc_max", "il_reciprocal_states", "il_income_inventory"):
             print(t, conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
         for s, n in conn.execute("SELECT status, count(*) FROM il_income_inventory GROUP BY status ORDER BY status"):
             print(f"  ledger {s}: {n}")

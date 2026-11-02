@@ -45,6 +45,26 @@ CASES = [
     ("What is the Illinois exemption for 2026?", "il_exemption", "$2,925.00"),
     ("What is the Illinois income tax rate?", "il_rate", "4.95%"),
     ("Is Social Security taxable in Illinois?", "il_retirement_income", "Line 5"),
+    # Schedule CR: credit = lesser of tax paid and IL tax x (non-IL income / base income)
+    ("I live in Illinois, single, with $80,000 of income, of which $30,000 was earned in Indiana, and I paid $1,500 in "
+     "income tax to Indiana. What is my Illinois credit for tax paid to other states?", "il_other_state_credit", "$1,432.10"),
+    ("I live in Illinois, single, with $80,000 of income, of which $30,000 was earned in Indiana, and I paid $1,000 in "
+     "income tax to Indiana. What is my Illinois credit for tax paid to other states?", "il_other_state_credit", "$1,000.00"),
+    ("I live in Illinois and work in Wisconsin, earning $60,000 in wages, and paid $2,000 in income tax to Wisconsin. "
+     "Can I claim the Illinois credit for tax paid to other states?", "il_other_state_credit_reciprocal", "reciprocal agreement"),
+    ("I paid $2,000 in income tax to Canada. Can I get the Illinois credit for tax paid to other states?",
+     "il_other_state_credit_rules", "foreign country"),
+    ("As a nonresident, can I take the Illinois credit for tax paid to other states?", "il_other_state_credit_rules",
+     "nonresident of Illinois cannot"),
+    ("What is the Illinois credit for tax paid to another state?", "il_other_state_credit_missing", "I still need"),
+    # Schedule NR: decimal = IL income / total income; exemption prorated by it
+    ("I'm a nonresident of Illinois with $80,000 of total income, $20,000 of it earned in Illinois, single. How much "
+     "Illinois income tax do I owe?", "il_nonresident", "$954.73"),
+    ("I'm a part-year resident of Illinois with $90,000 of total income, $45,000 of it Illinois income, married filing "
+     "jointly. How much Illinois income tax do I owe?", "il_nonresident", "$2,086.43"),
+    ("I live in Wisconsin and work in Illinois, earning $50,000 in wages. Do I owe Illinois income tax?",
+     "il_nonresident_reciprocal", "No Illinois income tax"),
+    ("I'm a nonresident, how much Illinois income tax do I owe on $50,000?", "il_nonresident_missing", "I still need"),
     # other domains are refused, not answered
     ("What is the sales tax in Chicago?", "domain_not_covered", "not covered yet"),
     ("How do I register for Illinois unemployment insurance as an employer?", "domain_not_covered", "not covered yet"),

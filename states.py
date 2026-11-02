@@ -76,15 +76,17 @@ def mismatch_answer(question, code):
     """A 'switch the state selector' answer when the question names another
     supported state (and is not a legitimate multi-state question), else None."""
     q = question.lower()
-    if any(p in q for p in _MULTI_STATE_PHRASES):
-        return None
     others = mentioned_other_states(question, code)
     if not others:
         return None
+    own = re.search(r"\b" + re.escape(state_name(code).lower()) + r"\b", q) is not None
+    if own and any(p in q for p in _MULTI_STATE_PHRASES):
+        return None   # names both states and asks a multi-state question (credit for tax paid to another state)
     other = state_name(others[0])
     text = (f"Your question mentions {other}, but the state selector is set to {state_name(code)}. "
             f"I only apply one state's rules at a time so I never answer with the wrong state's law. "
-            f"Switch the state selector to {other} and ask again.")
+            f"Switch the state selector to {other} and ask again. If you meant your {state_name(code)} return "
+            f"(for example a credit for tax paid to {other}), say {state_name(code)} in the question.")
     return _needs_review(code, text, "state_mismatch")
 
 

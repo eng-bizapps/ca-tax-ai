@@ -61,12 +61,12 @@ _ROLES = (
 )
 
 
-def _role(q, start, end):
+def _role(q, start, end, roles=None):
     """What a dollar amount refers to: the nearest role keyword within 32 characters either side
     (the one right after the amount wins a tie)."""
     after, before = q[end:end + 32].lower(), q[max(0, start - 32):start].lower()
     best = None
-    for role, words in _ROLES:
+    for role, words in (roles or _ROLES):
         for w in words:
             i = after.find(w)
             if i != -1 and (best is None or i < best[0]):
@@ -79,12 +79,12 @@ def _role(q, start, end):
     return best[1] if best else None
 
 
-def _roles(question):
+def _roles(question, roles=None):
     q = question.lower()
     found = {}
     unassigned = []
     for v, s, e in _amounts(question):
-        role = _role(q, s, e)
+        role = _role(q, s, e, roles)
         if role and role not in found:
             found[role] = v
         else:
@@ -126,7 +126,7 @@ _NOT_COVERED = (
 
 
 def _not_covered_answer(question, q):
-    if "credit" in q or "use tax" in q:
+    if _has(q, "credit", "use tax", "nonresident", "non-resident", "part-year", "part year", "reciprocal"):
         return None
     for term, domain in _NOT_COVERED:
         if re.search(r"\b" + re.escape(term) + r"\b", q):
@@ -352,13 +352,165 @@ def _compute_answer(conn, question, q):
                    source_url="https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-instr.pdf")
 
 
+
+# ---------------------------------------------------------------- Schedule CR / Schedule NR
+_STATE_NAMES = ("alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+                "georgia", "hawaii", "idaho", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+                "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+                "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio",
+                "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee",
+                "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming")
+_FOREIGN = ("canada", "mexico", "united kingdom", "england", "germany", "france", "india", "china", "japan", "australia",
+            "ireland", "italy", "spain", "brazil", "philippines", "israel")
+
+_CR_ROLES = (
+    ("tax", ("income tax to", "tax to ", "taxes to ", "in income tax", "in state tax", "in tax", "tax paid", "paid tax")),
+    ("nonil", ("earned in", "earned there", "earned out", "other state income", "out-of-state", "out of state",
+               "wages in ", "working in ", "worked in ")),
+    ("income", ("agi", "total income", "salary", "income of", "of income", "gross", "make", "made", "earn")),
+)
+_NR_ROLES = (
+    ("il", ("in illinois", "from illinois", "illinois income", "illinois wages", "illinois source", "illinois-source",
+            "earned in illinois", "worked in illinois", "illinois portion")),
+    ("total", ("total income", "total", "agi", "all sources", "overall", "federal")),
+)
+_CR_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-cr-instr.pdf"
+_NR_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-nr-instr.pdf"
+
+
+def _named_states(q):
+    return [n for n in _STATE_NAMES if re.search(r"\b" + n + r"\b", q)]
+
+
+def _mentions_foreign(q):
+    return [c for c in _FOREIGN if re.search(r"\b" + c + r"\b", q)]
+
+
+def _cr_answer(conn, question, q):
+    if not ("schedule cr" in q or ("credit" in q and _has(
+            q, "other state", "another state", "tax paid to", "taxes paid to", "paid tax to", "out-of-state", "out of state"))):
+        return None
+    if _has(q, "nonresident", "non-resident"):
+        return _result("A nonresident of Illinois cannot take Schedule CR (credit for tax paid to other states); it is only "
+                       "for Illinois residents and part-year residents, for income earned while an Illinois resident.",
+                       "il_other_state_credit_rules", citation="IDOR 2025 Schedule CR Instructions", source_url=_CR_URL)
+    foreign = _mentions_foreign(q)
+    states_named = _named_states(q)
+    if foreign and not states_named:
+        return _result("No Illinois credit is allowed for income tax paid to a foreign country (or to the federal "
+                       "government). Schedule CR covers only taxes paid to another U.S. state, D.C., Puerto Rico, a "
+                       "U.S. territory, or their local governments. (Foreign tax may be creditable on your federal "
+                       "return instead.)", "il_other_state_credit_rules", amount=0.0,
+                       citation="IDOR 2025 Schedule CR Instructions", source_url=_CR_URL)
+    wages = _has(q, "wage", "salary", "salaries", "paycheck", "employer", "working", "worked", "work in", "tips")
+    recip = ii.reciprocal_states(conn)
+    if states_named and all(n in recip for n in states_named) and wages and "city" not in q and "local" not in q:
+        names = ", ".join(n.title() for n in states_named)
+        return _result(f"No credit: Illinois has a reciprocal agreement with {names}, so wages and other employee "
+                       f"compensation you earn there while an Illinois resident are not taxed by that state. If tax was "
+                       f"withheld by that state in error, you claim a refund from that state, not a credit on Schedule CR. "
+                       f"(A city or county tax on those wages can still be credited, and so can tax on other kinds of "
+                       f"income such as rent or business income.)", "il_other_state_credit_reciprocal", amount=0.0,
+                       citation="IDOR 2025 Schedule CR Instructions", source_url=_CR_URL)
+    found, unassigned = _roles(question, _CR_ROLES)
+    agi, nonil, paid = found.get("income"), found.get("nonil"), found.get("tax")
+    status = income_brackets.detect_filing_status(question)
+    missing = [label for label, v in (("your total income (federal AGI)", agi),
+                                      ("how much of that income was earned in the other state", nonil),
+                                      ("the income tax you paid to the other state", paid),
+                                      ("your filing status", status)) if v is None]
+    if missing:
+        return _review("The Illinois credit for tax paid to other states is the smaller of (a) the tax you paid the other "
+                       "state and (b) your Illinois tax multiplied by the share of your income taxed by the other state "
+                       "(non-Illinois income divided by base income, to three decimals). To compute it I still need: "
+                       + "; ".join(missing) + ". Interest, dividends, pensions and IRA distributions are Illinois "
+                       "income, so only wages, out-of-state rent, business income and similar count as non-Illinois income. "
+                       "No credit for foreign tax; wages from Iowa, Kentucky, Michigan or Wisconsin are covered by a "
+                       "reciprocal agreement instead.", "il_other_state_credit_missing")
+    deps = _dependents(q) or 0
+    age65, blind = _flags(q, status)
+    t = ii.compute_income_tax(conn, DEFAULT_YEAR, status, agi, dependents=deps, age65=age65, blind=blind)
+    r = ii.compute_other_state_credit(conn, DEFAULT_YEAR, t["tax"], t["base_income"], nonil, paid)
+    after = t["tax"] - r["credit"]
+    return _result(
+        f"Illinois credit for tax paid to other states (Schedule CR), {_STATUS_LABELS[status]}, full-year Illinois resident:\n"
+        f"- Illinois tax before credits: {_fmt(t['tax'])} (base income {_fmt(t['base_income'])})\n"
+        f"- Decimal: {_fmt(nonil)} non-Illinois income / {_fmt(t['base_income'])} = {r['decimal']}\n"
+        f"- Limit: {_fmt(t['tax'])} x {r['decimal']} = {_fmt(r['limit'])}\n"
+        f"- Tax paid to the other state: {_fmt(paid)}\n"
+        f"- Credit (the lesser, Form IL-1040 Line 15): {_fmt(r['credit'])}\n"
+        f"Your Illinois tax after this credit would be {_fmt(after)}, before other credits. You must have filed the other "
+        f"state's required return; use the tax shown on that return, not the amount withheld on your W-2.",
+        "il_other_state_credit", amount=float(r["credit"]), tax=float(after),
+        citation="IDOR 2025 Schedule CR (R-12/25) Steps 4 and 6", source_url=_CR_URL.replace("-instr", ""))
+
+
+def _nr_answer(conn, question, q):
+    if not (_has(q, "nonresident", "non-resident", "part-year", "part year", "schedule nr", "work in illinois",
+                 "works in illinois", "commute to illinois")
+            or re.search(r"\blive in (?:" + "|".join(_STATE_NAMES) + r")", q)
+            or re.search(r"\b(?:moved|moving) (?:out of|to|from|into) illinois", q)):
+        return None
+    if not _has(q, "tax", "owe", "file"):
+        return None
+    states_named = _named_states(q)
+    recip = ii.reciprocal_states(conn)
+    lives_recip = re.search(r"\blive in (iowa|kentucky|michigan|wisconsin)\b", q) or (
+        _has(q, "nonresident", "non-resident") and any(n in recip for n in states_named))
+    wages_only = _has(q, "wage", "salary", "salaries", "paycheck", "employer", "work in illinois", "works in illinois")
+    if lives_recip and wages_only and not _has(q, "rent", "business", "self-employ"):
+        return _result("No Illinois income tax on those wages. Illinois has a reciprocal agreement with Iowa, Kentucky, "
+                       "Michigan and Wisconsin: if you live in one of those states and work in Illinois, your "
+                       "salary, wages, tips and other employee compensation are exempt from Illinois income tax. Give your "
+                       "employer Form IL-W-5-NR so Illinois tax isn't withheld; if it already was, file Form IL-1040 with "
+                       "Schedule NR to get it back. Other Illinois-source income (such as Illinois rental or business income) "
+                       "is still taxed.", "il_nonresident_reciprocal", amount=0.0, tax=0.0,
+                       citation="IDOR 2025 Schedule NR Instructions", source_url=_NR_URL)
+    found, unassigned = _roles(question, _NR_ROLES)
+    total, il_part = found.get("total"), found.get("il")
+    if total is None and il_part is not None and len(unassigned) == 1:
+        total = unassigned[0]
+    if il_part is None and total is not None and len(unassigned) == 1:
+        il_part = unassigned[0]
+    status = income_brackets.detect_filing_status(question)
+    missing = [label for label, v in (("your total income (federal AGI)", total),
+                                      ("how much of it is Illinois income (earned while an Illinois resident, plus "
+                                       "Illinois-source income while a nonresident)", il_part),
+                                      ("your filing status", status)) if v is None]
+    if missing:
+        return _review("Illinois taxes a nonresident only on Illinois-source income, and a part-year resident on everything "
+                       "earned while a resident plus Illinois-source income after. The tax is 4.95% of the Illinois income "
+                       "less your exemption allowance scaled by (Illinois income / total income). To compute it I still need: "
+                       + "; ".join(missing) + ". Nonresidents are not taxed on interest, dividends, pensions, IRA "
+                       "distributions or Social Security (unless from an Illinois business), and wages count only for work "
+                       "performed in Illinois.", "il_nonresident_missing")
+    deps = _dependents(q) or 0
+    age65, blind = _flags(q, status)
+    r = ii.compute_nonresident_tax(conn, DEFAULT_YEAR, status, total, il_part, dependents=deps, age65=age65, blind=blind)
+    lines = [f"Illinois income tax (Schedule NR) for {DEFAULT_YEAR}, {_STATUS_LABELS[status]}, total income "
+             f"{_fmt(total)}, of which Illinois income {_fmt(il_part)}:",
+             f"- Illinois base income: {_fmt(r['il_base'])}",
+             f"- Decimal: {_fmt(r['il_base'])} / {_fmt(r['total_base'])} = {r['decimal']}"]
+    if r["cutoff_applied"]:
+        lines.append("- Exemption allowance: $0.00 (total AGI is over the cutoff)")
+    else:
+        lines.append(f"- Exemption allowance: {_fmt(r['full_exemption'])} x {r['decimal']} = {_fmt(r['exemption'])}")
+    lines += [f"- Illinois net income: {_fmt(r['net_income'])}",
+              f"- Tax at 4.95%: {_fmt(r['tax'])}",
+              "This uses the Illinois income figure you gave; it does not re-source each line of your return (wages by days "
+              "worked in Illinois, the business apportionment worksheet, partnership K-1s), and assumes no Schedule M "
+              "adjustments. Illinois withholding already paid is not subtracted."]
+    return _result("\n".join(lines), "il_nonresident", tax=float(r["tax"]),
+                   citation="IDOR 2025 Schedule NR (R-12/25) Step 5", source_url=_NR_URL.replace("-instr", ""))
+
+
 def answer_state(question, tax_type=None):
     q = question.lower()
     refusal = _not_covered_answer(question, q)
     if refusal:
         return refusal
     with il_db.get_conn() as conn:
-        for fn in (_use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _exemption_answer,
+        for fn in (_cr_answer, _nr_answer, _use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _exemption_answer,
                    _rate_answer):
             result = fn(conn, question, q)
             if result:

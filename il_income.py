@@ -110,3 +110,37 @@ def compute_use_tax(conn, tax_year, agi):
         "SELECT use_tax FROM il_use_tax_table WHERE tax_year=%s AND agi_min <= %s AND agi_max >= %s",
         (tax_year, int(agi), int(agi))).fetchone()
     return _d(row[0]) if row else None
+
+
+def decimal3(numerator, denominator):
+    """Schedule CR / NR decimal: ratio rounded to three places, capped at 1.000."""
+    if _d(denominator) <= 0:
+        return Decimal(0)
+    return min(Decimal(1), (_d(numerator) / _d(denominator)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
+
+
+def reciprocal_states(conn):
+    return {r[0] for r in conn.execute("SELECT state_name FROM il_reciprocal_states").fetchall()}
+
+
+def compute_other_state_credit(conn, tax_year, il_tax, base_income, non_il_income, other_state_tax):
+    """Schedule CR Steps 4 and 6 (full-year resident): lesser of other-state tax paid (Line 51) and
+    Illinois tax x decimal (Line 54), where decimal = non-Illinois / total base income."""
+    dec = decimal3(non_il_income, base_income)
+    limit = money(_d(il_tax) * dec)
+    credit = min(money(other_state_tax), limit)
+    return {"decimal": dec, "limit": limit, "credit": credit}
+
+
+def compute_nonresident_tax(conn, tax_year, filing_status, total_agi, il_portion, dependents=0, age65=0, blind=0):
+    """Schedule NR Step 5: Illinois base income = the Illinois portion; decimal = Illinois / total base
+    income; the exemption allowance computed as a full-year resident is prorated by that decimal."""
+    total_base = max(Decimal(0), _d(total_agi))
+    il_base = max(Decimal(0), _d(il_portion))
+    ex = compute_exemption(conn, tax_year, filing_status, total_agi, total_base, dependents, age65, blind)
+    dec = decimal3(il_base, total_base)
+    ex_il = money(ex["total"] * dec)
+    net = max(Decimal(0), il_base - ex_il)
+    tax = money(net * param(conn, tax_year, "rate"))
+    return {"il_base": il_base, "total_base": total_base, "decimal": dec, "full_exemption": ex["total"],
+            "exemption": ex_il, "net_income": net, "tax": tax, "cutoff_applied": ex["cutoff_applied"]}
