@@ -20,6 +20,15 @@ EXAMPLES = [
 ]
 
 
+IL_EXAMPLES = [
+    "How much Illinois income tax do I owe on $60,000, single?",
+    "What is the Illinois exemption allowance?",
+    "I paid $6,000 in property tax on my home. What is my Illinois property tax credit?",
+    "My federal EITC is $2,000. What is my Illinois EITC?",
+    "What is my Illinois use tax if my AGI is $45,000?",
+]
+
+
 def md_safe(text):
     """Streamlit's markdown renderer treats a bare $ as a LaTeX math
     delimiter (st.success/st.warning/st.markdown all render markdown) --
@@ -99,7 +108,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Try an example")
-    for ex in (EXAMPLES if state_code == "CA" else []):
+    for ex in (EXAMPLES if state_code == "CA" else IL_EXAMPLES):
         if st.button(ex, use_container_width=True, key=f"ex_{ex}"):
             st.session_state.pending_question = ex
 
