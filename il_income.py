@@ -144,3 +144,140 @@ def compute_nonresident_tax(conn, tax_year, filing_status, total_agi, il_portion
     tax = money(net * param(conn, tax_year, "rate"))
     return {"il_base": il_base, "total_base": total_base, "decimal": dec, "full_exemption": ex["total"],
             "exemption": ex_il, "net_income": net, "tax": tax, "cutoff_applied": ex["cutoff_applied"]}
+
+
+# ---------------------------------------------------------------- penalties (Form IL-2210)
+def filing_date(conn, tax_year, key):
+    row = conn.execute("SELECT due_date FROM il_filing_dates WHERE tax_year=%s AND date_key=%s",
+                       (tax_year, key)).fetchone()
+    if row is None:
+        raise KeyError(f"Illinois date {key} for {tax_year} not loaded")
+    return row[0]
+
+
+def _late_rate(conn, tax_year, days_late):
+    """IL-2210 penalty rates: none if on time, 2% for 1-30 days, 10% for 31 or more."""
+    if days_late <= 0:
+        return Decimal(0)
+    if days_late <= int(param(conn, tax_year, "lp_short_days")):
+        return param(conn, tax_year, "lp_rate_short")
+    return param(conn, tax_year, "lp_rate_long")
+
+
+def compute_underpayment_penalty(conn, tax_year, tax_now, tax_prior, withholding, payments=(), exempt=False):
+    """IL-2210 Steps 2-4 (regular method, equal installments). tax_now / tax_prior are Line 3 of each year (tax
+    plus surcharges less credits); withholding is total Illinois withholding (treated as paid evenly); payments is
+    [(date, amount)] of estimated payments. Returns every intermediate figure and the penalty in whole dollars."""
+    tax_now, tax_prior, withholding = _d(tax_now), _d(tax_prior), _d(withholding)
+    line5 = tax_now - withholding
+    out = {"line3_now": tax_now, "line3_prior": tax_prior, "line5": line5, "required": Decimal(0),
+           "installment": Decimal(0), "quarters": [], "penalty": Decimal(0), "reason": None}
+    if exempt:
+        out["reason"] = "exempt"
+        return out
+    if line5 <= param(conn, tax_year, "estimated_tax_threshold"):
+        out["reason"] = "under_threshold"
+        return out
+    line6 = tax_now * param(conn, tax_year, "safe_harbor_current")
+    line7 = min(line6, tax_prior)
+    out["line6"] = line6
+    if line7 <= 0:
+        out["reason"] = "prior_year_zero"
+        return out
+    installment = line7 / 4
+    out.update({"required": line7, "installment": installment})
+    pool = [[d, _d(a)] for d, a in sorted(payments, key=lambda x: x[0])]
+    carry = Decimal(0)
+    total = Decimal(0)
+    for n in (1, 2, 3, 4):
+        due = filing_date(conn, tax_year, f"q{n}")
+        line11 = installment - withholding / 4
+        line13 = line11 - carry
+        unpaid = max(Decimal(0), line13)
+        carry = max(Decimal(0), -line13)
+        pieces, q_pen = [], Decimal(0)
+        for item in pool:
+            if unpaid <= 0:
+                break
+            if item[1] <= 0:
+                continue
+            applied = min(item[1], unpaid)
+            days = (item[0] - due).days
+            rate = _late_rate(conn, tax_year, days)
+            q_pen += applied * rate
+            pieces.append((item[0], applied, days, rate))
+            item[1] -= applied
+            unpaid -= applied
+        if unpaid > 0:
+            rate = param(conn, tax_year, "lp_rate_long")
+            q_pen += unpaid * rate
+            pieces.append((None, unpaid, None, rate))
+        out["quarters"].append({"quarter": n, "due": due, "unpaid": max(Decimal(0), line13), "penalty": q_pen,
+                                "pieces": pieces})
+        total += q_pen
+    out["penalty"] = total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    out["reason"] = "computed"
+    return out
+
+
+def compute_unpaid_tax_penalty(conn, tax_year, unpaid, paid_date=None):
+    """IL-2210 Penalty Worksheet 2: tax still owing after the original due date. paid_date=None means never paid."""
+    due = filing_date(conn, tax_year, "original_due")
+    if paid_date is None:
+        days, rate = None, param(conn, tax_year, "lp_rate_long")
+    else:
+        days = (paid_date - due).days
+        rate = _late_rate(conn, tax_year, days)
+    return {"due": due, "days": days, "rate": rate, "penalty": money(_d(unpaid) * rate)}
+
+
+def compute_late_filing_penalty(conn, tax_year, unpaid_at_original_due, filed_date):
+    """IL-2210 Step 5: only if filed after the extended due date AND tax was not paid by the original due date."""
+    ext = filing_date(conn, tax_year, "extended_due")
+    unpaid = _d(unpaid_at_original_due)
+    if filed_date <= ext or unpaid <= 0:
+        return {"extended_due": ext, "two_percent": Decimal(0), "penalty": Decimal(0)}
+    two = money(unpaid * param(conn, tax_year, "late_filing_rate"))
+    return {"extended_due": ext, "two_percent": two, "penalty": min(two, param(conn, tax_year, "late_filing_cap"))}
+
+
+# ---------------------------------------------------------------- employee withholding (IL-W-4)
+WH_PERIODS = {"weekly": 52, "biweekly": 26, "semimonthly": 24, "monthly": 12}
+
+
+def compute_il_withholding(conn, wages_this_period, pay_frequency, basic_allowances=0, additional_allowances=0,
+                           extra_withholding=0, exempt=False, tax_year=2026):
+    """IDOR 2026 Booklet IL-700-T automated payroll method:
+    withhold = 4.95% x (wages - (L1 x $2,925 + L2 x $1,000) / pay periods) + IL-W-4 Line 3 extra. Returns None for an
+    unsupported pay frequency (never a guessed number)."""
+    periods = WH_PERIODS.get(pay_frequency)
+    if not periods:
+        return None
+    wages = _d(wages_this_period)
+    extra = _d(extra_withholding)
+    if exempt:
+        return {"withholding": money(extra), "exemption_this_period": Decimal(0), "taxable": Decimal(0), "periods": periods}
+    annual_ex = (_d(basic_allowances) * param(conn, tax_year, "wh_allowance_basic")
+                 + _d(additional_allowances) * param(conn, tax_year, "wh_allowance_additional"))
+    ex_period = annual_ex / periods
+    taxable = max(Decimal(0), wages - ex_period)
+    tax = money(taxable * param(conn, tax_year, "wh_rate") + extra)
+    return {"withholding": tax, "exemption_this_period": ex_period, "taxable": taxable, "periods": periods}
+
+
+# ---------------------------------------------------------------- Schedule CR, part-year residents
+def compute_part_year_other_state_credit(conn, tax_year, filing_status, total_base, resident_base, non_il_income,
+                                         other_state_tax, dependents=0, age65=0, blind=0):
+    """Schedule CR Steps 4-6 for a part-year resident. resident_base = base income received while an Illinois
+    resident (Line 42 Column A); total_base = base income on Form IL-1040 Line 9. Step 5 prorates the exemption by
+    resident_base / total_base to get the Illinois tax due, then the decimal and lesser-of test apply."""
+    dec_cr = decimal3(non_il_income, resident_base)
+    dec_ex = decimal3(resident_base, total_base)
+    ex = compute_exemption(conn, tax_year, filing_status, total_base, total_base, dependents, age65, blind)
+    ex_il = money(ex["total"] * dec_ex)
+    line48 = max(Decimal(0), _d(resident_base) - ex_il)
+    il_tax = money(line48 * param(conn, tax_year, "rate"))
+    limit = money(il_tax * dec_cr)
+    credit = min(money(other_state_tax), limit)
+    return {"decimal_credit": dec_cr, "decimal_exemption": dec_ex, "full_exemption": ex["total"], "exemption": ex_il,
+            "line48": line48, "il_tax": il_tax, "limit": limit, "credit": credit}

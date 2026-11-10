@@ -65,6 +65,53 @@ CASES = [
     ("I live in Wisconsin and work in Illinois, earning $50,000 in wages. Do I owe Illinois income tax?",
      "il_nonresident_reciprocal", "No Illinois income tax"),
     ("I'm a nonresident, how much Illinois income tax do I owe on $50,000?", "il_nonresident_missing", "I still need"),
+    # IL-2210 penalties: installment = min(90% x tax, prior-year tax) / 4, minus withholding/4; 10% if 31+ days late
+    ("My 2025 Illinois tax after credits is $10,000, last year's tax was $8,000, and I had $2,000 withheld. I made no "
+     "estimated payments. What is my underpayment penalty?", "il_penalty_underpayment", "$600."),
+    ("My 2025 Illinois tax after credits is $10,000, last year's tax was $8,000, and I had $2,000 withheld. I paid $4,000 "
+     "in estimated tax on January 10, 2026. What is my underpayment penalty?", "il_penalty_underpayment", "$500."),
+    ("My 2025 Illinois tax after credits is $10,000, last year's tax was $20,000, and I had $8,500 withheld. I made no "
+     "estimated payments. What is my underpayment penalty?", "il_penalty_underpayment", "$50."),
+    ("My 2025 Illinois tax after credits is $3,000, last year's tax was $2,500, and I had $2,200 withheld. Do I owe an "
+     "underpayment penalty?", "il_penalty_underpayment", "$1,000 or less"),
+    ("My 2025 Illinois tax after credits is $10,000 and last year's tax was $0. Do I owe an underpayment penalty?",
+     "il_penalty_underpayment", "was zero"),
+    ("I'm a farmer with two-thirds of my income from farming. Do I owe the Illinois underpayment penalty on $20,000 of tax?",
+     "il_penalty_underpayment", "a farmer"),
+    ("I owe $3,000 on my 2025 Illinois return and paid it on May 20, 2026. What is the late payment penalty?",
+     "il_penalty_late_payment", "$300.00"),
+    ("I owe $3,000 on my 2025 Illinois return and paid it on May 1, 2026. What is the late payment penalty?",
+     "il_penalty_late_payment", "$60.00"),
+    ("I filed my 2025 Illinois return on November 20, 2026 and $5,000 of tax was unpaid on April 15. What is the late filing "
+     "penalty?", "il_penalty_late_filing", "$100.00"),
+    ("I filed my 2025 Illinois return on November 20, 2026 and $20,000 of tax was unpaid on April 15. What is the late "
+     "filing penalty?", "il_penalty_late_filing", "$250.00"),
+    ("I filed my 2025 Illinois return on October 1, 2026 and $5,000 of tax was unpaid on April 15. What is the late filing "
+     "penalty?", "il_penalty_late_filing", "No Illinois late-filing penalty"),
+    ("What are the Illinois penalties for underpaying estimated tax?", "il_penalty_rules", "2% if paid 1-30 days late"),
+    # part-year Schedule CR: decimal .333; exemption 2,850 x .600 = 1,710; tax (60,000-1,710) x 4.95% = 2,885.36 (.355 rounds up)
+    ("I was an Illinois part-year resident in 2025. My total income was $100,000, of which $60,000 was earned while I lived "
+     "in Illinois, and $20,000 of that was earned in Indiana. I paid $1,200 in income tax to Indiana. I'm single. What is my "
+     "Illinois credit for tax paid to other states?", "il_other_state_credit_part_year", "$960.82"),
+    ("I was an Illinois part-year resident in 2025. My total income was $100,000, of which $60,000 was earned while I lived "
+     "in Illinois, and $20,000 of that was earned in Indiana. I paid $800 in income tax to Indiana. I'm single. What is my "
+     "Illinois credit for tax paid to other states?", "il_other_state_credit_part_year", "$800.00"),
+    ("As a part-year resident, what is my Illinois credit for tax paid to another state?",
+     "il_other_state_credit_part_year_missing", "I still need"),
+    # IL-W-4 withholding (automated method): 4.95% x (wages - (L1 x 2,925 + L2 x 1,000)/periods) + extra
+    ("I get paid $800 weekly with 2 allowances on IL-W-4 Line 1 and 2 additional allowances. What is my Illinois "
+     "withholding per paycheck?", "il_withholding", "$32.13"),
+    ("I get paid $2,000 biweekly with 1 allowance on my IL-W-4. What is my Illinois withholding per paycheck?",
+     "il_withholding", "$93.43"),
+    ("I get paid $5,000 monthly with 2 allowances and 1 additional allowance on my IL-W-4. What is my Illinois withholding "
+     "per paycheck?", "il_withholding", "$219.24"),
+    ("I get paid $800 weekly with 2 allowances and 2 additional allowances on my IL-W-4 and ask for an extra $10 withheld. "
+     "What is my Illinois withholding per paycheck?", "il_withholding", "$42.13"),
+    ("I earn a $100,000 salary paid biweekly with 1 allowance on my IL-W-4. What is my Illinois withholding per paycheck?",
+     "il_withholding", "$184.82"),
+    ("I get paid $50 weekly with 1 allowance on my IL-W-4. What is my Illinois withholding per paycheck?",
+     "il_withholding", "$0.00"),
+    ("What is my Illinois withholding per paycheck?", "il_withholding_missing", "I need the pay amount"),
     # other domains are refused, not answered
     ("What is the sales tax in Chicago?", "domain_not_covered", "not covered yet"),
     ("How do I register for Illinois unemployment insurance as an employer?", "domain_not_covered", "not covered yet"),
@@ -76,8 +123,32 @@ NEGATIVE = [  # must NOT produce a computed answer
 ]
 
 
+def paycheck_cases():
+    """Illinois paycheck module: federal + FICA reuse the ADP-verified federal payroll code (weekly $1,923.08, single,
+    2020+ W-4, no adjustments: federal $253.27, Social Security $119.23, Medicare $27.88); Illinois withholding is
+    hand-computed: (1,923.08 - 2,925/52) x 4.95% = 92.41; take-home = 1,923.08 - 253.27 - 119.23 - 27.88 - 92.41 = 1,430.29."""
+    import il_db
+    import income_db
+    import il_payroll
+    with il_db.get_conn() as il_conn, income_db.get_conn() as inc_conn:
+        r = il_payroll.compute_il_paycheck(il_conn, inc_conn, 1923.08, "weekly", "single", il_basic_allowances=1)
+        exempt = il_payroll.compute_il_paycheck(il_conn, inc_conn, 1923.08, "weekly", "single", exempt_il=True)
+        bad_freq = il_payroll.compute_il_paycheck(il_conn, inc_conn, 1923.08, "daily", "single")
+    want = {"federal_withholding": 253.27, "social_security": 119.23, "medicare": 27.88, "il_withholding": 92.41,
+            "take_home_pay": 1430.29}
+    results = []
+    for k, v in want.items():
+        results.append((f"paycheck {k}", r is not None and abs(r[k] - v) < 0.005))
+    results.append(("paycheck exempt Illinois = 0", exempt is not None and exempt["il_withholding"] == 0.0))
+    results.append(("paycheck unsupported frequency -> None", bad_freq is None))
+    return results
+
+
 def main():
     ok = bad = 0
+    for label, good in paycheck_cases():
+        ok, bad = ok + good, bad + (not good)
+        print(("ok   " if good else "FAIL ") + "[paycheck] " + label)
     for q, cat, needle in CASES:
         r = engine.answer(q, state="IL")
         good = r.get("category") == cat and needle in (r.get("answer_text") or "")

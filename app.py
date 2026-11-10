@@ -5,6 +5,8 @@ import streamlit as st
 
 import employer_db
 import employer_payroll as ep
+import il_db
+import il_payroll
 import income_db
 import payroll_withholding as pw
 import states
@@ -296,8 +298,65 @@ with tab_chat:
             {"role": "assistant", "content": display_text, "result": res})
 
 if state_code != "CA":
-    for _tab in (tab_paycheck, tab_employer):
-        with _tab:
+    with tab_employer:
+        st.info(f"Employer payroll taxes are California-only for now. {state_label} is not covered here yet.")
+    with tab_paycheck:
+        if state_code == "IL":
+            st.subheader("Illinois Per-Paycheck Withholding Calculator")
+            st.caption(
+                "Estimates federal withholding, Social Security/Medicare and Illinois withholding for ONE paycheck "
+                "(2026: IRS Pub 15-T and IDOR Booklet IL-700-T, 4.95% automated payroll method). Pre-tax benefits are "
+                "not modeled for Illinois, and Illinois has no state disability insurance to withhold.")
+            with st.form("il_paycheck_form"):
+                il_gross = st.number_input("Gross pay this period ($)", min_value=0.0, step=50.0, key="il_gross")
+                il_freq = st.selectbox("Pay frequency", [f.title() for f in il_payroll.IL_PAY_FREQUENCIES], key="il_freq")
+                il_fed_status = st.selectbox("Federal filing status (W-4)", list(pw.FILING_STATUS_LABELS.values()),
+                                             key="il_fed_status")
+                il_step2 = st.checkbox("Federal W-4 Step 2: multiple jobs / spouse works box is checked", key="il_step2")
+                il_step3 = st.number_input("W-4 Step 3: dependent/other credits (annual $)", min_value=0.0, step=100.0,
+                                           key="il_step3")
+                il_step4a = st.number_input("W-4 Step 4(a): other income (annual $)", min_value=0.0, step=100.0,
+                                            key="il_step4a")
+                il_step4b = st.number_input("W-4 Step 4(b): deductions (annual $)", min_value=0.0, step=100.0,
+                                            key="il_step4b")
+                il_step4c = st.number_input("W-4 Step 4(c): extra federal withholding (per period $)", min_value=0.0,
+                                            step=10.0, key="il_step4c")
+                st.markdown("#### Illinois (Form IL-W-4)")
+                il_l1 = st.number_input("Basic allowances (IL-W-4 Line 1)", min_value=0, step=1, key="il_l1")
+                il_l2 = st.number_input("Additional allowances (IL-W-4 Line 2)", min_value=0, step=1, key="il_l2")
+                il_l3 = st.number_input("Extra Illinois withholding (Line 3, per period $)", min_value=0.0, step=5.0,
+                                        key="il_l3")
+                il_exempt = st.checkbox("Exempt from Illinois withholding?", key="il_exempt")
+                il_submit = st.form_submit_button("Calculate paycheck")
+            if il_submit:
+                label_to_status = {v: k for k, v in pw.FILING_STATUS_LABELS.items()}
+                with il_db.get_conn() as il_conn, income_db.get_conn() as inc_conn:
+                    st.session_state.il_paycheck_result = il_payroll.compute_il_paycheck(
+                        il_conn, inc_conn, il_gross, il_freq.lower(), label_to_status[il_fed_status],
+                        step2_checkbox=il_step2, step3_dependent_credits=il_step3, step4a_other_income=il_step4a,
+                        step4b_deductions=il_step4b, step4c_extra_withholding=il_step4c,
+                        il_basic_allowances=il_l1, il_additional_allowances=il_l2, il_extra_withholding=il_l3,
+                        exempt_il=il_exempt)
+            il_res = st.session_state.get("il_paycheck_result")
+            if il_res is None:
+                st.info("Fill in the form above and click Calculate.")
+            else:
+                st.markdown("#### Results")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Gross pay", f"${il_res['gross_pay']:,.2f}")
+                c2.metric("Total taxes", f"${il_res['total_taxes']:,.2f}")
+                c3.metric("Take-home pay", f"${il_res['take_home_pay']:,.2f}")
+                st.table(pd.DataFrame(
+                    [("Federal withholding", il_res["federal_withholding"]),
+                     ("Social Security", il_res["social_security"]),
+                     ("Medicare", il_res["medicare"]),
+                     ("Additional Medicare", il_res["additional_medicare"]),
+                     ("Illinois withholding", il_res["il_withholding"]),
+                     ("Take-home pay", il_res["take_home_pay"])],
+                    columns=["Item", "Amount ($)"]).set_index("Item").map(lambda v: f"{v:,.2f}"))
+                for note in il_res["assumptions"]:
+                    st.caption(md_safe(note))
+        else:
             st.info(f"This calculator is California-only for now. {state_label} is not covered here yet.")
     st.stop()
 

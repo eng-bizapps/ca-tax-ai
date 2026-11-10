@@ -8,6 +8,7 @@ Tax year: 2025 is the full computation year (the instructions read on
 2026-11-01). 2026 is answered only for the facts IDOR has published (rate and
 per-person exemption).
 """
+import datetime
 import re
 
 import il_db
@@ -16,7 +17,7 @@ import income_brackets
 import states
 
 DEFAULT_YEAR = 2025
-_AMOUNT_RE = re.compile(r"\$\s*([0-9][0-9,]*(?:\.\d+)?)\s*(k\b)?|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)")
+_AMOUNT_RE = re.compile(r"\$\s*([0-9](?:[0-9,]*[0-9])?(?:\.\d+)?)\s*(k\b)?|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)")
 _NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 _STATUS_LABELS = {"single": "single", "mfj": "married filing jointly", "mfs": "married filing separately",
                   "hoh": "head of household", "qss": "qualifying surviving spouse"}
@@ -62,9 +63,11 @@ _ROLES = (
 
 
 def _role(q, start, end, roles=None):
-    """What a dollar amount refers to: the nearest role keyword within 32 characters either side
+    """What a dollar amount refers to: the nearest role keyword within 48 characters either side
     (the one right after the amount wins a tie)."""
-    after, before = q[end:end + 32].lower(), q[max(0, start - 32):start].lower()
+    after, before = q[end:end + 48].lower(), q[max(0, start - 48):start].lower()
+    after = re.split(r"[$,;.]|\band\b", after)[0]     # stop at the next amount or clause
+    before = re.split(r"[$;,]|\band\b", before)[-1]    # start after the previous amount or clause
     best = None
     for role, words in (roles or _ROLES):
         for w in words:
@@ -126,7 +129,8 @@ _NOT_COVERED = (
 
 
 def _not_covered_answer(question, q):
-    if _has(q, "credit", "use tax", "nonresident", "non-resident", "part-year", "part year", "reciprocal"):
+    if _has(q, "credit", "use tax", "nonresident", "non-resident", "part-year", "part year", "reciprocal",
+            "penalty", "underpay", "estimated tax", "allowance", "il-w-4", "paycheck"):
         return None
     for term, domain in _NOT_COVERED:
         if re.search(r"\b" + re.escape(term) + r"\b", q):
@@ -412,6 +416,8 @@ def _cr_answer(conn, question, q):
                        f"(A city or county tax on those wages can still be credited, and so can tax on other kinds of "
                        f"income such as rent or business income.)", "il_other_state_credit_reciprocal", amount=0.0,
                        citation="IDOR 2025 Schedule CR Instructions", source_url=_CR_URL)
+    if _has(q, "part-year", "part year", "moved out of illinois", "moved to illinois", "moved into illinois"):
+        return _cr_part_year(conn, question, q)
     found, unassigned = _roles(question, _CR_ROLES)
     agi, nonil, paid = found.get("income"), found.get("nonil"), found.get("tax")
     status = income_brackets.detect_filing_status(question)
@@ -443,6 +449,103 @@ def _cr_answer(conn, question, q):
         f"state's required return; use the tax shown on that return, not the amount withheld on your W-2.",
         "il_other_state_credit", amount=float(r["credit"]), tax=float(after),
         citation="IDOR 2025 Schedule CR (R-12/25) Steps 4 and 6", source_url=_CR_URL.replace("-instr", ""))
+
+
+_CR_PY_ROLES = (
+    ("tax", _CR_ROLES[0][1]),
+    ("nonil", _CR_ROLES[1][1]),
+    ("resident", ("while i lived in illinois", "while an illinois resident", "while a resident", "as an illinois resident",
+                  "while i was a resident", "resident period", "lived in illinois")),
+    ("income", ("agi", "total income", "income of", "of income", "gross", "make", "made")),
+)
+
+
+def _cr_part_year(conn, question, q):
+    found, unassigned = _roles(question, _CR_PY_ROLES)
+    total, resident, nonil, paid = found.get("income"), found.get("resident"), found.get("nonil"), found.get("tax")
+    status = income_brackets.detect_filing_status(question)
+    missing = [label for label, v in (("your total income for the whole year (federal AGI)", total),
+                                      ("how much income you received while an Illinois resident", resident),
+                                      ("how much of that was earned in the other state", nonil),
+                                      ("the income tax you paid to the other state", paid),
+                                      ("your filing status", status)) if v is None]
+    if missing:
+        return _review("A part-year resident's credit for tax paid to other states only covers income received while an "
+                       "Illinois resident. To compute it I still need: " + "; ".join(missing) + ".",
+                       "il_other_state_credit_part_year_missing")
+    deps = _dependents(q) or 0
+    age65, blind = _flags(q, status)
+    r = ii.compute_part_year_other_state_credit(conn, DEFAULT_YEAR, status, total, resident, nonil, paid, deps, age65, blind)
+    return _result(
+        f"Illinois credit for tax paid to other states (Schedule CR), part-year resident, {_STATUS_LABELS[status]}:\n"
+        f"- Decimal (Step 4): {_fmt(nonil)} non-Illinois / {_fmt(resident)} resident-period income = {r['decimal_credit']}\n"
+        f"- Exemption allowance prorated (Step 5): {_fmt(r['full_exemption'])} x ({_fmt(resident)} / {_fmt(total)} = "
+        f"{r['decimal_exemption']}) = {_fmt(r['exemption'])}\n"
+        f"- Illinois tax on resident-period income: ({_fmt(resident)} - {_fmt(r['exemption'])}) x 4.95% = {_fmt(r['il_tax'])}\n"
+        f"- Limit: {_fmt(r['il_tax'])} x {r['decimal_credit']} = {_fmt(r['limit'])}\n"
+        f"- Tax paid to the other state: {_fmt(paid)}\n"
+        f"- Credit (the lesser, Form IL-1040 Line 15): {_fmt(r['credit'])}\n"
+        f"Only income received while you were an Illinois resident counts, and you must have filed the other state's "
+        f"required return.", "il_other_state_credit_part_year", amount=float(r["credit"]),
+        citation="IDOR 2025 Schedule CR (R-12/25) Steps 4-6", source_url=_CR_URL.replace("-instr", ""))
+
+
+# ---------------------------------------------------------------- employee withholding (IL-W-4)
+_WH_FREQ = (("biweekly", ("biweekly", "bi-weekly", "every two weeks", "every other week")),
+            ("semimonthly", ("semimonthly", "semi-monthly", "twice a month", "twice monthly")),
+            ("weekly", ("weekly", "every week", "each week", "a week", "per week")),
+            ("monthly", ("monthly", "every month", "each month", "a month", "per month")))
+_WH_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/withholding/documents/currentyear/il-700-t.pdf"
+
+
+def _wh_count(q, pattern):
+    m = re.search(pattern, q)
+    if not m:
+        return None
+    t = m.group(1)
+    return int(t) if t.isdigit() else _NUM_WORDS.get(t, 0)
+
+
+def _withholding_answer(conn, question, q):
+    if not (_has(q, "withhold", "withheld", "il-w-4") and _has(q, "allowance", "il-w-4", "paycheck", "per pay", "each pay")):
+        return None
+    freq = next((f for f, words in _WH_FREQ if _has(q, *words)), None)
+    word = r"(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten)"
+    additional = _wh_count(q, word + r"\s+additional\s+allowances?")
+    q_basic = re.sub(word + r"\s+additional\s+allowances?", " ", q)
+    basic = _wh_count(q_basic, word + r"\s+(?:basic\s+)?allowances?")
+    extra_m = re.search(r"(?:extra|additional)\s+\$\s*([0-9][0-9,]*(?:\.\d+)?)", q)
+    extra = float(extra_m.group(1).replace(",", "")) if extra_m else 0.0
+    exempt = bool(re.search(r"\bexempt\b", q)) and "withholding" in q
+    amts = [a for a in _amounts(question) if not (extra_m and abs(a[0] - extra) < 1e-9 and a[1] >= extra_m.start())]
+    if exempt:
+        r = ii.compute_il_withholding(conn, 0, freq or "weekly", exempt=True, extra_withholding=extra)
+        return _result("If you claim exempt on Form IL-W-4 (only for residents of Iowa, Kentucky, Michigan or Wisconsin "
+                       "via IL-W-5-NR, or who otherwise qualify), no Illinois income tax is withheld from your pay "
+                       f"(only any extra amount you request: {_fmt(r['withholding'])}).", "il_withholding",
+                       amount=float(r["withholding"]), citation="IDOR IL-W-4 instructions", source_url=_WH_URL)
+    if freq is None or not amts:
+        return _review("To compute Illinois withholding from a paycheck I need the pay amount, how often you're paid "
+                       "(weekly, biweekly, semimonthly or monthly) and the allowances on your Form IL-W-4 (Line 1 basic, "
+                       "Line 2 additional). The formula is 4.95% x (pay - (Line 1 x $2,925 + Line 2 x $1,000) / pay "
+                       "periods per year) plus any extra amount on Line 3.", "il_withholding_missing")
+    periods = ii.WH_PERIODS[freq]
+    gross, a_s, a_e = amts[0]
+    window = q[a_e:a_e + 25]
+    annual = bool(re.search(r"a year|per year|annual|salary|yearly", window)) or bool(
+        re.search(r"salary|annual", q[max(0, a_s - 25):a_s]))
+    wages = gross / periods if annual else gross
+    r = ii.compute_il_withholding(conn, wages, freq, basic or 0, additional or 0, extra)
+    lines = [f"Illinois withholding, 2026, {freq} pay: wages {_fmt(wages)}" + (f" (from {_fmt(gross)} a year)" if annual else "")
+             + f", Line 1 allowances {basic or 0}, Line 2 allowances {additional or 0}:",
+             f"- Exemption per paycheck: ({basic or 0} x $2,925 + {additional or 0} x $1,000) / {periods} = "
+             f"{_fmt(r['exemption_this_period'])}",
+             f"- Taxable wages: {_fmt(r['taxable'])}",
+             f"- Withholding at 4.95%" + (f" plus {_fmt(extra)} extra" if extra else "") + f": {_fmt(r['withholding'])}",
+             "This is IDOR's automated payroll method; its printed tables use wage-band midpoints, so a table lookup can "
+             "differ by a few cents."]
+    return _result("\n".join(lines), "il_withholding", amount=float(r["withholding"]),
+                   citation="IDOR 2026 Booklet IL-700-T (automated payroll method)", source_url=_WH_URL)
 
 
 def _nr_answer(conn, question, q):
@@ -504,13 +607,207 @@ def _nr_answer(conn, question, q):
                    citation="IDOR 2025 Schedule NR (R-12/25) Step 5", source_url=_NR_URL.replace("-instr", ""))
 
 
+# ---------------------------------------------------------------- Penalties (Form IL-2210)
+_MONTHS = {"january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4, "may": 5,
+           "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+           "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12}
+_DATE_PATTERNS = (
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
+    re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"),
+    re.compile(r"\b(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b",
+               re.IGNORECASE),
+)
+_PEN_ROLES = (
+    ("prior", ("last year", "prior year", "2024")),
+    ("withheld", ("withheld", "withholding")),
+    ("now", ("this year", "2025", "tax after credits", "my tax", "tax liability", "after credits")),
+)
+_IL2210_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-2210.pdf"
+
+
+def _dates(question):
+    """[(date, start, end)] for ISO, MM/DD/YYYY and 'Month D, YYYY' dates."""
+    out = []
+    for i, pat in enumerate(_DATE_PATTERNS):
+        for m in pat.finditer(question):
+            try:
+                if i == 0:
+                    d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                elif i == 1:
+                    d = datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                else:
+                    d = datetime.date(int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2)))
+            except ValueError:
+                continue
+            out.append((d, m.start(), m.end()))
+    return sorted(out, key=lambda x: x[1])
+
+
+def _mask(question, spans):
+    chars = list(question)
+    for a, b in spans:
+        for i in range(a, b):
+            chars[i] = " "
+    return "".join(chars)
+
+
+def _payments(question):
+    """Estimated payments written as '$4,000 ... on <date>': [(date, amount)] plus the spans to mask."""
+    pays, spans = [], []
+    amts = _amounts(question)
+    for d, ds, de in _dates(question):
+        prior = [a for a in amts if a[2] <= ds and ds - a[2] <= 45]
+        if prior:
+            v, a_s, a_e = prior[-1]
+            pays.append((d, v))
+            spans.append((a_s, de))
+    return pays, spans
+
+
+def _penalty_rules_answer():
+    return _result(
+        "Illinois penalties on Form IL-2210: (1) Underpayment of estimated tax. You owe none if your tax after withholding "
+        "and credits is $1,000 or less, if last year's tax was zero, if you weren't required to file last year, if you are a "
+        "farmer (two-thirds of gross income from farming), or if you are 65+ and live permanently in a nursing home. "
+        "Otherwise the penalty is waived if you timely paid the lesser of 100% of last year's tax or 90% of this year's, in "
+        "four equal installments (April 15, June 15, September 15 and January 15). Late installments are charged 2% if "
+        "paid 1-30 days late and 10% if 31 or more days late or never paid. (2) Late payment of the tax you owe at filing: "
+        "same 2% / 10% rates, counted from the original due date (April 15, 2026 for 2025). An extension to file does not "
+        "extend the time to pay. (3) Late filing: only if you file after the extended due date (October 15, 2026) and the "
+        "tax wasn't paid by April 15; the lesser of $250 or 2% of the unpaid tax. You can leave Line 34 blank and let IDOR "
+        "figure the penalty and bill you. Give me your 2025 tax after credits, last year's tax, your withholding and any "
+        "estimated payments (with dates) and I'll compute the underpayment penalty.",
+        "il_penalty_rules", citation="IDOR 2025 Form IL-2210 Instructions", source_url=_IL2210_URL)
+
+
+def _penalty_answer(conn, question, q):
+    if "penalt" not in q and "il-2210" not in q:
+        return None
+    late_filing = _has(q, "late filing", "late-filing", "filed late", "file late", "filing late", "after the extended")
+    late_pay = _has(q, "late payment", "late-payment", "paid late", "pay late", "paying late", "paid it on", "paid on")
+    under = _has(q, "underpay", "estimated tax", "il-2210", "estimated payment")
+    dates = _dates(question)
+    found = _amounts(question)
+    if not found and not dates:
+        return _penalty_rules_answer()
+    pays, spans = _payments(question)
+
+    if late_filing and not under:
+        filed = dates[0][0] if dates else None
+        masked = _mask(question, [(a, b) for _, a, b in dates])
+        amts = _amounts(masked)
+        if filed is None or not amts:
+            return _review("To compute the Illinois late-filing penalty I need the date you filed and how much tax was still "
+                           "unpaid after the original due date (April 15, 2026 for 2025). The penalty applies only if you "
+                           "file after the extended due date (October 15, 2026): the lesser of $250 or 2% of that unpaid "
+                           "tax.", "il_penalty_missing")
+        r = ii.compute_late_filing_penalty(conn, DEFAULT_YEAR, amts[0][0], filed)
+        if r["penalty"] == 0:
+            return _result(f"No Illinois late-filing penalty: it applies only if you file after the extended due date "
+                           f"({r['extended_due']:%B %d, %Y}) and the tax wasn't paid by the original due date. "
+                           f"(Late payment of the tax is penalized separately.)", "il_penalty_late_filing", amount=0.0,
+                           citation="IDOR 2025 Form IL-2210, Step 5", source_url=_IL2210_URL)
+        return _result(f"Illinois late-filing penalty: 2% x {_fmt(amts[0][0])} unpaid tax = {_fmt(r['two_percent'])}; the "
+                       f"penalty is the lesser of that and $250.00, so {_fmt(r['penalty'])}. It applies because you filed "
+                       f"after the extended due date ({r['extended_due']:%B %d, %Y}) and the tax wasn't paid by April 15, "
+                       f"2026. This does not include the late-payment penalty on the unpaid tax, or the additional penalty "
+                       f"IDOR can assess if you don't file within 30 days of a notice.",
+                       "il_penalty_late_filing", amount=float(r["penalty"]), citation="IDOR 2025 Form IL-2210, Step 5",
+                       source_url=_IL2210_URL)
+
+    if late_pay and not under:
+        paid = dates[0][0] if dates else None
+        masked = _mask(question, [(a, b) for _, a, b in dates])
+        amts = _amounts(masked)
+        if not amts:
+            return _review("To compute the Illinois late-payment penalty on tax you owed at filing I need the unpaid amount "
+                           "and the date you paid it. The rate is 2% if paid 1-30 days after April 15, 2026 and 10% if "
+                           "31 or more days after.", "il_penalty_missing")
+        r = ii.compute_unpaid_tax_penalty(conn, DEFAULT_YEAR, amts[0][0], paid)
+        if paid is None:
+            when = "never paid (10% applies)"
+        elif r["days"] <= 0:
+            when = f"paid on time ({paid:%B %d, %Y})"
+        else:
+            when = f"paid {r['days']} days after the original due date of {r['due']:%B %d, %Y} ({paid:%B %d, %Y})"
+        return _result(f"Illinois late-payment penalty on {_fmt(amts[0][0])} of unpaid tax, {when}: rate "
+                       f"{r['rate'] * 100:.0f}% (2% for 1-30 days late, 10% for 31 or more) = {_fmt(r['penalty'])}. An "
+                       f"extension to file doesn't extend the time to pay. This is the Penalty Worksheet 2 penalty only.",
+                       "il_penalty_late_payment", amount=float(r["penalty"]),
+                       citation="IDOR 2025 Form IL-2210, Penalty Worksheet 2", source_url=_IL2210_URL)
+
+    if not under and not (late_filing or late_pay):
+        return _penalty_rules_answer()
+
+    masked = _mask(question, spans + [(a, b) for _, a, b in dates])
+    roles, unassigned = _roles(masked, _PEN_ROLES)
+    now, prior, withheld = roles.get("now"), roles.get("prior"), roles.get("withheld")
+    exempt = None
+    if _has(q, "farmer", "two-thirds", "farming income"):
+        exempt = "a farmer (at least two-thirds of gross income from farming)"
+    elif "nursing home" in q:
+        exempt = "65 or older and permanently living in a nursing home"
+    elif re.search(r"(?:not|n't) required to file (?:last year|for 2024|a 2024)", q):
+        exempt = "not required to file an Illinois return last year"
+    if exempt:
+        return _result(f"No Illinois underpayment-of-estimated-tax penalty: you are {exempt}, which exempts you "
+                       f"(Form IL-1040 Line 34a, 34b or 34d). Late payment of any tax you owe at filing is penalized "
+                       f"separately.", "il_penalty_underpayment", amount=0.0, citation="IDOR 2025 Form IL-2210 Instructions",
+                       source_url=_IL2210_URL)
+    if withheld is None and "withh" not in q:
+        withheld = 0.0
+    missing = [label for label, v in (("your 2025 Illinois tax after credits", now), ("last year's (2024) tax after credits", prior))
+               if v is None]
+    if missing:
+        return _review("To compute the Illinois underpayment-of-estimated-tax penalty I still need: " + "; ".join(missing)
+                       + ". Also helpful: the Illinois tax withheld this year and any estimated payments with their dates.",
+                       "il_penalty_missing")
+    withheld = withheld or 0.0
+    r = ii.compute_underpayment_penalty(conn, DEFAULT_YEAR, now, prior, withheld, pays)
+    head = (f"Illinois underpayment-of-estimated-tax penalty, 2025 (IL-2210 regular method): this year's tax after credits "
+            f"{_fmt(now)}, last year's {_fmt(prior)}, withholding {_fmt(withheld)}.")
+    if r["reason"] == "under_threshold":
+        return _result(f"{head}\nNo penalty: your tax after withholding ({_fmt(r['line5'])}) is $1,000 or less.",
+                       "il_penalty_underpayment", amount=0.0, citation="IDOR 2025 Form IL-2210, Step 2 Line 7",
+                       source_url=_IL2210_URL)
+    if r["reason"] == "prior_year_zero":
+        return _result(f"{head}\nNo penalty: last year's tax after credits was zero, so no installments were required.",
+                       "il_penalty_underpayment", amount=0.0, citation="IDOR 2025 Form IL-2210 Instructions",
+                       source_url=_IL2210_URL)
+    lines = [head,
+             f"- Required annual payment: the lesser of 90% of this year's tax ({_fmt(r['line6'])}) and last year's tax "
+             f"({_fmt(prior)}) = {_fmt(r['required'])}, or {_fmt(r['installment'])} per quarter",
+             f"- Withholding counts as paid evenly: {_fmt(withheld / 4)} per quarter"]
+    for qd in r["quarters"]:
+        if qd["unpaid"] <= 0:
+            lines.append(f"- Q{qd['quarter']} (due {qd['due']:%b %d, %Y}): covered, no penalty")
+            continue
+        bits = []
+        for d, amt, days, rate in qd["pieces"]:
+            if d is None:
+                bits.append(f"{_fmt(amt)} never paid at {rate * 100:.0f}%")
+            elif days <= 0:
+                bits.append(f"{_fmt(amt)} paid {d:%b %d, %Y} (on time)")
+            else:
+                bits.append(f"{_fmt(amt)} paid {d:%b %d, %Y}, {days} days late at {rate * 100:.0f}%")
+        lines.append(f"- Q{qd['quarter']} (due {qd['due']:%b %d, %Y}): {_fmt(qd['unpaid'])} short; "
+                     + "; ".join(bits) + f" = {_fmt(qd['penalty'])}")
+    pen = r["penalty"]
+    lines.append(f"Penalty (rounded to whole dollars): ${int(pen):,}." if pen else "No penalty is due.")
+    lines.append("Assumes the only estimated payments are the ones you listed, withholding was paid evenly, and you use the "
+                 "regular method (no annualized income, pass-through withholding or actual quarterly withholding). You can "
+                 "also leave Line 34 blank and let IDOR figure and bill the penalty.")
+    return _result("\n".join(lines), "il_penalty_underpayment", amount=float(pen),
+                   citation="IDOR 2025 Form IL-2210, Steps 2-4", source_url=_IL2210_URL)
+
+
 def answer_state(question, tax_type=None):
     q = question.lower()
     refusal = _not_covered_answer(question, q)
     if refusal:
         return refusal
     with il_db.get_conn() as conn:
-        for fn in (_cr_answer, _nr_answer, _use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _exemption_answer,
+        for fn in (_penalty_answer, _withholding_answer, _cr_answer, _nr_answer, _use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _exemption_answer,
                    _rate_answer):
             result = fn(conn, question, q)
             if result:

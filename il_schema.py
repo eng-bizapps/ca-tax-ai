@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS il_reciprocal_states (
     source_url TEXT
 );
 
+CREATE TABLE IF NOT EXISTS il_filing_dates (
+    id       SERIAL PRIMARY KEY,
+    tax_year INTEGER NOT NULL,
+    date_key TEXT NOT NULL,
+    due_date DATE NOT NULL,
+    note     TEXT,
+    UNIQUE (tax_year, date_key)
+);
+
 CREATE TABLE IF NOT EXISTS il_income_inventory (
     id         SERIAL PRIMARY KEY,
     part       TEXT NOT NULL,
@@ -100,6 +109,32 @@ PARAMS = [
     (2025, "estimated_tax_threshold", 1000, "Estimated payments may be required if liability after withholding/credits exceeds this", f"{_C25}, Line 26", INSTR),
 ]
 
+IL2210_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-2210.pdf"
+PENALTY_PARAMS = [
+    (2025, "lp_rate_short", 0.02, "Late-payment penalty rate, 1-30 days late", "IDOR 2025 IL-2210, Penalty rates", IL2210_URL),
+    (2025, "lp_rate_long", 0.10, "Late-payment penalty rate, 31 or more days late (and unpaid)", "IDOR 2025 IL-2210, Penalty rates", IL2210_URL),
+    (2025, "lp_short_days", 30, "Last day count that still takes the lower rate", "IDOR 2025 IL-2210, Penalty rates", IL2210_URL),
+    (2025, "safe_harbor_current", 0.90, "Waived if you timely paid 90% of this year's tax", "IDOR 2025 IL-2210, Step 2 Line 6", IL2210_URL),
+    (2025, "late_filing_rate", 0.02, "Late-filing penalty: 2% of tax required to be shown less timely payments/credits", "IDOR 2025 IL-2210, Step 5 Line 32", IL2210_URL),
+    (2025, "late_filing_cap", 250, "Late-filing penalty is the lesser of this and the 2% amount", "IDOR 2025 IL-2210, Step 5 Line 33", IL2210_URL),
+]
+WH_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/withholding/documents/currentyear/il-700-t.pdf"
+WITHHOLDING_PARAMS = [
+    (2026, "wh_allowance_basic", 2925, "Annual exemption per basic allowance (IL-W-4 Line 1)", "IDOR 2026 Booklet IL-700-T, automated payroll method", WH_URL),
+    (2026, "wh_allowance_additional", 1000, "Annual exemption per additional allowance (IL-W-4 Line 2)", "IDOR 2026 Booklet IL-700-T, automated payroll method", WH_URL),
+    (2026, "wh_rate", 0.0495, "Illinois withholding rate", "IDOR 2026 Booklet IL-700-T", WH_URL),
+]
+PARAMS = PARAMS + PENALTY_PARAMS + WITHHOLDING_PARAMS
+
+FILING_DATES = [  # (tax_year, key, date, note)
+    (2025, "q1", "2025-04-15", "15th day of the 4th month"),
+    (2025, "q2", "2025-06-16", "June 15, 2025 is a Sunday: next business day"),
+    (2025, "q3", "2025-09-15", "15th day of the 9th month"),
+    (2025, "q4", "2026-01-15", "15th day of the 1st month after year end"),
+    (2025, "original_due", "2026-04-15", "Original due date of the 2025 Form IL-1040"),
+    (2025, "extended_due", "2026-10-15", "Automatic six-month extended due date"),
+]
+
 USE_TAX = [  # (agi_min, agi_max, use_tax)
     (0, 10000, 3), (10001, 20000, 8), (20001, 30000, 13), (30001, 40000, 18),
     (40001, 50000, 23), (50001, 75000, 31), (75001, 100000, 44),
@@ -133,17 +168,26 @@ LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
      "il_other_state_credit", "Decimal = non-Illinois income / base income (3 places); credit = lesser of tax paid and Illinois "
      "tax x decimal. Iowa/Kentucky/Michigan/Wisconsin wages and foreign taxes refused. The user supplies the non-Illinois "
      "portion; per-line sourcing (IAF worksheet, K-1s) is not computed."),
-    ("credits", "other-state-credit-part-year", "Schedule CR for part-year residents (Steps 5-6 proration)", "deferred", None,
-     "Not loaded."),
+    ("credits", "other-state-credit-part-year", "Schedule CR for part-year residents (Steps 5-6 proration)", "built",
+     "il_other_state_credit_part_year", "Step 5 prorates the exemption by resident-period income / base income, then the "
+     "decimal and the lesser-of test as for full-year residents. The user supplies the resident-period income and the "
+     "non-Illinois portion."),
     ("credits", "eitc", "Illinois EITC (20% of federal EITC) and Child Tax Credit (40% of IL EITC)", "partial",
      "il_eitc", "User supplies the federal EITC; the federal EITC and the Illinois Expanded EITC Worksheet are not computed."),
     ("other", "use-tax", "Individual use tax (UT Table / worksheet)", "built", "il_use_tax", "AGI table and 6.25%/1% worksheet."),
-    ("other", "estimated-tax-penalty", "Underpayment of estimated tax penalty (IL-2210)", "deferred", None, "Not loaded."),
+    ("other", "estimated-tax-penalty", "Penalties (IL-2210): underpayment of estimated tax, late payment, late filing",
+     "partial", "il_penalty",
+     "Regular method: 90%/prior-year safe harbor, $1,000 floor, farmer/nursing-home/not-required exemptions, equal quarterly "
+     "installments, payments applied in date order, 2%/10% rates. Not computed: annualized income (Step 6), pass-through "
+     "withholding, actual quarterly withholding, the extra late-filing penalty after an IDOR notice."),
     ("residency", "schedule-nr", "Nonresident / part-year computation (Schedule NR Steps 5)", "partial", "il_nonresident",
      "Decimal = Illinois base income / total base income; exemption prorated by it; 4.95%. The user supplies the Illinois "
      "portion of income; per-line sourcing, the IAF apportionment worksheet and K-1s are not computed. Reciprocal-state "
      "residents (IA, KY, MI, WI) are told wages are exempt."),
-    ("withholding", "il-w-4", "Employee withholding (IL-W-4)", "deferred", None, "Paycheck calculator is California-only for now."),
+    ("withholding", "il-w-4", "Employee withholding (IL-W-4): 4.95% x (wages - allowances / pay periods) + extra", "built",
+     "il_withholding", "2026 automated payroll method (IL-700-T): weekly, biweekly, semimonthly, monthly. The booklet's "
+     "tables use wage-band midpoints, so a table lookup can differ by a few cents. Federal withholding and FICA reuse the "
+     "verified federal payroll module in the Illinois paycheck tab; pre-tax benefit elections are not modeled for Illinois."),
 ]
 
 
@@ -169,6 +213,11 @@ def seed():
         conn.execute(
             "INSERT INTO il_use_tax_table (tax_year, agi_min, pct_of_agi) VALUES (2025,100001,0.0005) "
             "ON CONFLICT (tax_year, agi_min) DO UPDATE SET pct_of_agi=EXCLUDED.pct_of_agi")
+        for yr, key, due, note in FILING_DATES:
+            conn.execute(
+                "INSERT INTO il_filing_dates (tax_year, date_key, due_date, note) VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (tax_year, date_key) DO UPDATE SET due_date=EXCLUDED.due_date, note=EXCLUDED.note",
+                (yr, key, due, note))
         for name, cite, url in RECIPROCAL:
             conn.execute(
                 "INSERT INTO il_reciprocal_states (state_name, citation, source_url) VALUES (%s,%s,%s) "
@@ -193,7 +242,7 @@ def seed():
 
 def status():
     with db.get_conn() as conn:
-        for t in ("il_income_params", "il_use_tax_table", "il_eitc_max", "il_reciprocal_states", "il_income_inventory"):
+        for t in ("il_income_params", "il_use_tax_table", "il_eitc_max", "il_reciprocal_states", "il_filing_dates", "il_income_inventory"):
             print(t, conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
         for s, n in conn.execute("SELECT status, count(*) FROM il_income_inventory GROUP BY status ORDER BY status"):
             print(f"  ledger {s}: {n}")
