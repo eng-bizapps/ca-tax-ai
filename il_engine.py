@@ -17,7 +17,12 @@ import income_brackets
 import states
 
 DEFAULT_YEAR = 2025
-_AMOUNT_RE = re.compile(r"\$\s*([0-9](?:[0-9,]*[0-9])?(?:\.\d+)?)\s*(k\b)?|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)")
+_AMOUNT_RE = re.compile(
+    r"\$\s*([0-9](?:[0-9,]*[0-9])?(?:\.\d+)?)\s*(k\b)?"                      # $60,000  $60k
+    r"|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)"                       # 60,000
+    r"|(?<![\w$.,/-])(\d+(?:\.\d+)?)\s*k\b"                                    # 60k
+    r"|(?<![\w$.,/-])(\d{4,9})(?![\d/,]|\.\d|-\d)")                            # 60000
+_NOT_AMOUNTS = frozenset(range(2020, 2031)) | {1040, 2210, 1099}              # tax years, form numbers
 _NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 _STATUS_LABELS = {"single": "single", "mfj": "married filing jointly", "mfs": "married filing separately",
                   "hoh": "head of household", "qss": "qualifying surviving spouse"}
@@ -45,10 +50,14 @@ def _fmt(x):
 def _amounts(question):
     out = []
     for m in _AMOUNT_RE.finditer(question):
-        raw = m.group(1) or m.group(3)
+        raw = m.group(1) or m.group(3) or m.group(4) or m.group(5)
         v = float(raw.replace(",", ""))
-        if m.group(2):
+        if m.group(2) or m.group(4):
             v *= 1000
+        if m.group(5) and int(v) in _NOT_AMOUNTS:
+            continue
+        if m.group(4) and int(v) in (401000, 403000):    # 401k / 403b-style plan names
+            continue
         out.append((v, m.start(), m.end()))
     return out
 
@@ -58,6 +67,7 @@ _ROLES = (
     ("property", ("property tax", "real estate tax")),
     ("education", ("education", "tuition", "school", "k-12", "k12")),
     ("eitc", ("eitc", "earned income")),
+    ("paid", ("withheld", "withholding", "estimated payment")),
     ("income", ("income", "agi", "salary", "wages", "earn", "make", "made", "gross", "per year", "a year", "annually")),
 )
 
@@ -212,7 +222,9 @@ def _k12_answer(conn, question, q):
     r = ii.compute_k12_credit(conn, DEFAULT_YEAR, status or "single", agi or 0, expenses)
     if r["cutoff_applied"]:
         return _result(f"No K-12 education expense credit: your AGI is over the limit "
-                       f"({_fmt(ii.agi_limit(conn, DEFAULT_YEAR, status or 'single'))}).", "il_k12_credit", amount=0.0)
+                       f"({_fmt(ii.agi_limit(conn, DEFAULT_YEAR, status or 'single'))}).", "il_k12_credit", amount=0.0,
+                       citation="IDOR 2025 Schedule ICR Section B",
+                       source_url="https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-icr.pdf")
     over = max(0, expenses - 250)
     return _result(f"Illinois K-12 education expense credit on {_fmt(expenses)} of qualified expenses: "
                    f"25% x ({_fmt(expenses)} - $250.00) = {_fmt(ii.money(over * 0.25))}, capped at $750.00, so "
@@ -245,7 +257,9 @@ def _property_credit_answer(conn, question, q):
         note = f" Your Illinois tax before credits is {_fmt(tax_avail)}, so the credit is limited to that."
     r = ii.compute_property_credit(conn, DEFAULT_YEAR, status or "single", agi or 0, prop, tax_avail)
     if r["cutoff_applied"]:
-        return _result("No property tax credit: your AGI is over the limit.", "il_property_credit", amount=0.0)
+        return _result("No property tax credit: your AGI is over the limit.", "il_property_credit", amount=0.0,
+                       citation="IDOR 2025 Schedule ICR Section A",
+                       source_url="https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-icr.pdf")
     return _result(f"Illinois property tax credit: 5% x {_fmt(prop)} = {_fmt(r['computed'])}"
                    + (f", limited to {_fmt(r['credit'])}." if r["credit"] != r["computed"] else ".")
                    + note + " It applies to the principal residence only (not a vacation home or rental), for property tax "
@@ -277,14 +291,14 @@ def _exemption_answer(conn, question, q):
 
 
 def _rate_answer(conn, question, q):
-    if not ("rate" in q and "tax" in q) or _amounts(question) or _has(q, "use tax", "sales", "property"):
+    if not (re.search(r"\brate\b|bracket|percent", q) and "tax" in q) or _amounts(question) or _has(q, "use tax", "sales", "property"):
         return None
     year = _year(question) or DEFAULT_YEAR
     if year not in (2025, 2026):
         return _unsupported_year(year)
     rate = ii.param(conn, year, "rate")
     return _result(f"Illinois taxes individual net income at a flat {rate * 100:.2f}% for tax year {year}, with no "
-                   f"brackets. Net income is your federal AGI adjusted by Illinois additions and subtractions, less the "
+                   f"brackets (one rate for every income level). Net income is your federal AGI adjusted by Illinois additions and subtractions, less the "
                    f"exemption allowance.", "il_rate", citation="IDOR 2025 IL-1040 Instructions",
                    source_url="https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-instr.pdf")
 
@@ -304,7 +318,8 @@ def _retirement_info_answer(question, q):
 
 
 def _compute_answer(conn, question, q):
-    if not (_has(q, "income tax", "tax do i owe", "tax would i owe", "how much tax", "tax on", "what is my tax", "owe")
+    if not (_has(q, "income tax", "tax do i owe", "tax would i owe", "how much tax", "tax on", "what is my tax", "owe",
+                 "my illinois tax", "my tax", "illinois tax", "state tax", "state income tax")
             and _amounts(question)):
         return None
     year = _year(question)
@@ -312,11 +327,19 @@ def _compute_answer(conn, question, q):
         return _unsupported_year(year)
     found, unassigned = _roles(question)
     agi = found.get("income")
-    if agi is None and unassigned and not found:
-        agi = unassigned[0]
+    explicit_total = re.search(r"\bagi\b|total income|adjusted gross|gross income", q) is not None
+    if agi is not None and [v for v in unassigned if v != agi] and not explicit_total:
+        return _review("You gave me more than one amount and I can't be sure the one I'd use is your total income. Tell me "
+                       "your federal adjusted gross income (all income after adjustments) as one figure, for example 'my "
+                       "AGI is $60,000'.", "il_compute_ambiguous_income")
+    if agi is None and len(unassigned) > 1 and not found:
+        return _review("You gave me several amounts and I can't tell which one is your federal adjusted gross income (total "
+                       "income after adjustments). Tell me that one figure, for example 'my AGI is $60,000'.",
+                       "il_compute_ambiguous_income")
     if agi is None and unassigned:
         agi = unassigned[0]
     status = income_brackets.detect_filing_status(question)
+    ignored = [v for v in unassigned if v != agi]
     if agi is None:
         return _review("Tell me your federal adjusted gross income (or total income) and I'll compute your Illinois tax.",
                        "il_compute_missing_income")
@@ -349,6 +372,12 @@ def _compute_answer(conn, question, q):
         lines.append(f"- Exemption allowance: {_fmt(ex['total'])} ({', '.join(parts)})")
     lines.append(f"- Net income: {_fmt(r['net_income'])}")
     lines.append(f"- Tax at {r['rate'] * 100:.2f}%: {_fmt(r['tax'])}")
+    if ignored:
+        lines.append(f"I used {_fmt(agi)} as your income; the other amount(s) you mentioned "
+                     f"({', '.join(_fmt(v) for v in ignored)}) were not used.")
+    if found.get("paid"):
+        lines.append(f"Your {_fmt(found['paid'])} of withholding or payments isn't subtracted here: what you owe (or are "
+                     f"refunded) is this tax less your credits, withholding and payments.")
     lines.append("This assumes an Illinois resident for the full year and no other Schedule M additions or subtractions, "
                  "and is before credits (property tax, K-12, other-state) and payments.")
     return _result("\n".join(lines), "il_income_compute", tax=float(r["tax"]),

@@ -23,12 +23,14 @@ STATES = {
         "db_env": {"sales": "DATABASE_URL", "income": "INCOME_DATABASE_URL",
                    "property": "PROPERTY_DATABASE_URL", "employer": "EMPLOYER_DATABASE_URL"},
         "engine": None,   # California is served by engine.py itself
+        "aliases": ("caleitc", "ftb", "cdtfa", "edd", "calfresh", "form 540", "calif"),
     },
     "IL": {
         "name": "Illinois",
         "domains": {"income"},
         "db_env": {"income": "IL_REVENUE_DATABASE_URL"},
         "engine": "il_engine",
+        "aliases": ("idor", "il-1040", "il 1040", "ides", "il-w-4"),
     },
 }
 
@@ -69,7 +71,8 @@ def mentioned_other_states(question, code):
     """State codes other than `code` whose full name appears in the question."""
     q = question.lower()
     return [c for c, s in STATES.items()
-            if c != code and re.search(r"\b" + re.escape(s["name"].lower()) + r"\b", q)]
+            if c != code and any(re.search(r"\b" + re.escape(n.lower()) + r"\b", q)
+                                 for n in (s["name"],) + tuple(s.get("aliases", ())))]
 
 
 def mismatch_answer(question, code):
