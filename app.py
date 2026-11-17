@@ -31,6 +31,8 @@ IL_EXAMPLES = [
     "How much sales tax on a $500 couch in Chicago?",
     "Is candy taxable in Illinois?",
     "How much sales tax on $100 of groceries in Chicago?",
+    "I bought a 2023 Honda Civic from a private seller for $14,000. How much Illinois vehicle tax do I owe?",
+    "I bought a $30,000 car from a dealer and will register it in Chicago. How much tax do I owe?",
 ]
 
 

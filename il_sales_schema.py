@@ -74,6 +74,31 @@ CREATE TABLE IF NOT EXISTS il_sales_matrix_items (
     source      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS il_vehicle_pp_table_a (
+    tax_year INTEGER NOT NULL,
+    age_min  INTEGER NOT NULL,
+    age_max  INTEGER,
+    tax      NUMERIC NOT NULL,
+    PRIMARY KEY (tax_year, age_min)
+);
+
+CREATE TABLE IF NOT EXISTS il_vehicle_pp_table_b (
+    tax_year  INTEGER NOT NULL,
+    price_min NUMERIC NOT NULL,
+    price_max NUMERIC,
+    tax       NUMERIC NOT NULL,
+    PRIMARY KEY (tax_year, price_min)
+);
+
+CREATE TABLE IF NOT EXISTS il_vehicle_pp_local (
+    jurisdiction TEXT NOT NULL,
+    category     TEXT NOT NULL,
+    age_min      INTEGER NOT NULL,
+    age_max      INTEGER,
+    tax          NUMERIC NOT NULL,
+    PRIMARY KEY (jurisdiction, category, age_min)
+);
+
 CREATE TABLE IF NOT EXISTS il_sales_item_aliases (
     alias   TEXT NOT NULL,
     item_id TEXT NOT NULL,
@@ -193,6 +218,47 @@ ALIASES = {
     "4009": ["boat", "watercraft", "airplane", "aircraft"],
 }
 
+
+_RUT5 = "IDOR RUT-5 Private Party Vehicle Use Tax Chart for 2026 (R-12/25)"
+_RUT50 = "IDOR RUT-50 Instructions (R-04/26)"
+_RUT6 = "IDOR RUT-6 Form RUT-50 Reference Guide (R-03/24)"
+_RUT25 = "IDOR RUT-25 Instructions (R-07/26)"
+_ST556 = "IDOR ST-556 Instructions (R-12/24)"
+_NITA = "IDOR Informational Bulletin FY 2026-34 (NITA rate change effective 2026-08-01)"
+_FORMS = BASE + "/content/dam/soi/en/web/tax/forms/sales/documents/vehicleusetax/"
+
+PP_TABLE_A_YEAR = 2026
+PP_TABLE_A = [(0, 1, 465), (2, 2, 365), (3, 3, 290), (4, 4, 240), (5, 5, 190), (6, 6, 165), (7, 7, 155), (8, 8, 140),
+              (9, 9, 125), (10, 10, 115), (11, None, 100)]      # (age_min, age_max, tax)
+PP_TABLE_B = [(15000, 19999.99, 850), (20000, 24999.99, 1100), (25000, 29999.99, 1350), (30000, 49999.99, 1600),
+              (50000, 99999.99, 2600), (100000, 999999.99, 5100), (1000000, None, 10100)]
+PP_LOCAL = [  # (jurisdiction, category, age_min, age_max, tax)
+    ("chicago", "standard", 0, 3, 80), ("chicago", "standard", 4, 8, 65), ("chicago", "standard", 9, 14, 50),
+    ("chicago", "standard", 15, None, 0),
+    ("chicago", "exception", 0, 14, 15), ("chicago", "exception", 15, None, 0),
+    ("chicago", "motorcycle", 0, None, 15),
+    ("cook", "standard", 0, 3, 225), ("cook", "standard", 4, 8, 175), ("cook", "standard", 9, None, 90),
+    ("cook", "exception", 0, None, 25), ("cook", "motorcycle", 0, None, 90),
+]
+VEHICLE_PARAMS = [  # (key, effective_from, value, description, citation, url)
+    ("veh_pp_exception_tax", "2026-01-01", 15, "Private party tax for family/estate/reorganization exceptions", _RUT5, _FORMS + "rut-5.pdf"),
+    ("veh_pp_motorcycle_tax", "2026-01-01", 25, "Private party tax on a motorcycle, motor-driven cycle, ATV or motorized pedalcycle", _RUT5, _FORMS + "rut-5.pdf"),
+    ("veh_pp_table_threshold", "2026-01-01", 15000, "Table A below this price/value, Table B at or above", _RUT50, _FORMS + "rut-50-instr.pdf"),
+    ("veh_chicago_home_rule_use_tax", "1990-01-01", 0.0125, "Chicago Home Rule Use Tax added to titled items bought by a Chicago address", _ST556, _FORMS + "st-556-instr.pdf"),
+    ("veh_depreciation_per_month", "1990-01-01", 0.0167, "RUT-25 depreciation per whole month of out-of-state use (motor vehicles)", _RUT25, _FORMS + "rut-25-instr.pdf"),
+    ("veh_nonresident_exempt_months", "1990-01-01", 3, "Months of out-of-state use after which a nonresident individual owes no Illinois use tax", _RUT25, _FORMS + "rut-25-instr.pdf"),
+    ("veh_med_fee_cap", "1990-01-01", 20, "Metro-East Mass Transit District fee cap on titled items", _ST556, _FORMS + "st-556-instr.pdf"),
+]
+VEHICLE_SOURCES = [
+    ("rut5", "rut-5-2026-R-12-25.pdf", _FORMS + "rut-5.pdf", "2026-11-17", 1, "Private party vehicle use tax Tables A and B, 2026."),
+    ("rut50", "rut-50-instr-R-04-26.pdf", _FORMS + "rut-50-instr.pdf", "2026-11-17", 1, "RUT-50 instructions: age rule, exemptions, exceptions."),
+    ("rut6", "rut-6-R-03-24.pdf", _FORMS + "rut-6.pdf", "2026-11-17", 1, "Chicago and Cook County private party vehicle use tax (edition R-03/24, bundled with RUT-50 instructions)."),
+    ("rut25", "rut-25-instr-R-07-26.pdf", _FORMS + "rut-25-instr.pdf", "2026-11-17", 1, "Vehicle use tax on out-of-state retailer purchases."),
+    ("st556", "st-556-instr-R-12-24.pdf", _FORMS + "st-556-instr.pdf", "2026-11-17", 1, "Retailer transaction return for titled items (older edition)."),
+    ("fy2026_34", "fy-2026-34-NITA.pdf", BASE + "/content/dam/soi/en/web/tax/research/publications/bulletins/documents/2026/fy-2026-34.pdf",
+     "2026-11-17", 1, "NITA rate +0.25% on titled items from 2026-08-01 (Cook 1.25%, collar counties 1.00%)."),
+]
+
 LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
     ("rates", "location-rates", "General-merchandise and drug/medical sales-tax rate by municipality or county", "built",
      "il_sales_rate", "From IDOR's county/municipality file; date-aware (current vs prior period). 200 of 1,596 locations "
@@ -208,8 +274,21 @@ LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
     ("taxability", "matrix-items", "Item taxability from the PIO-101 matrix (taxable, exempt, rate)", "partial", "il_sales_item",
      "145 matrix rows loaded and matched by description; continuation text outside the matrix tables and use-based "
      "exemption certificates are not evaluated."),
-    ("taxability", "motor-vehicles", "Motor vehicle / aircraft / watercraft sales (auto rates, Form RUT-25)", "deferred", None,
-     "Auto rates are loaded in il_sales_locations but not yet answered."),
+    ("vehicles", "private-party", "Private party vehicle use tax (Form RUT-50, 2026 Tables A/B, family/estate exceptions, "
+     "motorcycles/ATVs, Chicago and Cook County local amounts)", "built", "il_vehicle_private_party",
+     "Age = title-application year minus vehicle year. Chicago/Cook amounts are from RUT-6 (R-03/24): IDOR says local rates "
+     "can change each January/July, so the answer says which edition it used. Tax year 2026 only."),
+    ("vehicles", "dealer-purchase", "Vehicle bought from a dealer (ST-556) or out-of-state retailer (RUT-25): rate by "
+     "registration address, trade-in credit, credit for tax paid elsewhere", "partial", "il_vehicle_dealer",
+     "Rates from IDOR's auto rate columns (Chicago 8.75% / other Cook 7.50% / DuPage-Kane-Lake-McHenry-Will 7.25% / Madison and "
+     "St. Clair 6.25%-6.50% / elsewhere 6.25%, from 2026-08-01), tax rounded to the dollar as the returns do. Metro-East "
+     "transit fee, off-site sales, nonresident purchases and remote-seller sourcing are stated, not computed."),
+    ("vehicles", "moving-in", "Moving into Illinois with a vehicle (RUT-25: 3-month exemption, 1.67%/month depreciation)",
+     "partial", "il_vehicle_moving_in", "Individuals only; business relocations and military home-of-record cases are stated, not computed."),
+    ("vehicles", "leases", "Vehicle leases (ST-556-LSE / RUT-25-LSE)", "deferred", None, "Not loaded."),
+    ("vehicles", "boats-aircraft", "Watercraft and aircraft (RUT-75)", "deferred", None, "Not loaded."),
+    ("vehicles", "registration-fees", "Title and registration fees (Secretary of State)", "out_of_scope", None,
+     "Not a tax administered by IDOR."),
     ("taxability", "cannabis", "Adult-use cannabis taxes", "deferred", None, "Separate cannabis rate files not loaded."),
     ("taxability", "services", "Service occupation tax / sales of services", "deferred", None, "Not loaded."),
     ("compliance", "registration-filing", "Retailer registration, ST-1 filing, remote retailers and marketplace facilitators",
@@ -217,6 +296,25 @@ LEDGER = [  # (part, line_ref, label, status, topic_key, notes)
     ("other-taxes", "local-excise", "Chicago amusement / lease / soft-drink and other local taxes outside ROT", "out_of_scope", None,
      "Administered by the city, not IDOR's sales tax."),
 ]
+
+
+def fetch_missing():
+    """The rate files are committed; the PDFs are not (the repository ignores *.pdf). Download any source file that is
+    missing from il_sales_data/ so a fresh clone can seed. A re-download is IDOR's CURRENT edition, which may be newer than
+    the one the rules in this file were verified against: re-check the figures if a file had to be fetched."""
+    import os
+    import requests
+    wanted = [(LOCATION_FILE, LOCATION_URL), (GROCERY_FILE, GROCERY_URL), (MATRIX_FILE, MATRIX_URL)]
+    wanted += [(DATA + fname, url) for _k, fname, url, _r, _n, _note in VEHICLE_SOURCES]
+    for path, url in wanted:
+        if os.path.exists(path):
+            continue
+        os.makedirs(DATA, exist_ok=True)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+        resp.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(resp.content)
+        print(f"downloaded {path} from {url} (IDOR's current edition; re-verify the figures that came from it)")
 
 
 def create():
@@ -232,6 +330,7 @@ def _insert(conn, table, cols, rows):
 
 
 def seed():
+    fetch_missing()
     locations = parse.parse_location_file(LOCATION_FILE)
     # IDOR's published file repeats one location id (Marion, Williamson County, two effective dates): keep the newest.
     by_id = {}
@@ -267,14 +366,27 @@ def seed():
                                  "ON CONFLICT (alias, item_id) DO NOTHING",
                                  (w, item_id, "curated vocabulary -> matrix row"))
                     n_alias += 1
-            for key, eff, val, desc, cite, url in PARAMS:
+            conn.execute("DELETE FROM il_vehicle_pp_table_a")
+            conn.execute("DELETE FROM il_vehicle_pp_table_b")
+            conn.execute("DELETE FROM il_vehicle_pp_local")
+            for lo, hi, tax in PP_TABLE_A:
+                conn.execute("INSERT INTO il_vehicle_pp_table_a (tax_year, age_min, age_max, tax) VALUES (%s,%s,%s,%s)",
+                             (PP_TABLE_A_YEAR, lo, hi, tax))
+            for lo, hi, tax in PP_TABLE_B:
+                conn.execute("INSERT INTO il_vehicle_pp_table_b (tax_year, price_min, price_max, tax) VALUES (%s,%s,%s,%s)",
+                             (PP_TABLE_A_YEAR, lo, hi, tax))
+            for juris, cat, lo, hi, tax in PP_LOCAL:
+                conn.execute("INSERT INTO il_vehicle_pp_local (jurisdiction, category, age_min, age_max, tax) "
+                             "VALUES (%s,%s,%s,%s,%s)", (juris, cat, lo, hi, tax))
+            for key, eff, val, desc, cite, url in PARAMS + VEHICLE_PARAMS:
                 conn.execute(
                     "INSERT INTO il_sales_params (param_key, effective_from, value, description, citation, source_url) "
                     "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (param_key, effective_from) DO UPDATE SET value=EXCLUDED.value, "
                     "description=EXCLUDED.description, citation=EXCLUDED.citation, source_url=EXCLUDED.source_url",
                     (key, eff, val, desc, cite, url))
             counts = {"locations": len(by_id), "grocery": len(grocery), "matrix": len(matrix)}
-            for key, fname, url, retrieved, note in SOURCES:
+            counts.update({k: n for k, _f, _u, _r, n, _note in VEHICLE_SOURCES})
+            for key, fname, url, retrieved, note in SOURCES + [(k, f, u, r, n_) for k, f, u, r, _n, n_ in VEHICLE_SOURCES]:
                 conn.execute(
                     "INSERT INTO il_sales_sources (source_key, file_name, url, retrieved, row_count, note) "
                     "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO UPDATE SET file_name=EXCLUDED.file_name, "
@@ -297,7 +409,7 @@ def seed():
 
 def status():
     with db.get_conn() as conn:
-        for t in ("il_sales_locations", "il_grocery_locations", "il_sales_matrix_items", "il_sales_item_aliases", "il_sales_params",
+        for t in ("il_sales_locations", "il_grocery_locations", "il_sales_matrix_items", "il_sales_item_aliases", "il_vehicle_pp_table_a", "il_vehicle_pp_table_b", "il_vehicle_pp_local", "il_sales_params",
                   "il_sales_sources", "il_sales_inventory"):
             print(t, conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
         for s, n in conn.execute("SELECT status, count(*) FROM il_sales_inventory GROUP BY status ORDER BY status"):
@@ -306,4 +418,4 @@ def status():
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    {"create": create, "seed": seed, "status": status}[cmd]()
+    {"create": create, "seed": seed, "status": status, "fetch": fetch_missing}[cmd]()

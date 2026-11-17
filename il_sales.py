@@ -58,7 +58,9 @@ _LOC_COLS = ("location_id, name, county, address_flag, effective, receipts_gm_hi
              "receipts_dm_low, receipts_flag, purchases_gm_high, purchases_dm_high, purchases_gm_low, purchases_dm_low, "
              "purchases_flag, prior_effective, prior_end, prior_receipts_gm_high, prior_receipts_dm_high, "
              "prior_receipts_gm_low, prior_receipts_dm_low, prior_receipts_flag, prior_purchases_gm_high, "
-             "prior_purchases_dm_high, prior_purchases_gm_low, prior_purchases_dm_low, prior_purchases_flag")
+             "prior_purchases_dm_high, prior_purchases_gm_low, prior_purchases_dm_low, prior_purchases_flag, "
+             "auto_high, auto_low, auto_med_fee_pct, auto_max_med_fee, auto_flag, prior_auto_high, prior_auto_low, "
+             "prior_auto_med_fee_pct, prior_auto_max_med_fee, prior_auto_flag")
 _LOC_KEYS = [c.strip() for c in _LOC_COLS.split(",")]
 
 
@@ -108,6 +110,15 @@ _COMMON_WORDS = frozenset({"NORMAL", "MASON", "HOPE", "UNION", "MARSHALL", "WARR
                            "UNITY", "PROGRESS", "PLEASANT", "SPRINGFIELD"})
 
 
+_US_STATES = frozenset({
+    "ALABAMA", "ALASKA", "ARIZONA", "ARKANSAS", "CALIFORNIA", "COLORADO", "CONNECTICUT", "DELAWARE", "FLORIDA", "GEORGIA",
+    "HAWAII", "IDAHO", "INDIANA", "IOWA", "KANSAS", "KENTUCKY", "LOUISIANA", "MAINE", "MARYLAND", "MASSACHUSETTS", "MICHIGAN",
+    "MINNESOTA", "MISSISSIPPI", "MISSOURI", "MONTANA", "NEBRASKA", "NEVADA", "NEW HAMPSHIRE", "NEW JERSEY", "NEW MEXICO",
+    "NEW YORK", "NORTH CAROLINA", "NORTH DAKOTA", "OHIO", "OKLAHOMA", "OREGON", "PENNSYLVANIA", "RHODE ISLAND",
+    "SOUTH CAROLINA", "SOUTH DAKOTA", "TENNESSEE", "TEXAS", "UTAH", "VERMONT", "VIRGINIA", "WASHINGTON", "WEST VIRGINIA",
+    "WISCONSIN", "WYOMING"})
+
+
 def find_places(question, locations, loose=False):
     """Places named in the question: [(normalized_name, [location records])]. A name counts only with a cue before it
     (in/at/for/from/near/of/to, optionally 'the city of'), or followed by COUNTY / IL / ILLINOIS, so ordinary words
@@ -126,6 +137,8 @@ def find_places(question, locations, loose=False):
                                  before)) or name.endswith(" COUNTY")
             if loose and len(name) >= 6 and name not in _COMMON_WORDS and " " not in name.strip():
                 cue = True
+            if name in _US_STATES:
+                cue = False          # a state name is the state unless it is written 'Washington, IL' / 'Washington County'
             tail = bool(re.match(r"(?:COUNTY|IL|ILLINOIS)\b", after))
             if cue or tail:
                 q = q[:m.start()] + " " * (m.end() - m.start()) + q[m.end():]
@@ -174,7 +187,9 @@ def period(rec, as_of):
             "receipts_flag": rec[p + "receipts_flag"],
             "use_gm": (rec[p + "purchases_gm_low"], rec[p + "purchases_gm_high"]),
             "use_dm": (rec[p + "purchases_dm_low"], rec[p + "purchases_dm_high"]),
-            "use_flag": rec[p + "purchases_flag"]}
+            "use_flag": rec[p + "purchases_flag"],
+            "auto": (rec[p + "auto_low"], rec[p + "auto_high"]), "auto_flag": rec[p + "auto_flag"],
+            "auto_med_fee_pct": rec[p + "auto_med_fee_pct"], "auto_max_med_fee": rec[p + "auto_max_med_fee"]}
 
 
 def prior_of(rec, as_of):

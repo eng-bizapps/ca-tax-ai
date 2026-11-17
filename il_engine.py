@@ -423,6 +423,8 @@ def _mentions_foreign(q):
 
 
 def _cr_answer(conn, question, q):
+    if re.search(r"\b(?:car|truck|vehicle|suv|van|motorcycle|atv|dealer|dealership|rut-?\d+|st-?556)\b", q):
+        return None    # a vehicle purchase is a sales/use-tax question
     if not ("schedule cr" in q or ("credit" in q and _has(
             q, "other state", "another state", "tax paid to", "taxes paid to", "paid tax to", "out-of-state", "out of state"))):
         return None
@@ -581,6 +583,8 @@ def _withholding_answer(conn, question, q):
 
 
 def _nr_answer(conn, question, q):
+    if re.search(r"\b(?:car|truck|vehicle|suv|van|motorcycle|atv|dealer|dealership|rut-?\d+|st-?556)\b", q):
+        return None    # a vehicle purchase is a sales/use-tax question
     if not (_has(q, "nonresident", "non-resident", "part-year", "part year", "schedule nr", "work in illinois",
                  "works in illinois", "commute to illinois")
             or re.search(r"\blive in (?:" + "|".join(_STATE_NAMES) + r")", q)

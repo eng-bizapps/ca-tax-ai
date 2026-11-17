@@ -188,7 +188,7 @@ for word in ("tampons", "breast pumps"):
     add("item", f"Are {word} taxable in Illinois?", "il_sales_item", "exempt")
 for word in ("ebooks", "gift cards", "newspapers", "garage sale items"):
     add("item", f"Is sales tax charged on {word} in Illinois?", "il_sales_item", "not subject to Illinois sales tax")
-add("item", "Is sales tax charged on a car in Illinois?", "il_sales_item_conditional", "RUT-25")
+add("item", "Is sales tax charged on a car in Illinois?", "il_vehicle_ask_source", "who sold it")
 add("item", "Do I pay sales tax on dry cleaning in Illinois?", "il_sales_item_conditional", "Dry cleaning",
     "not subject to sales tax")
 add("item", "Is a haircut subject to sales tax in Illinois?", "il_sales_services", "service")

@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import il_engine as ie
 import il_sales as s
+import il_vehicle_engine as veh
 
 _MATRIX_URL = "https://tax.illinois.gov/content/dam/soi/en/web/tax/research/taxinformation/sales/documents/pio-101-illinois-tax-matrix.pdf"
 _RATES_URL = "https://tax.illinois.gov/research/taxrates/sales-tax-rate-machine-readable-files.html"
@@ -208,7 +209,8 @@ def answer_sales(question, force=False):
         loose = _explicit(q) and len(q.split()) <= 10
         places = [p for p in s.find_places(question, locations, loose=loose) if p[0] != "ILLINOIS"]
         items = s.match_items(conn, question)
-        if not _signal(q, places, items, force):
+        veh_q = veh.is_vehicle_question(q) and not (_INCOME_WORDS.search(q) and not _explicit(q))
+        if not (veh_q or _signal(q, places, items, force)):
             return None
         amounts_all = ie._amounts(question)
         dates = ie._dates(question)
@@ -216,6 +218,8 @@ def answer_sales(question, force=False):
         if as_of > s.today():
             return _review("I can only give rates already in IDOR's published files, not future ones.",
                            "il_sales_unsupported_date")
+        if veh_q:
+            return veh.answer_vehicle(question, q, locations, as_of)
         year_only = re.search(r"\b(19|20)\d\d\b", question)
         if year_only and not dates and int(year_only.group(0)) < s.today().year:
             return _review("To give a rate for a past period I need the exact date, because IDOR changes rates each January "
