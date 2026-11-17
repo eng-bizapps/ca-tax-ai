@@ -241,6 +241,8 @@ for i, (wages, freq, l1, l2) in enumerate(itertools.product([500, 1200, 2500, 37
         f"Illinois withholding per paycheck?", "il_withholding", expect)
 
 # ------------------------------------------------------------------ informational
+add("info", "What is the sales tax in Chicago?", "il_sales_rate", "Chicago (Cook County)")
+add("info", "What is the Illinois sales tax rate on groceries?", "il_sales_item", "ended January 1, 2026")
 add("info", "What is the Illinois income tax rate?", "il_rate", "4.95%")
 add("info", "What is the Illinois income tax rate for 2026?", "il_rate", "4.95%")
 add("info", "What is the Illinois exemption allowance?", "il_exemption", "$2,850.00 per exemption")
@@ -319,8 +321,6 @@ for question, category, expect in WILD:
 NEGATIVE = [
     "What is the weather in Chicago?",
     "Is a wedding video taxable?",
-    "What is the sales tax in Chicago?",
-    "What is the Illinois sales tax rate on groceries?",
     "How do I register for Illinois unemployment insurance as an employer?",
     "What is Illinois property tax on a $400,000 home in Cook County?",
     "Tell me a joke",

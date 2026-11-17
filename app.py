@@ -28,6 +28,9 @@ IL_EXAMPLES = [
     "I paid $6,000 in property tax on my home. What is my Illinois property tax credit?",
     "My federal EITC is $2,000. What is my Illinois EITC?",
     "What is my Illinois use tax if my AGI is $45,000?",
+    "How much sales tax on a $500 couch in Chicago?",
+    "Is candy taxable in Illinois?",
+    "How much sales tax on $100 of groceries in Chicago?",
 ]
 
 

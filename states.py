@@ -27,8 +27,8 @@ STATES = {
     },
     "IL": {
         "name": "Illinois",
-        "domains": {"income"},
-        "db_env": {"income": "IL_REVENUE_DATABASE_URL"},
+        "domains": {"income", "sales"},
+        "db_env": {"income": "IL_REVENUE_DATABASE_URL", "sales": "IL_SALES_DATABASE_URL"},
         "engine": "il_engine",
         "aliases": ("idor", "il-1040", "il 1040", "ides", "il-w-4"),
     },

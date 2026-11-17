@@ -21,7 +21,8 @@ _AMOUNT_RE = re.compile(
     r"\$\s*([0-9](?:[0-9,]*[0-9])?(?:\.\d+)?)\s*(k\b)?"                      # $60,000  $60k
     r"|(?<![\d,.])([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)"                       # 60,000
     r"|(?<![\w$.,/-])(\d+(?:\.\d+)?)\s*k\b"                                    # 60k
-    r"|(?<![\w$.,/-])(\d{4,9})(?![\d/,]|\.\d|-\d)")                            # 60000
+    r"|(?<![\w$.,/-])(\d{4,9})(?![\d/,]|\.\d|-\d)"                             # 60000
+    r"|(?<![\w$.,/-])(\d+(?:\.\d+)?)\s*(?:dollars?|bucks)\b")                       # 250 dollars
 _NOT_AMOUNTS = frozenset(range(2020, 2031)) | {1040, 2210, 1099}              # tax years, form numbers
 _NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 _STATUS_LABELS = {"single": "single", "mfj": "married filing jointly", "mfs": "married filing separately",
@@ -50,7 +51,7 @@ def _fmt(x):
 def _amounts(question):
     out = []
     for m in _AMOUNT_RE.finditer(question):
-        raw = m.group(1) or m.group(3) or m.group(4) or m.group(5)
+        raw = m.group(1) or m.group(3) or m.group(4) or m.group(5) or m.group(6)
         v = float(raw.replace(",", ""))
         if m.group(2) or m.group(4):
             v *= 1000
@@ -132,9 +133,9 @@ def _unsupported_year(year):
 
 # ---------------------------------------------------------------- out of scope
 _NOT_COVERED = (
-    ("sales tax", "sales and use tax"), ("payroll tax", "employer payroll tax"), ("unemployment insurance", "employer payroll tax"),
+    ("payroll tax", "employer payroll tax"), ("unemployment insurance", "employer payroll tax"),
     ("ides", "employer payroll tax"), ("withholding", "employer payroll tax"), ("property tax bill", "property tax"),
-    ("assessed value", "property tax"), ("tax rate in chicago", "sales and use tax"),
+    ("assessed value", "property tax"),
 )
 
 
@@ -153,6 +154,8 @@ def _not_covered_answer(question, q):
 def _use_tax_answer(conn, question, q):
     if "use tax" not in q:
         return None
+    if not _has(q, "agi", "adjusted gross", "income", "il-1040", "tax return", "line 21"):
+        return None    # a purchase-based use-tax question: handled by the sales domain
     found, unassigned = _roles(question)
     agi = found.get("income") or (unassigned[0] if unassigned else None)
     if agi is None:
@@ -830,13 +833,23 @@ def _penalty_answer(conn, question, q):
                    citation="IDOR 2025 Form IL-2210, Steps 2-4", source_url=_IL2210_URL)
 
 
+def _sales_answer(conn, question, q):
+    import il_sales_engine
+    return il_sales_engine.answer_sales(question)
+
+
 def answer_state(question, tax_type=None):
     q = question.lower()
+    if tax_type == "sales":
+        import il_sales_engine
+        forced = il_sales_engine.answer_sales(question, force=True)
+        if forced:
+            return forced
     refusal = _not_covered_answer(question, q)
     if refusal:
         return refusal
     with il_db.get_conn() as conn:
-        for fn in (_penalty_answer, _withholding_answer, _cr_answer, _nr_answer, _use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _exemption_answer,
+        for fn in (_penalty_answer, _withholding_answer, _cr_answer, _nr_answer, _use_tax_answer, _eitc_answer, _k12_answer, _property_credit_answer, _sales_answer, _exemption_answer,
                    _rate_answer):
             result = fn(conn, question, q)
             if result:
@@ -847,6 +860,6 @@ def answer_state(question, tax_type=None):
         result = _compute_answer(conn, question, q)
         if result:
             return result
-    return _review("I don't have a verified Illinois income-tax answer for that yet. Illinois currently covers: the flat "
-                   "income tax computation, exemptions, the property tax and K-12 credits, the Illinois EITC and Child "
-                   "Tax Credit, and use tax.", "il_no_answer")
+    return _review("I don't have a verified Illinois answer for that yet. Illinois currently covers: income tax (the flat "
+                   "tax computation, exemptions, credits, penalties, withholding) and sales and use tax (rates by city, "
+                   "item taxability, groceries, use tax).", "il_no_answer")

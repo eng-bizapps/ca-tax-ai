@@ -113,7 +113,7 @@ CASES = [
      "il_withholding", "$0.00"),
     ("What is my Illinois withholding per paycheck?", "il_withholding_missing", "I need the pay amount"),
     # other domains are refused, not answered
-    ("What is the sales tax in Chicago?", "domain_not_covered", "not covered yet"),
+    ("What is the sales tax in Chicago?", "il_sales_rate", "Chicago (Cook County)"),
     ("How do I register for Illinois unemployment insurance as an employer?", "domain_not_covered", "not covered yet"),
 ]
 
